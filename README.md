@@ -1,14 +1,37 @@
-# DeepTide
+<p align="center">
+  <img src="./assets/logo.svg" alt="DeepTide logo" width="200">
+</p>
 
-A modern AI coding agent. Two flavors, same team.
+<h1 align="center">DeepTide</h1>
 
-- **DeepTide for macOS** — native Mac app with a tuned GUI.
-- **DeepTide CLI** — cross-platform terminal version, powered by the
-  open-source [Zero CLI](https://github.com/a8e-ai/zero-cli). Available
-  as `deeptide` or `tide` from any shell on Linux, Windows, and macOS.
+<p align="center">
+  <strong>Built by DeepSeek, for DeepSeek.</strong><br>
+  An AI coding agent that flows through your codebase like a tide.
+  <br><sub>The name: <strong>DeepSeek</strong> + <strong>tide</strong> (terminal IDE).</sub>
+</p>
 
-This repository is the community front door for both: docs, FAQ, issue
-tracking, and the npm redirect package that ships the CLI.
+<p align="center">
+  <a href="https://github.com/paean-ai/deeptide/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://www.npmjs.com/package/deeptide"><img src="https://img.shields.io/npm/v/deeptide.svg" alt="npm version"></a>
+  <a href="https://github.com/paean-ai/deeptide/stargazers"><img src="https://img.shields.io/github/stars/paean-ai/deeptide?style=social" alt="GitHub stars"></a>
+</p>
+
+---
+
+## Two flavors, same team
+
+| | DeepTide for macOS | DeepTide CLI |
+|---|---|---|
+| **Form factor** | Native macOS app | Cross-platform terminal CLI |
+| **Runtime** | Swift 6 native binary, ~15 MB idle | Bun, ~50 MB resident |
+| **Platforms** | macOS 15+ | Linux · Windows · macOS |
+| **Install** | Build from [paean-ai/deeptide](https://github.com/paean-ai/deeptide) | `npm i -g deeptide` (this package) |
+| **Lineage** | 100% authored by DeepSeek V4 | Powered by open-source [Zero CLI](https://github.com/a8e-ai/zero-cli) |
+| **Best for** | macOS users who want a tuned native experience | Linux/Windows users, CI, SSH sessions, headless boxes |
+
+This repository is the **community front door for both** — docs, FAQ, issue
+tracking — and is the home of the npm `deeptide` package that ships the
+cross-platform CLI.
 
 ---
 
@@ -30,50 +53,92 @@ npm install -g deeptide
 pnpm add -g deeptide
 ```
 
-Then:
+Two commands are installed; pick whichever your fingers prefer:
 
 ```bash
-tide                          # interactive REPL
-deeptide                      # same thing
+tide                          # interactive REPL (preferred — short)
+deeptide                      # same thing, full name
 tide -p "explain this repo"   # one-shot mode
 tide --help                   # all options
 ```
 
-`deeptide` and `tide` are both available after install. Pick whichever
-your fingers prefer.
-
 ## Install (macOS native app)
 
-The macOS native app is distributed separately. See
-[Releases](https://github.com/paean-ai/deeptide/releases) (or the
-project homepage when announced) for the latest build.
+The macOS native build is open source at
+[paean-ai/deeptide](https://github.com/paean-ai/deeptide) (Swift). Build
+from source via:
+
+```bash
+git clone https://github.com/paean-ai/deeptide.git
+cd deeptide && ./scripts/release.sh --install
+```
+
+Pre-built `.app` releases will be announced on
+[Releases](https://github.com/paean-ai/deeptide/releases) when ready.
+
+---
 
 ## Quick start (CLI)
 
-The CLI talks to Anthropic-protocol-compatible LLM APIs. The fastest
-path on first run:
+DeepTide CLI talks to the **DeepSeek API** by default (matching the
+DeepTide native app), and can also drive any Anthropic-protocol-compatible
+endpoint via BYOK — Zhipu GLM, Volcengine, Paean, Qwen, Moonshot,
+self-hosted gateways, and so on.
 
 ```bash
-tide login                    # browser-based OAuth (Paean AI default)
-tide                          # start an interactive session
+# Default path — DeepSeek
+export DEEPSEEK_API_KEY="sk-..."
+tide
+
+# BYOK to another provider
+tide --base-url https://open.bigmodel.cn/api/anthropic --api-key <GLM_KEY>
+
+# One-shot, non-interactive
+tide -p "Explain the auth middleware"
 ```
 
-For BYOK (bring-your-own-key) flows and other providers (DeepSeek, Zhipu
-GLM, Volcengine, etc.), see the [Zero CLI README](https://github.com/a8e-ai/zero-cli#readme),
-which is the upstream and authoritative configuration reference.
+For the full configuration surface (settings.json schema, hooks,
+permissions, MCP servers, sub-agents, model aliases) see the upstream
+[Zero CLI README](https://github.com/a8e-ai/zero-cli#readme), which is
+the authoritative reference.
+
+---
+
+## Built-in capabilities
+
+DeepTide is an **agentic** coding assistant — the model plans, calls
+tools, observes results, and adapts. Out of the box:
+
+- **Multi-turn agentic loop** — plan → tool → observe → adapt
+- **Streaming responses** — see the model think and act in real time
+- **30+ built-in tools** — file I/O, shell, web, tasks, MCP, scheduling, sub-agents
+- **25+ slash commands** — `/status`, `/cost`, `/diff`, `/init`, `/permission`, `/hooks`, …
+- **Permission modes** — default · accept-edits · plan · bypass
+- **Hooks engine** — pre/post tool, user-prompt, session, compaction shell hooks
+- **Memory system** — persistent project memory across sessions
+- **Sub-agents from markdown** — define custom agents in your project
+- **Plan mode** — design before you code, get approval before execution
+
+The tool catalog, slash command set, hook event names, and model
+aliases are kept aligned with the macOS native DeepTide app via the
+[`tide-spec`](https://github.com/a8e-ai/zero-cli/blob/main/docs/tide-spec.md)
+shared interface contract — your hooks and muscle memory port between
+the two.
+
+---
 
 ## Documentation
 
-- [Shared interface contract (`tide-spec`)](https://github.com/a8e-ai/zero-cli/blob/main/docs/tide-spec.md)
-  — tool catalog, slash commands, CLI flags, hook env vars, model
-  aliases. Both DeepTide for macOS and the CLI conform to this.
-- [Zero CLI docs](https://github.com/a8e-ai/zero-cli/tree/main/docs)
-  — comprehensive reference for the CLI engine.
+- [`tide-spec`](https://github.com/a8e-ai/zero-cli/blob/main/docs/tide-spec.md) — shared interface contract: tool catalog, slash commands, CLI flags, hook env vars, model aliases.
+- [Zero CLI docs](https://github.com/a8e-ai/zero-cli/tree/main/docs) — comprehensive reference for the CLI engine.
+- [DeepTide native source](https://github.com/paean-ai/deeptide) — Swift codebase for the macOS app.
+
+---
 
 ## Reporting issues
 
-Please use the [issue tracker](https://github.com/paean-ai/deeptide/issues).
-The new-issue form will route you to the right template:
+Open an [issue](https://github.com/paean-ai/deeptide/issues). The new-
+issue form will route you to the right template:
 
 - **CLI bug or feature** — typically forwarded to
   [`a8e-ai/zero-cli`](https://github.com/a8e-ai/zero-cli) where the CLI
@@ -81,12 +146,15 @@ The new-issue form will route you to the right template:
 - **macOS native app** — report here. Please **redact** any sensitive
   paths, file names, or model output before pasting logs.
 - **Documentation, install, or general questions** — start here.
+- **Security vulnerabilities** — use [private vulnerability reporting](https://github.com/paean-ai/deeptide/security/advisories/new), not public issues.
 
 ⚠️ **Privacy reminder:** crash logs and console output may contain
 project paths, file names, environment variable values, or model
 output. Review before pasting into a public issue. If a report
 genuinely needs sensitive data, contact the maintainers privately
 instead.
+
+---
 
 ## About this npm package
 
@@ -95,12 +163,19 @@ The `deeptide` npm package is an intentionally thin redirect to
 which contains all CLI source code. We publish under both names so users
 can install whichever feels natural; both resolve to the same binary
 with the DeepTide brand surface. There is exactly one source of truth
-([a8e-ai/zero-cli](https://github.com/a8e-ai/zero-cli)) — no duplicated
-implementation.
+([`a8e-ai/zero-cli`](https://github.com/a8e-ai/zero-cli)) — no
+duplicated implementation.
 
 ## License
 
-MIT. See [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
+MIT — see [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
 
 DeepTide is an independent project and is not affiliated with,
-endorsed by, or sponsored by Anthropic, Inc.
+endorsed by, or sponsored by Anthropic, Inc. or DeepSeek (Hangzhou)
+AI Co., Ltd.
+
+---
+
+<p align="center">
+  <sub>Built with 🐳 by <a href="https://a8e.ai">a8e</a> — for DeepSeek, on every platform.</sub>
+</p>

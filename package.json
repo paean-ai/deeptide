@@ -14,7 +14,8 @@
     "bin.js",
     "README.md",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "assets/logo.svg"
   ],
   "engines": {
     "node": ">=18.0.0"

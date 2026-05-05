@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!--
+    DeepTide logo — simplified for dual-use as README mark and app icon.
+    Derived from the native deeptide app's full logo (paean-ai/deeptide
+    assets/logo.svg). Animations, filter effects, secondary wave layers,
+    and the terminal cursor box are intentionally dropped so the silhouette
+    stays legible at icon sizes (32×32 and below).
+  -->
+  <defs>
+    <linearGradient id="tideGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0EA5E9"/>
+      <stop offset="50%" stop-color="#06B6D4"/>
+      <stop offset="100%" stop-color="#10B981"/>
+    </linearGradient>
+    <linearGradient id="whaleGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0369A1"/>
+      <stop offset="100%" stop-color="#075985"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background disc -->
+  <circle cx="256" cy="256" r="240" fill="#0F172A" stroke="url(#tideGrad)" stroke-width="6"/>
+
+  <!-- Single bold tide wave -->
+  <path d="M40 380 Q120 320 200 360 Q280 400 360 350 Q420 310 472 350"
+        stroke="url(#tideGrad)" stroke-width="16" fill="none" stroke-linecap="round"/>
+
+  <!-- Whale -->
+  <g>
+    <!-- Body -->
+    <ellipse cx="250" cy="225" rx="125" ry="78" fill="url(#whaleGrad)"/>
+    <!-- Belly highlight (subtle volume) -->
+    <ellipse cx="250" cy="250" rx="92" ry="42" fill="#0E7490" opacity="0.55"/>
+    <!-- Tail flukes (combined into one cleaner shape) -->
+    <path d="M135 195 Q85 170 55 130 Q70 175 105 200 Q70 200 55 230 Q85 270 135 250 Z"
+          fill="url(#whaleGrad)"/>
+    <!-- Dorsal fin -->
+    <path d="M280 152 Q300 102 320 88 Q310 118 312 152 Z" fill="url(#whaleGrad)"/>
+    <!-- Eye -->
+    <circle cx="310" cy="210" r="9" fill="#E0F2FE"/>
+    <circle cx="312" cy="210" r="4.5" fill="#0F172A"/>
+  </g>
+</svg>
