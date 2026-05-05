@@ -1,6 +1,6 @@
 {
   "name": "deeptide",
-  "version": "0.11.7",
+  "version": "0.11.8",
   "description": "DeepTide CLI — cross-platform terminal AI coding agent. Thin redirect to @paean-ai/zero-cli; installs `deeptide` and `tide` commands.",
   "type": "module",
   "bin": {
