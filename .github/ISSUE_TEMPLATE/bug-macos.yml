@@ -1,0 +1,66 @@
+name: Bug — DeepTide for macOS (native app)
+description: A bug in the macOS native DeepTide application.
+title: "[macOS] "
+labels: ["bug", "macos-app"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        ⚠️ **Privacy reminder before posting:**
+        Crash logs and console output frequently contain:
+        - Full file paths revealing your username (e.g. `/Users/yourname/...`)
+        - Project names, file names, or document contents
+        - Environment variable values (potentially including API keys)
+        - Model outputs that may include private data you typed
+
+        Please redact anything sensitive before pasting. If a useful report
+        truly requires sensitive data, **stop and use the
+        [private security advisory flow](https://github.com/paean-ai/deeptide/security/advisories/new)
+        instead** — even if it's not strictly a security issue, that channel
+        is private.
+  - type: input
+    id: version
+    attributes:
+      label: DeepTide version
+      description: Found in DeepTide → About menu (or the app's settings).
+      placeholder: "e.g. 0.4.5"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "e.g. macOS 14.5 (Sonoma)"
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      placeholder: "Apple Silicon M2 / Intel"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Steps to reproduce, expected vs actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpts (redacted)
+      description: Optional. Paste a few relevant lines, not entire log files. Redact paths, file names, and environment values.
+      render: text
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I have redacted file paths revealing my username, sensitive file/project names, environment values, and any model output containing private data.
+          required: true
+        - label: I have removed any API keys, tokens, or other credentials.
+          required: true

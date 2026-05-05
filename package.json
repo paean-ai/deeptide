@@ -1,0 +1,44 @@
+{
+  "name": "deeptide",
+  "version": "0.11.6",
+  "description": "DeepTide CLI — cross-platform terminal AI coding agent. Thin redirect to @paean-ai/zero-cli; installs `deeptide` and `tide` commands.",
+  "type": "module",
+  "bin": {
+    "deeptide": "./bin.js",
+    "tide": "./bin.js"
+  },
+  "dependencies": {
+    "@paean-ai/zero-cli": "^0.11.6"
+  },
+  "files": [
+    "bin.js",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paean-ai/deeptide.git"
+  },
+  "homepage": "https://github.com/paean-ai/deeptide",
+  "bugs": {
+    "url": "https://github.com/paean-ai/deeptide/issues"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "coding-agent",
+    "agent",
+    "terminal",
+    "deeptide",
+    "tide",
+    "zero-cli",
+    "anthropic-protocol",
+    "deepseek"
+  ],
+  "author": "a8e",
+  "license": "MIT"
+}

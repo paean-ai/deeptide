@@ -1,0 +1,57 @@
+name: Bug — DeepTide CLI / `tide` command
+description: A bug in the cross-platform CLI (`deeptide` / `tide` / `zero` commands).
+title: "[CLI] "
+labels: ["bug", "cli"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! The CLI source lives in
+        [`a8e-ai/zero-cli`](https://github.com/a8e-ai/zero-cli) — a maintainer
+        may transfer this issue there for triage. That's normal.
+
+        ⚠️ **Before posting:** redact API keys, OAuth tokens, file contents,
+        full file paths revealing your username, and any model output that
+        contains private data. Public issues are indexed by search engines.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `tide --version` (or `deeptide --version`).
+      placeholder: "0.11.6 (DeepTide CLI) / tide-spec 0.1"
+    validations:
+      required: true
+  - type: input
+    id: install-method
+    attributes:
+      label: How you installed
+      placeholder: "npm i -g deeptide / bun add -g deeptide / npm i -g @paean-ai/zero-cli"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / shell
+      placeholder: "macOS 14.5, zsh / Ubuntu 22.04, bash / Windows 11, PowerShell"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Steps to reproduce, expected vs actual behavior. Redact sensitive content.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Optional. Paste any error messages or `--debug` output (redacted).
+      render: shell
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have removed any API keys, tokens, or other credentials from this report.
+          required: true

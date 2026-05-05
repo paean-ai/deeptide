@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/paean-ai/deeptide/security/advisories/new
+    about: Please report security issues privately via GitHub Security Advisories — do not open a public issue.
+  - name: Zero CLI repository (CLI source code)
+    url: https://github.com/a8e-ai/zero-cli/issues
+    about: The CLI itself lives in zero-cli. If you're sure your bug is in CLI behavior, you can also report there directly.
+  - name: Read the docs first
+    url: https://github.com/paean-ai/deeptide#readme
+    about: Install instructions, FAQ, and links to the shared tide-spec.

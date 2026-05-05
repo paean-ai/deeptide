@@ -1,0 +1,87 @@
+name: Publish redirect package
+
+# Manual trigger after each @paean-ai/zero-cli release. Bumps this
+# package's version + dependency to match the upstream version (or one
+# the operator specifies), commits, and publishes to npm.
+#
+# Required secret: NPM_TOKEN (npm "Automation" token, scoped to this
+# package only).
+
+on:
+  workflow_dispatch:
+    inputs:
+      zero_cli_version:
+        description: "Target @paean-ai/zero-cli version (e.g. 0.11.7). Leave blank for the latest published version."
+        required: false
+        type: string
+      dry_run:
+        description: "Skip the actual npm publish step (still bumps + commits)."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write   # for committing the bumped version back to main
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+
+      - name: Resolve target version
+        id: ver
+        run: |
+          set -eu
+          v="${{ inputs.zero_cli_version }}"
+          if [ -z "$v" ]; then
+            v=$(npm view @paean-ai/zero-cli version)
+          fi
+          if [ -z "$v" ]; then
+            echo "Could not resolve a target version" >&2
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Target version: $v"
+
+      - name: Bump package version + dependency pin
+        run: |
+          set -eu
+          v="${{ steps.ver.outputs.version }}"
+          npm pkg set version="$v"
+          npm pkg set dependencies.@paean-ai/zero-cli="^$v"
+          # Show the result so it's visible in the run log.
+          npm pkg get version dependencies
+
+      - name: Commit version bump
+        run: |
+          set -eu
+          v="${{ steps.ver.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Skip if nothing changed (e.g. workflow re-run on same version).
+          if git diff --quiet package.json; then
+            echo "No version change to commit."
+          else
+            git add package.json
+            git commit -m "chore: bump to $v (track @paean-ai/zero-cli)"
+            git push
+          fi
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "Dry run — npm publish skipped."
+          echo "Tarball that would be published:"
+          npm pack --dry-run

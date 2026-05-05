@@ -1,0 +1,25 @@
+name: Question / help
+description: Install help, configuration, or general usage question.
+title: "[Question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening: please skim the
+        [README](https://github.com/paean-ai/deeptide#readme) and the
+        upstream [Zero CLI README](https://github.com/a8e-ai/zero-cli#readme).
+        Most install/config questions are answered there.
+
+        ⚠️ Don't paste API keys, tokens, or sensitive content.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What you tried, what you saw, what you expected.

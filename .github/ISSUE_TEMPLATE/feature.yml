@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest a new feature or enhancement.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface?
+      options:
+        - DeepTide CLI (cross-platform)
+        - DeepTide for macOS (native app)
+        - Both
+        - Documentation / website
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the user pain. Stories beat specs ("I'm trying to X, but currently I have to Y").
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed direction (optional)
+      description: A rough sketch is fine — concrete API/UX is not required.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered (optional)

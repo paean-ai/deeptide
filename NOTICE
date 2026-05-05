@@ -1,0 +1,13 @@
+DeepTide CLI (npm package "deeptide")
+Copyright (c) 2025-2026 a8e
+
+This npm package is a thin redirect: it re-exports the `tide` CLI surface
+from the open-source @paean-ai/zero-cli package. All CLI source lives
+upstream in @paean-ai/zero-cli.
+
+Upstream attribution: see the LICENSE and NOTICE shipped with
+@paean-ai/zero-cli (https://github.com/a8e-ai/zero-cli), which is itself
+derived from Anthropic's Claude Code under the MIT License.
+
+DeepTide is an independent project and is not affiliated with, endorsed
+by, or sponsored by Anthropic, Inc.
