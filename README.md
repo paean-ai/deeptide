@@ -14,12 +14,17 @@ tracking, and the npm redirect package that ships the CLI.
 
 ## Install (CLI)
 
-```bash
-# npm
-npm install -g deeptide
+> **Prerequisite:** [Bun](https://bun.com/) must be installed and on
+> PATH. The CLI runtime requires it (matches the underlying
+> [Zero CLI](https://github.com/a8e-ai/zero-cli)). Bun does not
+> replace your Node install — it sits alongside.
 
-# bun
+```bash
+# bun (recommended, fastest install)
 bun add -g deeptide
+
+# npm (works too; bun is still required at runtime)
+npm install -g deeptide
 
 # pnpm
 pnpm add -g deeptide
