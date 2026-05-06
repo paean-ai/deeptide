@@ -1,20 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Background -->
-  <rect width="1024" height="1024" fill="#000000"/>
+  <!-- Squircle background (rx=224 ≈ iOS 22% standard) -->
+  <rect width="1024" height="1024" rx="224" fill="#000000"/>
 
   <!-- Outer Circle Ring -->
   <circle cx="512" cy="512" r="370" stroke="#FFFFFF" stroke-width="28" fill="none"/>
 
-  <!-- Depth tide arcs — 3 downward-opening semicircles, sonar/tidal depth layers -->
-  <!-- All arcs share center x=512, y=460; radii 80 / 155 / 230 (75px steps) -->
+  <!-- Three wave crests — upward-bowing arcs, widening with depth -->
 
-  <!-- Arc 1 (innermost) r=80 -->
-  <path d="M 432 460 A 80 80 0 0 1 592 460" stroke="#3DD8EB" stroke-width="28" stroke-linecap="round" fill="none"/>
+  <!-- Wave 1 (top, narrowest)  w=260  bow=45 -->
+  <path d="M 382 460 A 130 45 0 0 0 642 460"
+        stroke="#3DD8EB" stroke-width="28" stroke-linecap="round" fill="none"/>
 
-  <!-- Arc 2 (middle) r=155 -->
-  <path d="M 357 460 A 155 155 0 0 1 667 460" stroke="#3DD8EB" stroke-width="28" stroke-linecap="round" fill="none"/>
+  <!-- Wave 2 (middle)          w=350  bow=50 -->
+  <path d="M 337 535 A 175 50 0 0 0 687 535"
+        stroke="#3DD8EB" stroke-width="28" stroke-linecap="round" fill="none"/>
 
-  <!-- Arc 3 (outermost) r=230 -->
-  <path d="M 282 460 A 230 230 0 0 1 742 460" stroke="#3DD8EB" stroke-width="28" stroke-linecap="round" fill="none"/>
+  <!-- Wave 3 (bottom, widest)  w=440  bow=55 -->
+  <path d="M 292 610 A 220 55 0 0 0 732 610"
+        stroke="#3DD8EB" stroke-width="28" stroke-linecap="round" fill="none"/>
 </svg>
