@@ -1,43 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
-  <!--
-    DeepTide logo — simplified for dual-use as README mark and app icon.
-    Derived from the native deeptide app's full logo (paean-ai/deeptide
-    assets/logo.svg). Animations, filter effects, secondary wave layers,
-    and the terminal cursor box are intentionally dropped so the silhouette
-    stays legible at icon sizes (32×32 and below).
-  -->
-  <defs>
-    <linearGradient id="tideGrad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0EA5E9"/>
-      <stop offset="50%" stop-color="#06B6D4"/>
-      <stop offset="100%" stop-color="#10B981"/>
-    </linearGradient>
-    <linearGradient id="whaleGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#0369A1"/>
-      <stop offset="100%" stop-color="#075985"/>
-    </linearGradient>
-  </defs>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1024" height="1024" fill="#000000"/>
 
-  <!-- Background disc -->
-  <circle cx="256" cy="256" r="240" fill="#0F172A" stroke="url(#tideGrad)" stroke-width="6"/>
+  <!-- Outer Circle Ring -->
+  <circle cx="512" cy="512" r="370" stroke="#FFFFFF" stroke-width="28" fill="none"/>
 
-  <!-- Single bold tide wave -->
-  <path d="M40 380 Q120 320 200 360 Q280 400 360 350 Q420 310 472 350"
-        stroke="url(#tideGrad)" stroke-width="16" fill="none" stroke-linecap="round"/>
+  <!-- Depth tide arcs — 3 downward-opening semicircles, sonar/tidal depth layers -->
+  <!-- All arcs share center x=512, y=460; radii 80 / 155 / 230 (75px steps) -->
 
-  <!-- Whale -->
-  <g>
-    <!-- Body -->
-    <ellipse cx="250" cy="225" rx="125" ry="78" fill="url(#whaleGrad)"/>
-    <!-- Belly highlight (subtle volume) -->
-    <ellipse cx="250" cy="250" rx="92" ry="42" fill="#0E7490" opacity="0.55"/>
-    <!-- Tail flukes (combined into one cleaner shape) -->
-    <path d="M135 195 Q85 170 55 130 Q70 175 105 200 Q70 200 55 230 Q85 270 135 250 Z"
-          fill="url(#whaleGrad)"/>
-    <!-- Dorsal fin -->
-    <path d="M280 152 Q300 102 320 88 Q310 118 312 152 Z" fill="url(#whaleGrad)"/>
-    <!-- Eye -->
-    <circle cx="310" cy="210" r="9" fill="#E0F2FE"/>
-    <circle cx="312" cy="210" r="4.5" fill="#0F172A"/>
-  </g>
+  <!-- Arc 1 (innermost) r=80 -->
+  <path d="M 432 460 A 80 80 0 0 1 592 460" stroke="#3DD8EB" stroke-width="28" stroke-linecap="round" fill="none"/>
+
+  <!-- Arc 2 (middle) r=155 -->
+  <path d="M 357 460 A 155 155 0 0 1 667 460" stroke="#3DD8EB" stroke-width="28" stroke-linecap="round" fill="none"/>
+
+  <!-- Arc 3 (outermost) r=230 -->
+  <path d="M 282 460 A 230 230 0 0 1 742 460" stroke="#3DD8EB" stroke-width="28" stroke-linecap="round" fill="none"/>
 </svg>
