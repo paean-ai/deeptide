@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Canvas Tower Defense</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main id="shell">
+    <canvas id="game" width="960" height="540"></canvas>
+    <section class="hud">
+      <b>TOWER DEFENSE</b>
+      <span>Gold <strong id="gold">120</strong></span>
+      <span>Lives <strong id="lives">20</strong></span>
+      <span>Wave <strong id="wave">1</strong></span>
+      <span>Score <strong id="score">0</strong></span>
+      <span>Tower <strong id="tower-type">Arrow</strong></span>
+      <button id="start">Start Wave</button>
+    </section>
+    <section class="tower-menu">
+      <button class="active" data-tower="arrow">Arrow <small>55g</small></button>
+      <button data-tower="cannon">Cannon <small>85g</small></button>
+      <button data-tower="frost">Frost <small>75g</small></button>
+      <button id="upgrade">Upgrade</button>
+      <button id="sell">Sell</button>
+    </section>
+    <section id="log" class="log"></section>
+  </main>
+  <script src="js/game.js"></script>
+</body>
+</html>

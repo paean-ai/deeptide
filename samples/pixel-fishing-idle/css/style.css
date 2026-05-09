@@ -42,6 +42,7 @@ canvas {
 
 #hud,
 #controls,
+#book,
 #log {
   position: absolute;
   left: max(10px, env(safe-area-inset-left));
@@ -71,9 +72,9 @@ canvas {
 #hud strong { color: var(--gold); }
 
 #controls {
-  bottom: max(78px, calc(env(safe-area-inset-bottom) + 74px));
+  bottom: max(112px, calc(env(safe-area-inset-bottom) + 108px));
   display: grid;
-  grid-template-columns: 1.6fr 1fr 1fr 1fr;
+  grid-template-columns: 1.5fr repeat(5, 1fr);
   gap: 8px;
 }
 
@@ -97,6 +98,24 @@ button:disabled {
 }
 
 #cast { background: var(--gold); border-color: #ffe197; }
+
+#book {
+  bottom: max(72px, calc(env(safe-area-inset-bottom) + 68px));
+  min-height: 30px;
+  display: flex;
+  gap: 6px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+#book span {
+  padding: 6px 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+}
 
 #log {
   bottom: max(10px, env(safe-area-inset-bottom));
@@ -122,8 +141,9 @@ button:disabled {
     border-radius: 0;
   }
   #controls {
-    grid-template-columns: 1fr 1fr;
-    bottom: max(76px, calc(env(safe-area-inset-bottom) + 72px));
+    grid-template-columns: 1fr 1fr 1fr;
+    bottom: max(108px, calc(env(safe-area-inset-bottom) + 104px));
   }
   button { min-height: 44px; }
+  #book { bottom: max(70px, calc(env(safe-area-inset-bottom) + 66px)); }
 }

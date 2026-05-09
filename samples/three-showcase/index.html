@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Three.js Sample Showcase</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>THREE SHOWCASE</h1>
+        <p>Three polished static examples sharing one vendored Three.js module.</p>
+      </div>
+
+      <nav id="nav">
+        <button class="active" data-src="examples/neon-orbits/index.html" data-title="Neon Orbits" data-copy="Emissive orbital sculpture with particles and drag controls.">
+          <span>01</span>
+          Neon Orbits
+        </button>
+        <button data-src="examples/lowpoly-island/index.html" data-title="Lowpoly Island" data-copy="Procedural island scene with buildings, boats, fog, and shadows.">
+          <span>02</span>
+          Lowpoly Island
+        </button>
+        <button data-src="examples/product-configurator/index.html" data-title="Product Configurator" data-copy="Premium product stage with material finish controls.">
+          <span>03</span>
+          Product Configurator
+        </button>
+      </nav>
+
+      <section class="meta">
+        <h2 id="sample-title">Neon Orbits</h2>
+        <p id="sample-copy">Emissive orbital sculpture with particles and drag controls.</p>
+        <a id="open-link" href="examples/neon-orbits/index.html" target="_blank" rel="noreferrer">Open full page</a>
+      </section>
+    </aside>
+
+    <section class="stage">
+      <iframe id="preview" title="Three.js sample preview" src="examples/neon-orbits/index.html"></iframe>
+    </section>
+  </main>
+
+  <script src="js/main.js"></script>
+</body>
+</html>

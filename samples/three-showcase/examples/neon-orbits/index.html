@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Three Neon Orbits</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main id="app">
+    <canvas id="scene"></canvas>
+    <section class="hud">
+      <div>
+        <h1>NEON ORBITS</h1>
+        <p>Drag to orbit · scroll to zoom · tap planets to pulse</p>
+      </div>
+      <button id="toggle">Pause</button>
+    </section>
+    <section class="readout">
+      <span>Systems <b>7</b></span>
+      <span>Particles <b id="particles">0</b></span>
+      <span>Bloom-style glow <b>CSS + emissive</b></span>
+    </section>
+  </main>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

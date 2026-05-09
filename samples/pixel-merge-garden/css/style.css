@@ -119,7 +119,7 @@ h1 {
 
 footer {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
 }
 
@@ -141,11 +141,44 @@ button:disabled {
 }
 
 #collect { background: var(--gold); border-color: #ffe197; }
+#water { background: #64c7ff; border-color: #b4efff; }
 #reset { color: var(--text); background: #263243; border-color: #526177; }
+
+.pin {
+  position: absolute;
+  left: 5px;
+  top: 4px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  color: #07100b;
+  background: var(--gold);
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.cell.silver { border-color: #c9d7e8; }
+.cell.gold { border-color: #f4c85a; }
+
+#floaters {
+  position: fixed;
+  left: 50%;
+  top: max(88px, calc(env(safe-area-inset-top) + 70px));
+  transform: translateX(-50%);
+  display: grid;
+  gap: 3px;
+  pointer-events: none;
+  z-index: 3;
+  text-align: center;
+  font-weight: 900;
+  text-shadow: 1px 1px #000;
+}
 
 @media (max-width: 560px) {
   .app { gap: 8px; }
   #board { gap: 5px; padding: 5px; }
-  footer { grid-template-columns: 1fr; }
+  footer { grid-template-columns: 1fr 1fr; }
   button { min-height: 42px; }
 }

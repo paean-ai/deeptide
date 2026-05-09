@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Canvas Match-3 Puzzle</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main class="app">
+    <header>
+      <h1>MATCH-3 PUZZLE</h1>
+      <div class="stats">
+        <span>Level <b id="level">1</b></span>
+        <span>Score <b id="score">0</b></span>
+        <span>Moves <b id="moves">30</b></span>
+        <span>Target <b id="target">0</b></span>
+        <span>Combo <b id="combo">x1</b></span>
+      </div>
+    </header>
+    <canvas id="game" width="640" height="640"></canvas>
+    <footer>
+      <button id="shuffle">Shuffle</button>
+      <button id="restart">Restart</button>
+    </footer>
+  </main>
+  <script src="js/game.js"></script>
+</body>
+</html>

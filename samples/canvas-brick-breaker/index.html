@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Canvas Brick Breaker</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main id="shell">
+    <canvas id="game" width="960" height="540"></canvas>
+    <section class="hud">
+      <b>BRICK BREAKER</b>
+      <span>Score <strong id="score">0</strong></span>
+      <span>Stage <strong id="stage">1</strong></span>
+      <span>Balls <strong id="lives">3</strong></span>
+      <button id="restart">Restart</button>
+    </section>
+    <p class="hint">Move mouse or drag · Space launches · collect W/M/L/S power cores</p>
+  </main>
+  <script src="js/game.js"></script>
+</body>
+</html>

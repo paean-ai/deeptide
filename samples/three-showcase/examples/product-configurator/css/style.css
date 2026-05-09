@@ -1,0 +1,82 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  min-height: 100%;
+  overflow: hidden;
+  background: #06070b;
+  color: #f2f6ff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+main {
+  position: relative;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+}
+
+canvas:active { cursor: grabbing; }
+
+.hud {
+  position: absolute;
+  left: max(18px, env(safe-area-inset-left));
+  top: max(16px, env(safe-area-inset-top));
+  z-index: 2;
+  max-width: min(560px, calc(100vw - 36px));
+  pointer-events: none;
+}
+
+h1 {
+  color: #f3f7ff;
+  font-size: clamp(34px, 7vw, 82px);
+  line-height: 0.88;
+  letter-spacing: 0;
+  text-shadow: 0 0 28px rgba(126, 222, 255, 0.28);
+}
+
+p {
+  margin-top: 10px;
+  color: #9ba8bc;
+  font-size: clamp(11px, 2vw, 14px);
+}
+
+.controls {
+  position: absolute;
+  left: 50%;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(84px, 1fr));
+  gap: 8px;
+  width: min(520px, calc(100vw - 28px));
+}
+
+button {
+  min-height: 42px;
+  padding: 8px 10px;
+  color: #dfe8f8;
+  background: rgba(12, 16, 24, 0.76);
+  border: 1px solid rgba(218, 230, 255, 0.24);
+  border-radius: 6px;
+  font: 900 12px ui-monospace, monospace;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+
+button.active {
+  color: #071018;
+  background: #8be9ff;
+  border-color: #cbf6ff;
+}
+
+@media (max-width: 520px) {
+  .controls { grid-template-columns: repeat(2, 1fr); }
+}
