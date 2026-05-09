@@ -1,0 +1,129 @@
+:root {
+  --panel: rgba(10, 15, 23, 0.84);
+  --line: rgba(230, 240, 255, 0.22);
+  --text: #edf4ff;
+  --dim: #9aacbf;
+  --gold: #f4c85a;
+  --blue: #65d9ff;
+  --green: #68da86;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  min-height: 100dvh;
+  overflow: hidden;
+  background: linear-gradient(#101827, #07101a);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+#shell {
+  position: relative;
+  width: min(100vw, calc(100dvh * 900 / 620));
+  aspect-ratio: 900 / 620;
+  max-height: 100dvh;
+  overflow: hidden;
+  border: 2px solid #2f3c50;
+  border-radius: 6px;
+  background: #102236;
+}
+
+canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+}
+
+#hud,
+#controls,
+#log {
+  position: absolute;
+  left: max(10px, env(safe-area-inset-left));
+  right: max(10px, env(safe-area-inset-right));
+  z-index: 2;
+}
+
+#hud {
+  top: max(10px, env(safe-area-inset-top));
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  pointer-events: none;
+}
+
+#hud b,
+#hud span {
+  min-height: 28px;
+  padding: 5px 9px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+#hud b { color: var(--blue); }
+#hud strong { color: var(--gold); }
+
+#controls {
+  bottom: max(78px, calc(env(safe-area-inset-bottom) + 74px));
+  display: grid;
+  grid-template-columns: 1.6fr 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+button {
+  min-height: 48px;
+  padding: 7px;
+  color: #061018;
+  background: var(--blue);
+  border: 2px solid #a9efff;
+  border-radius: 5px;
+  font: 900 13px ui-monospace, monospace;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+button:disabled {
+  color: var(--dim);
+  background: #101722;
+  border-color: var(--line);
+  cursor: not-allowed;
+}
+
+#cast { background: var(--gold); border-color: #ffe197; }
+
+#log {
+  bottom: max(10px, env(safe-area-inset-bottom));
+  min-height: 52px;
+  max-height: 62px;
+  overflow: hidden;
+  padding: 8px 10px;
+  color: var(--dim);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  #shell {
+    width: 100vw;
+    height: 100dvh;
+    max-height: none;
+    aspect-ratio: auto;
+    border: 0;
+    border-radius: 0;
+  }
+  #controls {
+    grid-template-columns: 1fr 1fr;
+    bottom: max(76px, calc(env(safe-area-inset-bottom) + 72px));
+  }
+  button { min-height: 44px; }
+}

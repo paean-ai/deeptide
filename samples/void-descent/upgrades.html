@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VOID DESCENT - Choose Upgrade</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="upgrade-screen">
+  <button id="lang-toggle" class="lang-toggle landing-lang" type="button">中文</button>
+  <div class="upgrade-title" data-i18n="cleared">▼ FLOOR CLEARED ▼</div>
+  <div class="upgrade-floor" id="floor-display">Floor 1 → 2</div>
+
+  <div class="upgrade-cards" id="cards"></div>
+
+  <button class="skip-btn" onclick="skipUpgrade()" data-i18n="skip">Skip upgrade & continue</button>
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/art.js"></script>
+<script src="js/upgrades.js"></script>
+<script>
+let state = null;
+let choices = [];
+
+function initUpgrades() {
+  state = loadGame();
+  if (!state) {
+    window.location.href = 'index.html';
+    return;
+  }
+
+  document.getElementById('floor-display').textContent =
+    t('floorMove', state.floor, state.floor + 1);
+
+  choices = getRandomUpgrades(3, state.upgrades || {});
+
+  const container = document.getElementById('cards');
+  container.innerHTML = choices.map((u, i) => getUpgradeCardHTML(u, i)).join('');
+  renderUpgradeGlyphs();
+}
+
+function selectUpgrade(index) {
+  const upgrade = choices[index];
+  if (!upgrade || !state) return;
+
+  applyUpgrade(state, upgrade);
+  state.floor += 1;
+  saveGame(state);
+  window.location.href = 'game.html';
+}
+
+function skipUpgrade() {
+  if (!state) return;
+  state.floor += 1;
+  saveGame(state);
+  window.location.href = 'game.html';
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  setupLanguageToggle(() => initUpgrades());
+  initUpgrades();
+});
+</script>
+</body>
+</html>

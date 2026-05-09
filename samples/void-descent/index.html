@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VOID DESCENT</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="landing">
+  <div class="landing-title">VOID DESCENT</div>
+  <button id="lang-toggle" class="lang-toggle landing-lang" type="button">中文</button>
+  <div class="landing-subtitle" data-i18n="subtitle">— infinite rogue-like dungeon crawler —</div>
+
+  <div class="landing-lore" data-i18n-html="lore">
+    The <span>Void</span> stretches endlessly beneath reality.<br>
+    Each floor warps space and time, spawning ever-stronger horrors.<br>
+    Collect <span>Void Essence</span>, choose <span>upgrades</span>,<br>
+    and descend as deep as you dare.<br><br>
+    <span>No end. No mercy. Only the descent.</span>
+  </div>
+
+  <button class="btn" onclick="startGame()" data-i18n="begin">▼ BEGIN DESCENT</button>
+
+  <div style="margin-top:40px;color:var(--dim);font-size:0.55rem;line-height:2;" data-i18n-html="controlsLanding">
+    Arrow keys / WASD / vi keys to move<br>
+    <span style="color:var(--accent2)">></span> to descend stairs &nbsp;|&nbsp;
+    <span style="color:var(--accent2)">.</span> to wait a turn<br>
+    Touch drag on mobile
+  </div>
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/storage.js"></script>
+<script>
+setupLanguageToggle();
+function startGame() {
+  const saved = loadGame();
+  if (saved && saved.player && saved.player.hp > 0) {
+    if (confirm(t('continueConfirm', saved.floor))) {
+      window.location.href = 'game.html';
+    } else {
+      clearGame();
+      window.location.href = 'game.html';
+    }
+  } else {
+    window.location.href = 'game.html';
+  }
+}
+</script>
+</body>
+</html>

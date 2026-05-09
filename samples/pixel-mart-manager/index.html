@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Pixel Mart Manager</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main id="shell">
+    <canvas id="game" width="960" height="540"></canvas>
+    <section id="hud">
+      <b>PIXEL MART</b>
+      <span>Coins <strong id="coins">0</strong></span>
+      <span>Stock <strong id="stock">0/6</strong></span>
+      <span>Shelf <strong id="shelf">0</strong></span>
+      <span>Rep <strong id="rep">1</strong></span>
+    </section>
+    <section id="panel">
+      <button id="upgrade-shelf">Upgrade Shelf</button>
+      <button id="hire-helper">Hire Helper</button>
+      <button id="expand-mart">Expand Mart</button>
+    </section>
+    <section id="touch">
+      <div>
+        <button data-dir="up">▲</button>
+        <button data-dir="left">◀</button>
+        <button data-dir="down">▼</button>
+        <button data-dir="right">▶</button>
+      </div>
+      <button id="action">ACT</button>
+    </section>
+  </main>
+  <script src="js/game.js"></script>
+</body>
+</html>

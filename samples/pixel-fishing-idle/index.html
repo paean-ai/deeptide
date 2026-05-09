@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Pixel Fishing Idle</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main id="shell">
+    <canvas id="game" width="900" height="620"></canvas>
+    <section id="hud">
+      <b>PIXEL FISHING</b>
+      <span>Coins <strong id="coins">0</strong></span>
+      <span>Rod <strong id="rod">1</strong></span>
+      <span>Bait <strong id="bait">1</strong></span>
+      <span>Boat <strong id="boat">1</strong></span>
+    </section>
+    <section id="controls">
+      <button id="cast">Cast Line</button>
+      <button id="rod-up">Rod</button>
+      <button id="bait-up">Bait</button>
+      <button id="boat-up">Boat</button>
+    </section>
+    <section id="log"></section>
+  </main>
+  <script src="js/game.js"></script>
+</body>
+</html>

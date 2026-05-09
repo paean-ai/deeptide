@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Endless Pixel Roguelike</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="game-wrapper">
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- HUD -->
+    <div id="hud">
+      <div id="hud-level">Lv.1</div>
+      <div id="hud-hp-bar"><div id="hud-hp-fill"></div><span id="hud-hp-text">100/100</span></div>
+      <div id="hud-exp-bar"><div id="hud-exp-fill"></div><span id="hud-exp-text">0/100</span></div>
+      <div id="hud-wave">Wave 1</div>
+      <button id="lang-toggle" class="lang-toggle" type="button">中文</button>
+    </div>
+
+    <!-- 升级选择面板 -->
+    <div id="levelup-panel" class="hidden">
+      <h2 data-i18n="levelUp">Level Up!</h2>
+      <p class="levelup-sub" data-i18n="chooseSkill">Choose one skill upgrade</p>
+      <div id="skill-choices"></div>
+    </div>
+
+    <!-- 游戏结束 -->
+    <div id="gameover-panel" class="hidden">
+      <h2 data-i18n="gameOver">Game Over</h2>
+      <p id="gameover-info"></p>
+      <button id="restart-btn" data-i18n="restart">Restart</button>
+    </div>
+
+    <!-- 技能栏 -->
+    <div id="skillbar">
+      <div id="skillbar-label" data-i18n="skills">Skills</div>
+      <div id="skillbar-icons"></div>
+    </div>
+
+    <!-- 触屏控制 -->
+    <div id="touch-controls">
+      <div id="tc-joystick-area">
+        <div id="tc-joystick" class="hidden">
+          <div id="tc-joystick-knob"></div>
+        </div>
+      </div>
+      <div id="tc-buttons">
+        <div id="tc-btn-attack">⚔</div>
+        <div id="tc-btn-skill">⚡</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/i18n.js"></script>
+  <script src="js/constants.js"></script>
+  <script src="js/skills.js"></script>
+  <script src="js/particles.js"></script>
+  <script src="js/camera.js"></script>
+  <script src="js/tilemap.js"></script>
+  <script src="js/assets.js"></script>
+  <script src="js/player.js"></script>
+  <script src="js/enemy.js"></script>
+  <script src="js/renderer.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>

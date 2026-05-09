@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Neon Rift Runner - Pixel Platformer</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main id="game-shell">
+    <canvas id="game"></canvas>
+
+    <section id="hud" aria-live="polite">
+      <div class="hud-chip title">NEON RIFT</div>
+      <div class="hud-chip"><span data-i18n="stage">Stage</span> <span id="hud-stage">1</span></div>
+      <div class="hud-bar hp"><span id="hp-fill"></span><b id="hp-text">100/100</b></div>
+      <div class="hud-bar xp"><span id="xp-fill"></span><b id="xp-text">0/80</b></div>
+      <div class="hud-chip">Lv.<span id="hud-level">1</span></div>
+      <div class="hud-chip"><span data-i18n="chips">Chips</span> <span id="hud-coins">0</span></div>
+      <button id="lang-toggle" class="lang-toggle" type="button">中文</button>
+    </section>
+
+    <section id="skill-panel" class="overlay hidden">
+      <div class="panel">
+        <h1 data-i18n="overclock">Skill Overclock</h1>
+        <p data-i18n="overclockSub">Choose one upgrade. Levels have no cap.</p>
+        <div id="skill-choices" class="choice-grid"></div>
+      </div>
+    </section>
+
+    <section id="stage-panel" class="overlay hidden">
+      <div class="panel compact">
+        <h1 id="stage-title" data-i18n="stageDone">Stage Cleared</h1>
+        <p id="stage-copy" data-i18n="riftRebuild">The rift is rebuilding.</p>
+        <button id="next-stage" class="primary" data-i18n="nextStage">Next Stage</button>
+      </div>
+    </section>
+
+    <section id="gameover-panel" class="overlay hidden">
+      <div class="panel compact">
+        <h1 data-i18n="runEnded">Run Terminated</h1>
+        <p id="gameover-copy"></p>
+        <button id="restart" class="primary" data-i18n="restart">Restart</button>
+      </div>
+    </section>
+
+    <div id="skillbar"></div>
+
+    <section id="touch-controls" aria-hidden="true">
+      <div class="touch-left">
+        <button data-hold="left">L</button>
+        <button data-hold="right">R</button>
+      </div>
+      <div class="touch-right">
+        <button data-tap="dash">D</button>
+        <button data-tap="attack">A</button>
+        <button data-hold="jump">J</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="js/i18n.js"></script>
+  <script src="js/constants.js"></script>
+  <script src="js/art.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>

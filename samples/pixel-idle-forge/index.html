@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Starforge Idle - Pixel Incremental</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div>
+        <h1>STARFORGE IDLE</h1>
+        <p data-i18n="subtitle">Pixel star forge · infinite idle upgrades</p>
+      </div>
+      <div class="top-actions">
+        <button id="lang-toggle" class="ghost" type="button">中文</button>
+        <button id="reset-save" class="ghost" data-i18n="reset">Reset</button>
+      </div>
+    </header>
+
+    <section class="resource-strip">
+      <div><span data-i18n="dust">Stardust</span><b id="dust">0</b></div>
+      <div><span data-i18n="alloy">Alloy</span><b id="alloy">0</b></div>
+      <div><span data-i18n="core">Core</span><b id="core">0</b></div>
+      <div><span data-i18n="prestige">Prestige</span><b id="prestige">0</b></div>
+      <div><span data-i18n="multiplier">Total Multiplier</span><b id="multiplier">x1.00</b></div>
+    </section>
+
+    <section class="layout">
+      <section class="forge-panel">
+        <canvas id="forge" width="320" height="320"></canvas>
+        <button id="mine" class="mine-btn" data-i18n="mine">Mine Stardust</button>
+        <div class="rate-line">
+          <span id="click-rate">Click +1</span>
+          <span id="auto-rate">Auto 0/s</span>
+        </div>
+      </section>
+
+      <section class="shop">
+        <nav class="tabs">
+          <button class="tab active" data-tab="upgrades" data-i18n="upgrades">Upgrades</button>
+          <button class="tab" data-tab="machines" data-i18n="machines">Machines</button>
+          <button class="tab" data-tab="relics" data-i18n="relics">Relics</button>
+        </nav>
+        <div id="cards" class="cards"></div>
+      </section>
+    </section>
+
+    <footer class="prestige-panel">
+      <div>
+        <b data-i18n="prestigeTitle">Starforge Recast</b>
+        <span id="prestige-copy">Reach more total stardust to earn permanent prestige multipliers.</span>
+      </div>
+      <button id="prestige-btn" class="primary" data-i18n="recast">Recast</button>
+    </footer>
+
+    <div id="toast" class="toast hidden"></div>
+  </main>
+
+  <script src="js/i18n.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>

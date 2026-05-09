@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pixel Art Preview</title>
+  <link rel="icon" href="data:,">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #0b0d12;
+      color: #e8edf5;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 18px;
+      background: rgba(11,13,18,0.92);
+      border-bottom: 1px solid #283142;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      color: #f2c14e;
+    }
+    label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #aeb7c5;
+    }
+    select, input {
+      background: #151a24;
+      color: #e8edf5;
+      border: 1px solid #3a4454;
+      border-radius: 4px;
+      padding: 6px 8px;
+      font: inherit;
+    }
+    main {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 14px;
+      padding: 18px;
+    }
+    .card {
+      border: 1px solid #283142;
+      border-radius: 6px;
+      background: #111620;
+      padding: 12px;
+    }
+    .name {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+      color: #f3f7ff;
+      font-size: 13px;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      aspect-ratio: 1;
+      image-rendering: pixelated;
+      background:
+        linear-gradient(45deg, #141922 25%, transparent 25%),
+        linear-gradient(-45deg, #141922 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #141922 75%),
+        linear-gradient(-45deg, transparent 75%, #141922 75%),
+        #10131a;
+      background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+      background-size: 16px 16px;
+      border: 1px solid #222b39;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Pixel Art Preview</h1>
+    <label>Animation <select id="animation"></select></label>
+    <label>Scale <input id="scale" type="number" min="2" max="10" value="6"></label>
+  </header>
+  <main id="grid"></main>
+
+  <script src="../js/assets.js"></script>
+  <script>
+    const grid = document.getElementById('grid');
+    const animationSelect = document.getElementById('animation');
+    const scaleInput = document.getElementById('scale');
+    const assets = Object.entries(SPRITES);
+    let cards = [];
+
+    const animationNames = [...new Set(assets.flatMap(([, asset]) => Object.keys(asset.animations)))];
+    animationSelect.innerHTML = animationNames.map(name => `<option value="${name}">${name}</option>`).join('');
+
+    function drawFrame(ctx, frame, palette, scale) {
+      const rows = frame.length;
+      const cols = frame[0].length;
+      const w = cols * scale;
+      const h = rows * scale;
+      const ox = Math.floor((ctx.canvas.width - w) / 2);
+      const oy = Math.floor((ctx.canvas.height - h) / 2);
+      ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          const ch = frame[y][x];
+          if (ch !== '.' && palette[ch]) {
+            ctx.fillStyle = palette[ch];
+            ctx.fillRect(ox + x * scale, oy + y * scale, scale, scale);
+          }
+        }
+      }
+    }
+
+    function render() {
+      const anim = animationSelect.value;
+      const scale = Number(scaleInput.value) || 6;
+      grid.innerHTML = '';
+      for (const [id, asset] of assets) {
+        const frames = asset.animations[anim] || asset.animations.idle;
+        const card = document.createElement('section');
+        card.className = 'card';
+        card.innerHTML = `<div class="name"><strong>${id}</strong><span>${frames.length}f</span></div><canvas width="160" height="160"></canvas>`;
+        grid.appendChild(card);
+      }
+      cards = [...document.querySelectorAll('.card')];
+    }
+
+    function tick() {
+      const anim = animationSelect.value;
+      const scale = Number(scaleInput.value) || 6;
+      assets.forEach(([, asset], i) => {
+        const frames = asset.animations[anim] || asset.animations.idle;
+        const frame = frames[Math.floor(performance.now() / 220) % frames.length];
+        const canvas = cards[i].querySelector('canvas');
+        drawFrame(canvas.getContext('2d'), frame, asset.palette, scale);
+      });
+      requestAnimationFrame(tick);
+    }
+
+    animationSelect.addEventListener('change', render);
+    scaleInput.addEventListener('input', render);
+    render();
+    tick();
+  </script>
+</body>
+</html>

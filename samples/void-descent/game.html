@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>VOID DESCENT - Game</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="game-container">
+  <div class="game-header">
+    <span><span data-i18n="floor">Floor</span> <span class="floor" id="floor-num">1</span></span>
+    <span class="theme-name" id="theme-name">Void</span>
+    <span><span data-i18n="hp">HP</span> <span class="hp" id="stat-hp">100/100</span></span>
+    <span><span data-i18n="atk">ATK</span> <span class="atk" id="stat-atk">10</span></span>
+    <span><span data-i18n="def">DEF</span> <span class="def" id="stat-def">2</span></span>
+    <span>🛡 <span id="stat-shield">0</span></span>
+    <span>✦ <span class="essence" id="stat-essence">0</span></span>
+    <button id="lang-toggle" class="lang-toggle" type="button">中文</button>
+  </div>
+  <canvas id="game-canvas"></canvas>
+  <div class="game-footer" id="messages">
+    <div class="msg msg-info" data-i18n="firstMessage">Use arrow keys to move. Find > to descend.</div>
+  </div>
+  <div class="controls-hint" data-i18n="hint">move: arrows/wasd/vi | descend stairs: walk on / Enter / &gt; | wait: .</div>
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/dungeon.js"></script>
+<script src="js/art.js"></script>
+<script src="js/upgrades.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/game.js"></script>
+<script>
+window.addEventListener('DOMContentLoaded', initGame);
+window.addEventListener('DOMContentLoaded', () => setupLanguageToggle(() => {
+  if (typeof updateStatsDisplay === 'function') updateStatsDisplay();
+}));
+</script>
+</body>
+</html>
