@@ -9,3 +9,15 @@ bun.lockb
 .env.*
 .idea/
 .vscode/
+
+# Native runtime build outputs. Source under native/ is intentionally tracked.
+native/ds4/ds4
+native/ds4/ds4-server
+native/ds4/ds4_test
+native/ds4/*.o
+native/ds4/gguf/
+native/ds4/*.gguf
+native/dsgo/.build/
+native/dsgo/models/
+native/dsgo/*.log
+native/dsgo/anthropic_gateway/

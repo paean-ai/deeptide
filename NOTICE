@@ -11,3 +11,10 @@ derived from Anthropic's Claude Code under the MIT License.
 
 DeepTide is an independent project and is not affiliated with, endorsed
 by, or sponsored by Anthropic, Inc.
+
+Native runtime source under native/ds4 is a DeepSeek V4 Flash specific
+inference engine that includes attribution to llama.cpp/GGML in
+native/ds4/LICENSE and native/ds4/README.md. Native gateway source under
+native/dsgo is distributed as part of this repository's source tree but is not
+included in the npm package tarball unless package.json's files allowlist is
+changed.

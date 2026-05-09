@@ -1,0 +1,28 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 38442
+  },
+  "upstreams": {
+    "ds4": "http://127.0.0.1:8000",
+    "llama": "http://127.0.0.1:18081"
+  },
+  "models": [
+    {
+      "id": "deepseek-v4-flash",
+      "backend": "ds4",
+      "aliases": ["ds4/deepseek-v4-flash", "deepseek-reasoner", "deepseek-chat"],
+      "contextWindow": 100000,
+      "maxOutputTokens": 384000,
+      "reasoning": true
+    },
+    {
+      "id": "deepseek-coder-v2-lite",
+      "backend": "llama",
+      "aliases": ["llama/deepseek-coder-v2-lite"],
+      "contextWindow": 32768,
+      "maxOutputTokens": 16384,
+      "reasoning": false
+    }
+  ]
+}

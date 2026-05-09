@@ -33,6 +33,11 @@ This repository is the **community front door for both** — docs, FAQ, issue
 tracking — and is the home of the npm `deeptide` package that ships the
 cross-platform CLI.
 
+It also contains the open-source native local inference runtime under
+[`native/`](./native): a hard-forked `ds4` DeepSeek V4 Flash Metal engine plus
+`dsgo`, the local OpenAI/Anthropic-compatible gateway intended to pair with
+DeepTide.
+
 ---
 
 ## Install (CLI)
@@ -132,6 +137,30 @@ the two.
 - [`tide-spec`](https://github.com/a8e-ai/zero-cli/blob/main/docs/tide-spec.md) — shared interface contract: tool catalog, slash commands, CLI flags, hook env vars, model aliases.
 - [Zero CLI docs](https://github.com/a8e-ai/zero-cli/tree/main/docs) — comprehensive reference for the CLI engine.
 - [DeepTide native source](https://github.com/paean-ai/deeptide) — Swift codebase for the macOS app.
+- [`native/`](./native) — local DeepSeek runtime source: `ds4` inference engine and `dsgo` gateway.
+
+## Local DeepSeek runtime
+
+The native runtime source is managed in this repository without changing the npm
+package install surface. `package.json` uses an explicit `files` allowlist, so
+`native/` is available to GitHub users and source builders but is not packed into
+the published npm wrapper.
+
+Build both native components on macOS:
+
+```bash
+npm run build:native
+```
+
+Or build individually:
+
+```bash
+npm run build:ds4
+npm run build:dsgo
+```
+
+See [`native/README.md`](./native/README.md), [`native/ds4/README.md`](./native/ds4/README.md),
+and [`native/dsgo/README.md`](./native/dsgo/README.md) for runtime details.
 
 ---
 
