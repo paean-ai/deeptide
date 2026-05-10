@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Agent Brief Template</title>
+  <meta name="description" content="A professional HTML template for agent-generated research briefs, decision memos, source matrices, and action plans.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="cover">
+      <div>
+        <p class="kicker">Agent brief template</p>
+        <h1>Turn research into a decision-ready artifact.</h1>
+        <p class="lede">A polished structure for general agents that need to produce strategy briefs, vendor comparisons, technical recommendations, and executive summaries with clear evidence and next actions.</p>
+      </div>
+      <aside class="brief-meta">
+        <div><span>Audience</span><strong>Product + Engineering</strong></div>
+        <div><span>Decision</span><strong>Choose rollout path</strong></div>
+        <div><span>Confidence</span><strong>Medium-high</strong></div>
+        <div><span>Updated</span><strong>2026-05-11</strong></div>
+      </aside>
+    </header>
+
+    <section class="summary-grid">
+      <article class="summary-card recommendation">
+        <span>Recommendation</span>
+        <h2>Adopt a staged release with opt-in beta users first.</h2>
+        <p>This path captures production feedback while keeping support load, privacy review, and rollback risk manageable.</p>
+      </article>
+      <article class="summary-card">
+        <span>Why now</span>
+        <p>The implementation is stable enough for external validation, but operational docs and telemetry still need one feedback cycle.</p>
+      </article>
+      <article class="summary-card">
+        <span>Main risk</span>
+        <p>Users may interpret beta quality as general availability unless the onboarding and release notes are explicit.</p>
+      </article>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <p class="kicker">Decision frame</p>
+        <h2>Options compared against user value, risk, and operational cost.</h2>
+      </div>
+      <div class="option-table" role="table" aria-label="Decision options">
+        <div class="row header" role="row">
+          <span>Option</span>
+          <span>User value</span>
+          <span>Risk</span>
+          <span>Agent note</span>
+        </div>
+        <div class="row" role="row">
+          <strong>Private beta</strong>
+          <span>High signal from target users</span>
+          <span class="risk low">Low</span>
+          <span>Best first step when product behavior still needs qualitative review.</span>
+        </div>
+        <div class="row" role="row">
+          <strong>Public preview</strong>
+          <span>Broad discovery and faster adoption</span>
+          <span class="risk med">Medium</span>
+          <span>Useful after onboarding, docs, and support routing are ready.</span>
+        </div>
+        <div class="row" role="row">
+          <strong>Full launch</strong>
+          <span>Maximum reach</span>
+          <span class="risk high">High</span>
+          <span>Premature without stronger telemetry and rollback playbooks.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section evidence">
+      <div class="section-head">
+        <p class="kicker">Evidence matrix</p>
+        <h2>Separate facts, interpretation, and open questions.</h2>
+      </div>
+      <div class="evidence-grid">
+        <article>
+          <span class="tag">Fact</span>
+          <h3>Implementation path is additive.</h3>
+          <p>The feature can be disabled without data migration, which lowers rollback complexity.</p>
+        </article>
+        <article>
+          <span class="tag">Signal</span>
+          <h3>Users ask for workflow clarity.</h3>
+          <p>Early feedback emphasizes handoff quality and auditability over raw automation speed.</p>
+        </article>
+        <article>
+          <span class="tag">Gap</span>
+          <h3>Support burden is unmeasured.</h3>
+          <p>The team needs one beta cycle to estimate documentation and triage volume.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <p class="kicker">Action plan</p>
+        <h2>Make the recommendation executable.</h2>
+      </div>
+      <ol class="actions">
+        <li>
+          <strong>Prepare beta cohort</strong>
+          <span>Invite 12-20 users who already rely on the workflow.</span>
+        </li>
+        <li>
+          <strong>Instrument success criteria</strong>
+          <span>Track activation, repeated use, support requests, and rollback events.</span>
+        </li>
+        <li>
+          <strong>Write release framing</strong>
+          <span>Set expectations clearly: beta, known limits, feedback channel, and rollback plan.</span>
+        </li>
+        <li>
+          <strong>Review after two weeks</strong>
+          <span>Decide whether to expand to public preview or extend beta.</span>
+        </li>
+      </ol>
+    </section>
+
+    <section class="section source-section">
+      <div class="section-head">
+        <p class="kicker">Source hygiene</p>
+        <h2>Every claim should be traceable or clearly marked as inference.</h2>
+      </div>
+      <div class="source-list">
+        <article>
+          <strong>Internal implementation notes</strong>
+          <span>Used for rollback and migration assessment.</span>
+        </article>
+        <article>
+          <strong>User feedback interviews</strong>
+          <span>Used for workflow pain points and onboarding expectations.</span>
+        </article>
+        <article>
+          <strong>Operational metrics</strong>
+          <span>Required before public preview; not yet complete.</span>
+        </article>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Agent Workbench Template</title>
+  <meta name="description" content="A professional HTML template for presenting local coding-agent work: plan, changes, checks, risks, and PR-ready summary.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="shell">
+    <aside class="rail" aria-label="Run summary">
+      <div class="brand">
+        <span class="mark"></span>
+        <div>
+          <strong>Agent Workbench</strong>
+          <span>Local coding run</span>
+        </div>
+      </div>
+
+      <section class="run-card">
+        <span class="label">Status</span>
+        <strong class="status">Ready for review</strong>
+        <p>Feature implementation completed with focused verification and documented residual risks.</p>
+      </section>
+
+      <section class="run-meta">
+        <div><span>Branch</span><strong>feature/agent-cache</strong></div>
+        <div><span>Commit</span><strong>4 files changed</strong></div>
+        <div><span>Checks</span><strong>6 passed</strong></div>
+        <div><span>Risk</span><strong>Medium</strong></div>
+      </section>
+
+      <nav class="toc">
+        <a href="#objective">Objective</a>
+        <a href="#plan">Plan</a>
+        <a href="#changes">Changes</a>
+        <a href="#verification">Verification</a>
+        <a href="#review">Review Notes</a>
+      </nav>
+    </aside>
+
+    <section class="workspace">
+      <header class="hero" id="objective">
+        <p class="eyebrow">Coding-agent delivery template</p>
+        <h1>Make agent work inspectable, reviewable, and easy to merge.</h1>
+        <p class="lede">This template gives local coding agents a polished way to summarize intent, implementation, verification, and risks after a task. It is designed for PR descriptions, handoff notes, and internal engineering updates.</p>
+      </header>
+
+      <section class="grid two">
+        <article class="panel">
+          <div class="panel-head">
+            <span class="badge blue">Goal</span>
+            <h2>User Request</h2>
+          </div>
+          <p>Persist tool execution metadata so resumed agent sessions can explain what was verified and what still needs attention.</p>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <span class="badge green">Outcome</span>
+            <h2>Delivered</h2>
+          </div>
+          <p>Added scoped metadata storage, surfaced it in the session summary, and covered the behavior with unit and integration checks.</p>
+        </article>
+      </section>
+
+      <section class="panel" id="plan">
+        <div class="panel-head">
+          <span class="badge cyan">Plan</span>
+          <h2>Execution Path</h2>
+        </div>
+        <ol class="steps">
+          <li>
+            <strong>Map the current state model</strong>
+            <span>Inspected session serialization, resume flow, and summary rendering boundaries.</span>
+          </li>
+          <li>
+            <strong>Add the smallest durable schema</strong>
+            <span>Stored command, exit status, duration, and verification label without changing public CLI flags.</span>
+          </li>
+          <li>
+            <strong>Render useful handoff context</strong>
+            <span>Grouped checks by outcome and kept noisy command output out of summaries.</span>
+          </li>
+          <li>
+            <strong>Verify the critical path</strong>
+            <span>Ran unit tests, resume-flow integration, and a local smoke command.</span>
+          </li>
+        </ol>
+      </section>
+
+      <section class="panel" id="changes">
+        <div class="panel-head">
+          <span class="badge amber">Diff</span>
+          <h2>Implementation Summary</h2>
+        </div>
+        <div class="change-list">
+          <article>
+            <h3>Session persistence</h3>
+            <p>Introduced a compact `verificationEvents` list stored alongside existing session metadata.</p>
+            <code>src/session/store.ts</code>
+          </article>
+          <article>
+            <h3>Resume summary</h3>
+            <p>Rendered passed, failed, and skipped checks in a deterministic order for compact handoffs.</p>
+            <code>src/session/summary.ts</code>
+          </article>
+          <article>
+            <h3>Tests</h3>
+            <p>Added coverage for serialization compatibility and resumed-session display behavior.</p>
+            <code>tests/session-summary.test.ts</code>
+          </article>
+        </div>
+      </section>
+
+      <section class="grid two" id="verification">
+        <article class="panel">
+          <div class="panel-head">
+            <span class="badge green">Passed</span>
+            <h2>Verification</h2>
+          </div>
+          <ul class="checks">
+            <li><span></span><code>npm test -- session</code></li>
+            <li><span></span><code>npm run typecheck</code></li>
+            <li><span></span><code>node ./bin.js --help</code></li>
+            <li><span></span><code>git diff --check</code></li>
+          </ul>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <span class="badge red">Watch</span>
+            <h2>Residual Risk</h2>
+          </div>
+          <p>Older sessions without verification metadata use an empty list fallback. No migration is required, but release notes should mention the new summary section.</p>
+        </article>
+      </section>
+
+      <section class="panel review" id="review">
+        <div class="panel-head">
+          <span class="badge purple">Review</span>
+          <h2>PR-Ready Notes</h2>
+        </div>
+        <div class="review-grid">
+          <div>
+            <h3>Summary</h3>
+            <p>Adds durable verification metadata to resumed sessions and displays concise check outcomes in handoff summaries.</p>
+          </div>
+          <div>
+            <h3>Reviewer Focus</h3>
+            <p>Please check schema naming, summary wording, and whether failed command output should remain intentionally omitted.</p>
+          </div>
+          <div>
+            <h3>Rollback</h3>
+            <p>Feature is additive. Reverting the summary renderer and ignoring stored events restores prior behavior.</p>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

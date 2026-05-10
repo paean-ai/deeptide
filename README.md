@@ -25,7 +25,7 @@
 | **Form factor** | Native macOS app | Cross-platform terminal CLI |
 | **Runtime** | Swift 6 native binary, ~15 MB idle | Bun, ~50 MB resident |
 | **Platforms** | macOS 15+ | Linux · Windows · macOS |
-| **Install** | Build from [paean-ai/deeptide](https://github.com/paean-ai/deeptide) | `npm i -g deeptide` (this package) |
+| **Install** | `curl -fsSL https://deeptide.sh/install.sh \| sh` | `bun add -g deeptide` (this package) |
 | **Lineage** | 100% authored by DeepSeek V4 | Powered by open-source [Zero CLI](https://github.com/a8e-ai/zero-cli) |
 | **Best for** | macOS users who want a tuned native experience | Linux/Windows users, CI, SSH sessions, headless boxes |
 
@@ -40,12 +40,40 @@ DeepTide.
 
 ---
 
-## Install (CLI)
+## Install on macOS (recommended)
+
+For Mac users, the recommended path is the native Deeptide build from
+[deeptide.sh](https://deeptide.sh/). It downloads the signed build for your
+Mac architecture and installs both `deeptide` and the shorter `tide` command:
+
+```bash
+curl -fsSL https://deeptide.sh/install.sh | sh
+```
+
+Then start with:
+
+```bash
+tide auth login   # Paean OAuth, multimodal-aware
+tide login        # or save a DeepSeek API key directly
+tide              # launch the REPL
+tide doctor       # diagnose install + network
+```
+
+If you want a native Mac terminal to pair with Deeptide, also try
+[Clide](https://clide.app/) — a modern macOS terminal with file explorer,
+multi-pane layouts, drag-and-drop, and native voice input.
+
+## Install on Linux / Windows (Zero CLI alias)
 
 > **Prerequisite:** [Bun](https://bun.com/) must be installed and on
 > PATH. The CLI runtime requires it (matches the underlying
 > [Zero CLI](https://github.com/a8e-ai/zero-cli)). Bun does not
 > replace your Node install — it sits alongside.
+
+On non-Mac systems, this npm package is the cross-platform DeepTide-flavored
+entrypoint powered by [Zero CLI](https://github.com/a8e-ai/zero-cli). It
+installs the `deeptide` and `tide` aliases for a workflow close to Deeptide,
+but it is not the Swift-native macOS build from `deeptide.sh`.
 
 ```bash
 # bun (recommended, fastest install)
@@ -67,19 +95,19 @@ tide -p "explain this repo"   # one-shot mode
 tide --help                   # all options
 ```
 
-## Install (macOS native app)
-
-The macOS native build is open source at
-[paean-ai/deeptide](https://github.com/paean-ai/deeptide) (Swift). Build
-from source via:
+You can also install the upstream package directly:
 
 ```bash
-git clone https://github.com/paean-ai/deeptide.git
-cd deeptide && ./scripts/release.sh --install
+bun add -g @paean-ai/zero-cli
 ```
 
-Pre-built `.app` releases will be announced on
-[Releases](https://github.com/paean-ai/deeptide/releases) when ready.
+## Build the macOS native app from source
+
+The macOS native build is open source at
+[paean-ai/deeptide](https://github.com/paean-ai/deeptide) (Swift). Most users
+should install from [deeptide.sh](https://deeptide.sh/), but source builders can
+inspect and build from the source tree when they need to modify the native
+runtime or local inference components.
 
 ---
 
@@ -151,6 +179,12 @@ the two.
 - [`samples/deeptide-deck-template`](./samples/deeptide-deck-template) — a
   responsive HTML presentation deck template for desktop demos, mobile reading,
   and polished browser-to-PDF export, using Deeptide as the reference product.
+- [`samples/agent-workbench-template`](./samples/agent-workbench-template) —
+  a polished coding-agent handoff template for plans, diffs, verification,
+  risks, and PR-ready review notes.
+- [`samples/agent-brief-template`](./samples/agent-brief-template) — a
+  professional research and decision brief template for general-agent outputs,
+  option comparisons, evidence matrices, and action plans.
 - [`samples/void-descent`](./samples/void-descent) — a matching pixel-art
   turn-based dungeon crawler showcase with fog of war, room-and-corridor
   exploration, floor descent, persistent upgrades, items, and mobile swipes.
@@ -159,7 +193,8 @@ the two.
 
 - [`skills/`](./skills) — English, sample-derived agent skills for pixel-art
   coding, premium visual design, HTML decks, roguelike game loops, casual game
-  systems, and responsive Canvas game shells.
+  systems, responsive Canvas game shells, coding-agent delivery, and research
+  brief workflows.
 
 ## Local DeepSeek runtime
 

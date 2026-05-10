@@ -18,6 +18,10 @@ rediscovering the same product and engineering patterns.
   defense, and arcade game loops.
 - `responsive-canvas-game` - implement robust desktop and mobile Canvas game
   shells, input, HUD, rendering, and verification.
+- `coding-agent-delivery` - turn local coding-agent work into reviewable PR,
+  handoff, verification, and risk artifacts.
+- `research-brief-delivery` - produce decision-ready research briefs,
+  comparison memos, evidence matrices, and action plans.
 
 These are documentation skills, not runtime dependencies. They should remain
 plain Markdown so agents can load them cheaply and apply them in any project.
