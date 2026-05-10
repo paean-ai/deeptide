@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Deeptide Deck Template</title>
+  <meta name="description" content="A responsive HTML deck template for Deeptide product storytelling, optimized for desktop presenting, mobile reading, and PDF export.">
+  <link rel="icon" href="../../assets/logo.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="deck-nav" aria-label="Deck controls">
+    <a class="brand" href="#cover" aria-label="Deck cover">
+      <img src="../../assets/logo.svg" alt="">
+      <span>deeptide deck</span>
+    </a>
+    <nav>
+      <a href="#problem">Problem</a>
+      <a href="#product">Product</a>
+      <a href="#workflow">Workflow</a>
+      <a href="#local">Local</a>
+      <a href="#template">Template</a>
+      <button type="button" id="printBtn">Export PDF</button>
+    </nav>
+  </header>
+
+  <main class="deck" aria-label="Presentation deck">
+    <section class="slide cover" id="cover">
+      <div class="slide-kicker">HTML deck template</div>
+      <div class="cover-grid">
+        <div class="cover-copy">
+          <h1>Build product stories that feel sharp in the browser and polished on paper.</h1>
+          <p>Use this Deeptide-inspired deck as a starting point for high-quality launch docs, investor updates, internal proposals, and technical product presentations.</p>
+          <div class="pill-row" aria-label="Template strengths">
+            <span>Desktop stage</span>
+            <span>Mobile reading</span>
+            <span>PDF-ready</span>
+          </div>
+        </div>
+        <div class="hero-card" aria-label="Terminal preview">
+          <div class="terminal-window">
+            <div class="terminal-bar">
+              <i></i><i></i><i></i>
+              <span>tide present</span>
+            </div>
+<pre><strong>deeptide</strong> turns a repository into a working conversation.
+
+System
+  runtime      macOS native · Swift
+  interface    terminal-first
+  contract     tide-spec
+
+Agent
+  model        DeepSeek
+  tools        files · shell · git · MCP
+  memory       project-scoped
+
+Output
+  edits        reviewable patches
+  checks       local verification
+  stories      decks · docs · demos</pre>
+          </div>
+        </div>
+      </div>
+      <footer class="slide-footer">
+        <span>deeptide.sh</span>
+        <span>01 / 08</span>
+      </footer>
+    </section>
+
+    <section class="slide split" id="problem">
+      <div>
+        <div class="slide-kicker">Why this template exists</div>
+        <h2>Most product decks break in one of three places.</h2>
+      </div>
+      <div class="stacked-cards">
+        <article>
+          <span>01</span>
+          <h3>They only work on a projector.</h3>
+          <p>The same page should read well on a phone before a meeting and export cleanly afterward.</p>
+        </article>
+        <article>
+          <span>02</span>
+          <h3>They bury the product.</h3>
+          <p>A good deck makes the product, workflow, and proof visible in the first viewport.</p>
+        </article>
+        <article>
+          <span>03</span>
+          <h3>They are hard to reuse.</h3>
+          <p>HTML should give teams a durable template: editable copy, responsive layout, and print CSS.</p>
+        </article>
+      </div>
+      <footer class="slide-footer">
+        <span>Problem framing</span>
+        <span>02 / 08</span>
+      </footer>
+    </section>
+
+    <section class="slide product" id="product">
+      <div class="slide-kicker">Reference product: deeptide</div>
+      <h2>A terminal-native coding agent for DeepSeek.</h2>
+      <div class="product-layout">
+        <div class="feature-list">
+          <article>
+            <h3>Mac-native where it matters</h3>
+            <p>Keychain auth, Notification Center, clickable file paths, power checks, signed distribution, and Apple hardware awareness.</p>
+          </article>
+          <article>
+            <h3>Designed around real tools</h3>
+            <p>File edits, shell execution, git context, MCP servers, hooks, slash commands, and sub-agents behind a small shared contract.</p>
+          </article>
+          <article>
+            <h3>Ready for multimodal context</h3>
+            <p>Through Paean AI, screenshots and documents can be described before entering a DeepSeek coding session.</p>
+          </article>
+        </div>
+        <aside class="metric-panel">
+          <div>
+            <strong>Swift</strong>
+            <span>native runtime</span>
+          </div>
+          <div>
+            <strong>DeepSeek</strong>
+            <span>agent model</span>
+          </div>
+          <div>
+            <strong>Local-ready</strong>
+            <span>dsgo · ds4 path</span>
+          </div>
+        </aside>
+      </div>
+      <footer class="slide-footer">
+        <span>Product summary</span>
+        <span>03 / 08</span>
+      </footer>
+    </section>
+
+    <section class="slide workflow" id="workflow">
+      <div class="slide-kicker">Agent workflow</div>
+      <h2>From prompt to patch without leaving the project.</h2>
+      <div class="timeline">
+        <article>
+          <span>1</span>
+          <h3>Read the workspace</h3>
+          <p>Search, inspect files, restore project-scoped context, and understand local conventions.</p>
+        </article>
+        <article>
+          <span>2</span>
+          <h3>Make the change</h3>
+          <p>Edit deliberately with tool-backed actions, reviewable patches, and optional parallel sub-agents.</p>
+        </article>
+        <article>
+          <span>3</span>
+          <h3>Verify locally</h3>
+          <p>Run tests, builds, linters, screenshots, and git checks where the work happened.</p>
+        </article>
+      </div>
+      <footer class="slide-footer">
+        <span>Working loop</span>
+        <span>04 / 08</span>
+      </footer>
+    </section>
+
+    <section class="slide local" id="local">
+      <div class="local-copy">
+        <div class="slide-kicker">Mac-native, local-ready</div>
+        <h2>For privacy and cost structure, bring the model closer to the machine.</h2>
+        <p>Deeptide can pair with local DeepSeek V4 Flash inference paths on Apple hardware where the setup allows it, while still supporting cloud APIs when that is the right tool.</p>
+      </div>
+      <div class="code-card">
+<pre><span>local DeepSeek path</span>
+hardware   MacBook Pro · Studio · mini
+engine     dsgo · ds4
+model      DeepSeek V4 Flash
+mode       offline · private · low cost</pre>
+      </div>
+      <footer class="slide-footer">
+        <span>Local story</span>
+        <span>05 / 08</span>
+      </footer>
+    </section>
+
+    <section class="slide proof" id="proof">
+      <div class="slide-kicker">Ecosystem proof</div>
+      <h2>Present the product in the context of the system around it.</h2>
+      <div class="proof-grid">
+        <article>
+          <span>clide.app</span>
+          <h3>Native terminal surface</h3>
+          <p>Modern shell work, panes, file context, and AI-assisted workflows.</p>
+        </article>
+        <article>
+          <span>paean.ai</span>
+          <h3>Gateway and product platform</h3>
+          <p>Multimodal model access, credits, routing, and user context.</p>
+        </article>
+        <article>
+          <span>0.works</span>
+          <h3>AI-native work surface</h3>
+          <p>Practical automation and everyday knowledge workflows.</p>
+        </article>
+        <article>
+          <span>a8e.ai</span>
+          <h3>Operator mindset</h3>
+          <p>Products shaped by real users, real costs, and real workflows.</p>
+        </article>
+      </div>
+      <footer class="slide-footer">
+        <span>Proof cards</span>
+        <span>06 / 08</span>
+      </footer>
+    </section>
+
+    <section class="slide template" id="template">
+      <div class="slide-kicker">Reusable slide system</div>
+      <h2>Use the same file for presenting, sharing, and exporting.</h2>
+      <div class="template-grid">
+        <article>
+          <h3>Desktop presentation</h3>
+          <p>Each slide fills the viewport with a 16:9 composition, clear hierarchy, and high-contrast product visuals.</p>
+        </article>
+        <article>
+          <h3>Mobile reading</h3>
+          <p>Slides become stacked sections with comfortable text width, preserved ordering, and controls that stay out of the way.</p>
+        </article>
+        <article>
+          <h3>PDF export</h3>
+          <p>Print CSS uses landscape pages, removes navigation, avoids broken cards, and keeps one slide per page.</p>
+        </article>
+      </div>
+      <footer class="slide-footer">
+        <span>Template mechanics</span>
+        <span>07 / 08</span>
+      </footer>
+    </section>
+
+    <section class="slide close" id="close">
+      <div class="close-card">
+        <img src="../../assets/logo.svg" alt="">
+        <div>
+          <div class="slide-kicker">Start from this file</div>
+          <h2>Replace the copy, keep the system.</h2>
+          <p>Edit the sections, duplicate slides, and export a deck that still behaves like a good web page.</p>
+        </div>
+      </div>
+      <div class="closing-actions">
+        <a href="https://deeptide.sh/" rel="noopener">deeptide.sh</a>
+        <a href="https://github.com/paean-ai/deeptide" rel="noopener">GitHub source</a>
+      </div>
+      <footer class="slide-footer">
+        <span>Closing slide</span>
+        <span>08 / 08</span>
+      </footer>
+    </section>
+  </main>
+
+  <script>
+    document.getElementById('printBtn').addEventListener('click', () => window.print());
+  </script>
+</body>
+</html>

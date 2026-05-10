@@ -148,6 +148,9 @@ the two.
 - [`samples/pixel-backpack-roguelite`](./samples/pixel-backpack-roguelite) —
   a pixel backpack roguelite with spatial item planning, merging, artifact
   forging, autonomous TD-style combat waves, and infinite scaling rewards.
+- [`samples/deeptide-deck-template`](./samples/deeptide-deck-template) — a
+  responsive HTML presentation deck template for desktop demos, mobile reading,
+  and polished browser-to-PDF export, using Deeptide as the reference product.
 - [`samples/void-descent`](./samples/void-descent) — a matching pixel-art
   turn-based dungeon crawler showcase with fog of war, room-and-corridor
   exploration, floor descent, persistent upgrades, items, and mobile swipes.
