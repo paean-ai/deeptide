@@ -155,6 +155,12 @@ the two.
   turn-based dungeon crawler showcase with fog of war, room-and-corridor
   exploration, floor descent, persistent upgrades, items, and mobile swipes.
 
+## Skills
+
+- [`skills/`](./skills) — English, sample-derived agent skills for pixel-art
+  coding, premium visual design, HTML decks, roguelike game loops, casual game
+  systems, and responsive Canvas game shells.
+
 ## Local DeepSeek runtime
 
 The native runtime source is managed in this repository without changing the npm
