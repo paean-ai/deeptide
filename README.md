@@ -139,6 +139,19 @@ the two.
 - [DeepTide native source](https://github.com/paean-ai/deeptide) — Swift codebase for the macOS app.
 - [`native/`](./native) — local DeepSeek runtime source: `ds4` inference engine and `dsgo` gateway.
 
+## Samples
+
+- [`samples/pixel-roguelike`](./samples/pixel-roguelike) — a dependency-free
+  HTML Canvas roguelike showcase with editable pixel-art sprites, procedural
+  terrain, responsive mobile controls, combat effects, and a pixel-art preview
+  helper.
+- [`samples/pixel-backpack-roguelite`](./samples/pixel-backpack-roguelite) —
+  a pixel backpack roguelite with spatial item planning, merging, artifact
+  forging, autonomous TD-style combat waves, and infinite scaling rewards.
+- [`samples/void-descent`](./samples/void-descent) — a matching pixel-art
+  turn-based dungeon crawler showcase with fog of war, room-and-corridor
+  exploration, floor descent, persistent upgrades, items, and mobile swipes.
+
 ## Local DeepSeek runtime
 
 The native runtime source is managed in this repository without changing the npm

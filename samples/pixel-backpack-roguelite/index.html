@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Infinite Pixel Backpack</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main class="game-shell">
+    <section class="stage-panel" aria-label="Battlefield">
+      <div class="topbar">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <div>
+            <h1 id="gameTitle">Infinite Backpack</h1>
+            <p id="phaseLabel">Pack phase</p>
+          </div>
+        </div>
+        <div class="stats">
+          <span><em id="waveLabel">Wave</em> <b id="waveStat">1</b></span>
+          <span><em id="lifeLabel">Life</em> <b id="lifeStat">20</b></span>
+          <span><em id="goldLabel">Gold</em> <b id="goldStat">36</b></span>
+          <span><em id="runeLabel">Runes</em> <b id="runeStat">0</b></span>
+          <button id="langBtn" class="lang-btn" type="button">中文</button>
+        </div>
+      </div>
+      <canvas id="battleCanvas" width="860" height="420"></canvas>
+      <div id="combatLog" class="combat-log"></div>
+    </section>
+
+    <aside class="pack-panel" aria-label="Backpack">
+      <div class="panel-head">
+        <h2 id="packTitle">Backpack Grid</h2>
+        <div id="packSize">6 x 5</div>
+      </div>
+      <div id="backpack" class="backpack" aria-label="Backpack grid"></div>
+      <div id="selectedInfo" class="selected-info">Select an item to inspect its effect.</div>
+      <div class="pack-actions">
+        <button id="rotateBtn" type="button">Rotate</button>
+        <button id="mergeBtn" type="button">Merge</button>
+        <button id="forgeBtn" type="button">Forge</button>
+        <button id="sellBtn" type="button">Sell</button>
+      </div>
+    </aside>
+
+    <section class="shop-panel" aria-label="Shop and rewards">
+      <div class="panel-head">
+        <h2 id="shopTitle">Shop</h2>
+        <div id="roundInfo">Preparing wave 1</div>
+      </div>
+      <div id="shopGrid" class="shop-grid"></div>
+      <div id="upgradeChoices" class="upgrade-choices hidden"></div>
+      <div class="shop-actions">
+        <button id="rerollBtn" type="button">Reroll 3</button>
+        <button id="expandBtn" type="button">Expand 32</button>
+        <button id="startBtn" type="button" class="primary">Start Wave</button>
+        <button id="restartBtn" type="button" class="danger hidden">Restart</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="js/data.js"></script>
+  <script src="js/assets.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>
