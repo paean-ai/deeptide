@@ -9,6 +9,9 @@ bun.lockb
 .env.*
 .idea/
 .vscode/
+.clide/
+.clideignore
+.tide/
 
 # Native runtime build outputs. Source under native/ is intentionally tracked.
 native/ds4/ds4
