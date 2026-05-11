@@ -114,9 +114,13 @@ function render() {
   board.innerHTML = '';
   state.board.forEach((c, i) => {
     const cell = document.createElement('button');
-    cell.className = `cell${state.selected === i ? ' selected' : ''}${c?.mutation !== 'plain' ? ` ${c.mutation}` : ''}`;
+    cell.className = `cell${state.selected === i ? ' selected' : ''}${c && c.mutation !== 'plain' ? ` ${c.mutation}` : ''}`;
+    cell.type = 'button';
     cell.onclick = () => clickCell(i);
     if (c) {
+      const mutationLabel = c.mutation === 'plain' ? '' : ` ${c.mutation}`;
+      cell.setAttribute('aria-label', `Plot ${i + 1}: level ${c.level}${mutationLabel} ${cropName(c.level)}. Tap another matching crop to merge.`);
+      cell.title = `L${c.level}${mutationLabel} ${cropName(c.level)}`;
       cell.appendChild(drawCrop(c));
       const label = document.createElement('span');
       label.className = 'level';
@@ -128,6 +132,8 @@ function render() {
         pin.textContent = '!';
         cell.appendChild(pin);
       }
+    } else {
+      cell.setAttribute('aria-label', `Plot ${i + 1}: empty`);
     }
     board.appendChild(cell);
   });

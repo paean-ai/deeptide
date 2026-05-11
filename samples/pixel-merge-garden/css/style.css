@@ -23,6 +23,8 @@ body {
   justify-content: center;
   align-items: center;
   user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
 }
 
 .app {
@@ -40,6 +42,7 @@ footer {
   border: 1px solid var(--line);
   border-radius: 7px;
   padding: 12px;
+  box-shadow: 0 14px 30px rgba(0,0,0,0.22);
 }
 
 h1 {
@@ -57,12 +60,16 @@ h1 {
 }
 
 .stats span {
+  min-width: 0;
   padding: 5px 8px;
   background: rgba(0,0,0,0.22);
   border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--dim);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stats b { color: var(--gold); }
@@ -91,11 +98,23 @@ h1 {
   box-shadow: inset 0 0 0 3px rgba(0,0,0,0.16);
   cursor: pointer;
   touch-action: manipulation;
+  transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease, filter 120ms ease;
 }
 
 .cell.selected {
   border-color: var(--gold);
   box-shadow: 0 0 0 3px rgba(244, 200, 90, 0.24), inset 0 0 0 3px rgba(0,0,0,0.16);
+}
+
+.cell:focus-visible,
+button:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+.cell:not(:empty):hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
 }
 
 .crop {
@@ -125,12 +144,20 @@ footer {
 
 button {
   min-height: 48px;
+  min-width: 0;
+  padding: 6px 8px;
   font: 900 13px ui-monospace, monospace;
   color: #07100b;
   background: var(--green);
   border: 2px solid #a3efb0;
   border-radius: 5px;
   cursor: pointer;
+  transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease;
+  overflow-wrap: anywhere;
+}
+
+button:not(:disabled):active {
+  transform: translateY(2px);
 }
 
 button:disabled {
@@ -138,6 +165,7 @@ button:disabled {
   background: #131a23;
   border-color: var(--line);
   cursor: not-allowed;
+  opacity: 0.74;
 }
 
 #collect { background: var(--gold); border-color: #ffe197; }
@@ -177,8 +205,34 @@ button:disabled {
 }
 
 @media (max-width: 560px) {
-  .app { gap: 8px; }
+  .app {
+    gap: 8px;
+    padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  }
+  header,
+  footer { padding: 9px; }
+  h1 { font-size: clamp(24px, 10vw, 38px); }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .stats span { font-size: 11px; }
   #board { gap: 5px; padding: 5px; }
-  footer { grid-template-columns: 1fr 1fr; }
-  button { min-height: 42px; }
+  footer { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  button {
+    min-height: 46px;
+    font-size: 12px;
+  }
+  .level {
+    right: 3px;
+    bottom: 3px;
+    font-size: 10px;
+  }
+}
+
+@media (max-height: 680px) and (max-width: 560px) {
+  header { padding: 8px; }
+  .stats { margin-top: 6px; }
+  #board { width: min(100%, 58dvh); }
 }

@@ -91,6 +91,16 @@ canvas {
   border-radius: 4px;
   font: 800 12px ui-monospace, monospace;
   pointer-events: auto;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.lang-toggle:focus-visible,
+.skill-card:focus-visible,
+.primary:focus-visible,
+#touch-controls button:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
 }
 
 .hud-bar {
@@ -171,6 +181,8 @@ canvas {
   border: 2px solid #3b4658;
   border-radius: 6px;
   cursor: pointer;
+  touch-action: manipulation;
+  transition: transform 140ms ease, border-color 140ms ease, filter 140ms ease;
 }
 
 .skill-card {
@@ -221,6 +233,11 @@ canvas {
   background: var(--green);
   border-color: #8af0ad;
   font-weight: 900;
+}
+
+.primary:active,
+.skill-card:active {
+  transform: translateY(2px);
 }
 
 #skillbar {
@@ -292,7 +309,7 @@ canvas {
 .touch-left { left: max(18px, env(safe-area-inset-left)); }
 .touch-right { right: max(18px, env(safe-area-inset-right)); }
 
-@media (hover: none) and (pointer: coarse) {
+@media (max-width: 700px), (hover: none) and (pointer: coarse) {
   body { align-items: stretch; }
 
   #game-shell {
@@ -332,6 +349,8 @@ canvas {
   .choice-grid {
     grid-template-columns: 1fr;
     gap: 9px;
+    max-height: min(58dvh, 430px);
+    overflow-y: auto;
   }
 
   .skill-card {
@@ -348,6 +367,19 @@ canvas {
     grid-row: 1 / span 3;
     margin: 0;
   }
+
+  .panel {
+    padding: 18px;
+  }
+
+  .panel p {
+    margin-bottom: 12px;
+  }
+
+  #touch-controls button {
+    width: 70px;
+    height: 70px;
+  }
 }
 
 @media (hover: none) and (pointer: coarse) and (orientation: landscape) {
@@ -360,4 +392,37 @@ canvas {
   .choice-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .skill-card { display: block; text-align: center; min-height: 158px; }
   .skill-icon { margin: 0 auto 8px; }
+}
+
+@media (max-width: 430px) {
+  #hud {
+    top: max(7px, env(safe-area-inset-top));
+    left: max(7px, env(safe-area-inset-left));
+    right: max(7px, env(safe-area-inset-right));
+  }
+
+  .hud-chip,
+  .hud-bar {
+    font-size: 10px;
+  }
+
+  .panel {
+    width: calc(100vw - 18px);
+    padding: 14px;
+  }
+
+  .skill-card {
+    grid-template-columns: 50px 1fr;
+    min-height: 82px;
+  }
+
+  .touch-left,
+  .touch-right {
+    gap: 9px;
+  }
+
+  #touch-controls button {
+    width: 62px;
+    height: 62px;
+  }
 }

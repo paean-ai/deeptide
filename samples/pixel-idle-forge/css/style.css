@@ -24,6 +24,7 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   user-select: none;
   -webkit-user-select: none;
+  touch-action: manipulation;
 }
 
 .app {
@@ -83,6 +84,18 @@ button {
   background: #121924;
   cursor: pointer;
   touch-action: manipulation;
+  transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease;
+  overflow-wrap: anywhere;
+}
+
+button:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+button:not(:disabled):active {
+  transform: translateY(2px);
+  filter: brightness(1.08);
 }
 
 button:disabled {
@@ -123,6 +136,7 @@ button:disabled {
   font-size: clamp(14px, 2.4vw, 20px);
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .layout {
@@ -245,6 +259,7 @@ canvas {
   color: var(--dim);
   font-size: 12px;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .meta .level {
@@ -361,8 +376,96 @@ canvas {
   }
 
   .buy {
-    grid-column: 2;
+    grid-column: 1 / -1;
     width: 100%;
     min-height: 40px;
+  }
+}
+
+@media (max-width: 480px) {
+  .topbar {
+    min-height: auto;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .top-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .ghost {
+    min-width: 0;
+    min-height: 40px;
+  }
+
+  h1 {
+    font-size: clamp(22px, 9vw, 34px);
+  }
+
+  .resource-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .resource-strip span {
+    font-size: 10px;
+  }
+
+  .resource-strip b {
+    font-size: 14px;
+  }
+
+  .layout {
+    grid-template-rows: minmax(200px, 0.72fr) minmax(0, 1.28fr);
+  }
+
+  canvas {
+    width: min(36dvh, 72vw);
+  }
+
+  .mine-btn {
+    min-height: 48px;
+    font-size: 15px;
+  }
+
+  .tabs {
+    gap: 5px;
+    padding: 8px;
+  }
+
+  .tab {
+    min-height: 36px;
+    font-size: 11px;
+  }
+
+  .cards {
+    padding: 8px;
+    gap: 7px;
+  }
+
+  .card {
+    min-height: 86px;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .buy {
+    grid-column: 1 / -1;
+  }
+
+  .meta h2 {
+    font-size: 13px;
+  }
+
+  .meta p,
+  .meta .level {
+    font-size: 11px;
+  }
+
+  .prestige-panel {
+    min-height: 56px;
+    padding: 8px;
   }
 }

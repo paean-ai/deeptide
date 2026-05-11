@@ -20,6 +20,8 @@ body {
   align-items: center;
   justify-content: center;
   user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
 }
 
 #shell {
@@ -60,12 +62,16 @@ canvas {
 
 #hud b,
 #hud span {
+  min-width: 0;
   min-height: 28px;
   padding: 5px 9px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 4px;
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #hud b { color: var(--blue); }
@@ -80,6 +86,7 @@ canvas {
 
 button {
   min-height: 48px;
+  min-width: 0;
   padding: 7px;
   color: #061018;
   background: var(--blue);
@@ -88,6 +95,18 @@ button {
   font: 900 13px ui-monospace, monospace;
   cursor: pointer;
   touch-action: manipulation;
+  transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease;
+  overflow-wrap: anywhere;
+}
+
+button:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+button:not(:disabled):active {
+  transform: translateY(2px);
+  filter: brightness(1.1);
 }
 
 button:disabled {
@@ -95,6 +114,7 @@ button:disabled {
   background: #101722;
   border-color: var(--line);
   cursor: not-allowed;
+  opacity: 0.72;
 }
 
 #cast { background: var(--gold); border-color: #ffe197; }
@@ -104,9 +124,13 @@ button:disabled {
   min-height: 30px;
   display: flex;
   gap: 6px;
-  overflow: hidden;
+  overflow-x: auto;
+  scrollbar-width: none;
   pointer-events: none;
+  mask-image: linear-gradient(90deg, #000 92%, transparent);
 }
+
+#book::-webkit-scrollbar { display: none; }
 
 #book span {
   padding: 6px 8px;
@@ -129,9 +153,10 @@ button:disabled {
   border-radius: 5px;
   font-size: 12px;
   line-height: 1.45;
+  text-wrap: pretty;
 }
 
-@media (hover: none) and (pointer: coarse) {
+@media (max-width: 700px), (hover: none) and (pointer: coarse) {
   #shell {
     width: 100vw;
     height: 100dvh;
@@ -141,9 +166,39 @@ button:disabled {
     border-radius: 0;
   }
   #controls {
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     bottom: max(108px, calc(env(safe-area-inset-bottom) + 104px));
+    gap: 6px;
   }
-  button { min-height: 44px; }
+  button {
+    min-height: 46px;
+    padding: 6px 5px;
+    font-size: 11px;
+  }
   #book { bottom: max(70px, calc(env(safe-area-inset-bottom) + 66px)); }
+  #hud {
+    gap: 5px;
+    max-height: 108px;
+    overflow: hidden;
+  }
+  #hud b,
+  #hud span {
+    min-height: 25px;
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+  #log {
+    min-height: 50px;
+    max-height: 58px;
+    padding: 7px 9px;
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 430px) {
+  #controls {
+    bottom: max(100px, calc(env(safe-area-inset-bottom) + 96px));
+  }
+  #book { bottom: max(62px, calc(env(safe-area-inset-bottom) + 58px)); }
+  button { font-size: 10px; }
 }

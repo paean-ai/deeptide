@@ -35,6 +35,7 @@ body {
     var(--bg);
   font-family: "Courier New", monospace;
   overflow: hidden;
+  overflow-x: hidden;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -49,11 +50,24 @@ button {
   cursor: pointer;
   box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.35);
   touch-action: manipulation;
+  transition: transform 120ms ease, border-color 120ms ease, filter 120ms ease, opacity 120ms ease;
 }
 
 button:hover:not(:disabled) {
   border-color: var(--gold);
   color: #fff7d4;
+}
+
+button:focus-visible,
+.pack-item:focus-visible,
+.shop-card:focus-visible,
+.upgrade-card:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+button:not(:disabled):active {
+  transform: translateY(2px);
 }
 
 button:disabled {
@@ -182,6 +196,9 @@ h2 {
   border-radius: 4px;
   background: rgba(0, 0, 0, 0.24);
   text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stats em {
@@ -278,6 +295,7 @@ h2 {
   z-index: 2;
   touch-action: none;
   -webkit-user-select: none;
+  transition: filter 120ms ease, outline-color 120ms ease, transform 120ms ease;
 }
 
 .pack-item.selected {
@@ -400,6 +418,7 @@ h2 {
 @media (max-width: 1040px), (max-height: 720px) {
   body {
     overflow: auto;
+    overflow-x: hidden;
     place-items: start center;
   }
 
@@ -434,8 +453,9 @@ h2 {
 
   .game-shell {
     width: calc(100vw - 16px);
+    max-width: calc(100vw - 16px);
     gap: 8px;
-    grid-template-rows: 320px auto auto;
+    grid-template-rows: minmax(300px, 46dvh) auto auto;
   }
 
   .stage-panel {
@@ -490,7 +510,7 @@ h2 {
 
   .shop-actions,
   .pack-actions {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     padding: 0 10px;
     gap: 7px;
   }
@@ -499,6 +519,8 @@ h2 {
   .upgrade-choices {
     grid-template-columns: 1fr;
     padding: 8px 10px;
+    max-height: 54dvh;
+    overflow-y: auto;
   }
 
   .shop-card,
@@ -519,5 +541,43 @@ h2 {
 
   .panel-head {
     padding: 9px 10px;
+  }
+}
+
+@media (max-width: 430px) {
+  :root {
+    --cell: min(35px, calc((100vw - 64px) / 8));
+  }
+
+  body {
+    padding: 6px;
+  }
+
+  .game-shell {
+    width: calc(100vw - 12px);
+  }
+
+  .stage-panel {
+    grid-template-rows: 104px 1fr 40px;
+  }
+
+  .stats span {
+    min-width: 58px;
+    font-size: 10px;
+  }
+
+  .combat-log {
+    padding: 6px 10px;
+    font-size: 11px;
+  }
+
+  .pack-actions,
+  .shop-actions {
+    gap: 6px;
+  }
+
+  .shop-card,
+  .upgrade-card {
+    min-height: 88px;
   }
 }
