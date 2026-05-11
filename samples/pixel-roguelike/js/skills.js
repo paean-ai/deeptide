@@ -133,7 +133,7 @@ const SKILLS_DATA = [
     icon: '💨',
     color: '#e67e22',
     desc: lv => `攻速 +${(lv * 8).toFixed(0)}%`,
-    effect: (p, lv) => { p._attackSpeedMul = 1 - lv * 0.08; },
+    effect: (p, lv) => { p._attackSpeedMul = Math.max(0.35, 1 - lv * 0.08); },
   },
   {
     id: 'crit',
@@ -141,14 +141,14 @@ const SKILLS_DATA = [
     icon: '💥',
     color: '#e74c3c',
     desc: lv => `暴击率 +${(lv * 4).toFixed(0)}%`,
-    effect: (p, lv) => { p._critBonus = lv * 0.04; },
+    effect: (p, lv) => { p._critBonus = Math.min(0.65, lv * 0.04); },
   },
   {
     id: 'area',
     name: '范围扩大',
     icon: '🌊',
     color: '#e67e22',
-    desc: lv => `范围伤害 +${lv * 8}%`,
+    desc: lv => `攻击范围 +${lv * 8}%`,
     effect: (p, lv) => { p._areaMul = 1 + lv * 0.08; },
   },
 
@@ -171,7 +171,7 @@ const SKILLS_DATA = [
     icon: '🛡️',
     color: '#3498db',
     desc: lv => `受伤 -${(lv * 3).toFixed(0)}%`,
-    effect: (p, lv) => { p._shieldMul = 1 - lv * 0.03; },
+    effect: (p, lv) => { p._shieldMul = Math.max(0.35, 1 - lv * 0.03); },
   },
   {
     id: 'dodge',
@@ -179,7 +179,7 @@ const SKILLS_DATA = [
     icon: '🌀',
     color: '#85c1e9',
     desc: lv => `闪避 +${(lv * 3).toFixed(0)}%`,
-    effect: (p, lv) => { p._dodgeBonus = lv * 0.03; },
+    effect: (p, lv) => { p._dodgeBonus = Math.min(0.6, lv * 0.03); },
   },
   {
     id: 'hpregen',
@@ -195,7 +195,10 @@ const SKILLS_DATA = [
     icon: '♻️',
     color: '#3498db',
     desc: lv => `重生 +${lv} 次 (满血复活)`,
-    effect: (p, lv) => { p._revives = lv; },
+    effect: (p, lv) => {
+      p._reviveMax = lv;
+      p._revives = Math.min(p._reviveMax, p._revives + 1);
+    },
   },
 
   // ======== 绿色系 - 特殊 ========

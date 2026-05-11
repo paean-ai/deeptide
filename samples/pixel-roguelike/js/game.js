@@ -1,4 +1,77 @@
 // ==================== 游戏主逻辑 ====================
+const META_KEY = 'pixel-roguelike-profile-v1';
+const META_UPGRADES = [
+  {
+    id: 'vitality',
+    name: { en: 'Account Vitality', zh: '账户生命' },
+    desc: { en: lv => `Start Max HP +${lv * 10}`, zh: lv => `开局最大生命 +${lv * 10}` },
+    max: 10,
+    cost: lv => 35 + lv * 25,
+    apply: (p, lv) => {
+      const add = lv * 10;
+      p.maxHP += add;
+      p.hp += add;
+    },
+  },
+  {
+    id: 'power',
+    name: { en: 'Account Power', zh: '账户威力' },
+    desc: { en: lv => `Start damage +${lv * 2}`, zh: lv => `开局伤害 +${lv * 2}` },
+    max: 10,
+    cost: lv => 45 + lv * 30,
+    apply: (p, lv) => {
+      p.baseAttack += lv * 2;
+      p.baseRangedAttack += lv * 2;
+    },
+  },
+  {
+    id: 'recovery',
+    name: { en: 'Account Recovery', zh: '账户恢复' },
+    desc: { en: lv => `Passive regen +${(lv * 0.5).toFixed(1)}/s`, zh: lv => `被动回血 +${(lv * 0.5).toFixed(1)}/秒` },
+    max: 8,
+    cost: lv => 50 + lv * 35,
+    apply: (p, lv) => { p._metaRegen = lv * 0.5; },
+  },
+  {
+    id: 'reach',
+    name: { en: 'Account Reach', zh: '账户拾取' },
+    desc: { en: lv => `Pickup range +${lv * 8}`, zh: lv => `拾取范围 +${lv * 8}` },
+    max: 8,
+    cost: lv => 30 + lv * 25,
+    apply: (p, lv) => { p._metaMagnetBonus = lv * 8; },
+  },
+];
+
+function defaultProfile() {
+  return {
+    essence: 0,
+    totalKills: 0,
+    bestWave: 1,
+    bestLevel: 1,
+    runs: 0,
+    upgrades: Object.fromEntries(META_UPGRADES.map(u => [u.id, 0])),
+  };
+}
+
+function loadProfile() {
+  try {
+    const raw = localStorage.getItem(META_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const base = defaultProfile();
+    return {
+      ...base,
+      ...parsed,
+      upgrades: { ...base.upgrades, ...(parsed.upgrades || {}) },
+    };
+  } catch (_) {
+    return defaultProfile();
+  }
+}
+
+function saveProfile(profile) {
+  localStorage.setItem(META_KEY, JSON.stringify(profile));
+}
+
 class Game {
   constructor() {
     this.canvas = document.getElementById('gameCanvas');
@@ -17,7 +90,10 @@ class Game {
 
     this.keys = {};
 
-    this.state = 'playing'; // playing | levelup | gameover
+    this.state = 'playing'; // playing | paused | levelup | gameover
+    this.prevState = 'playing';
+    this.profile = loadProfile();
+    this.runRewardClaimed = false;
     this.lastTime = 0;
     this.spawnTimer = 0;
     this.spawnCount = 0;
@@ -58,10 +134,12 @@ class Game {
   }
 
   initGame() {
+    this.profile = loadProfile();
     this.resizeCanvas();
     this.camera = new Camera(WORLD_W, WORLD_H, this.renderer.viewW, this.renderer.viewH);
     this.tilemap = new Tilemap(Math.ceil(WORLD_W / TILE_SIZE), Math.ceil(WORLD_H / TILE_SIZE));
     this.player = new Player(WORLD_W / 2, WORLD_H / 2);
+    this.applyMetaBonuses();
     this.skills = new SkillSystem(this.player);
     this.enemies = [];
     this.orbs = [];
@@ -72,6 +150,8 @@ class Game {
     this.effects = [];
 
     this.state = 'playing';
+    this.prevState = 'playing';
+    this.runRewardClaimed = false;
     this.spawnTimer = 0;
     this.spawnCount = 0;
     this.waveSpawned = 0;
@@ -90,8 +170,17 @@ class Game {
 
     document.getElementById('levelup-panel').classList.add('hidden');
     document.getElementById('gameover-panel').classList.add('hidden');
+    document.getElementById('pause-panel').classList.add('hidden');
     document.getElementById('skillbar-icons').innerHTML = '';
     this.updateHUD();
+  }
+
+  applyMetaBonuses() {
+    for (const upgrade of META_UPGRADES) {
+      const lv = this.profile.upgrades[upgrade.id] || 0;
+      if (lv > 0) upgrade.apply(this.player, lv);
+    }
+    this.player.hp = this.player.maxHP;
   }
 
   startWave() {
@@ -131,10 +220,15 @@ class Game {
   }
 
   spawnBoss() {
+    const cfg = waveConfig(this.player.wave);
     const waveMul = 1 + (this.player.wave - 1) * 0.2;
     const x = this.camera.worldLeft + Math.random() * this.renderer.viewW;
     const y = this.camera.worldTop - 30;
     const boss = new Enemy(x, y, 'boss', waveMul);
+    if (cfg.bossHp) {
+      boss.hp = cfg.bossHp;
+      boss.maxHp = cfg.bossHp;
+    }
     this.enemies.push(boss);
   }
 
@@ -149,10 +243,102 @@ class Game {
     });
   }
 
+  addHealNumber(x, y, value) {
+    this.damageNumbers.push({
+      x, y,
+      text: `+${Math.floor(value)}`,
+      color: '#43d17a',
+      alpha: 1,
+      life: 34,
+      vy: -1.4,
+    });
+  }
+
+  applyLifeSteal(damage, x, y, scale = 1) {
+    const rate = this.player.lifeSteal;
+    if (rate <= 0 || damage <= 0) return 0;
+    const amount = Math.max(1, Math.floor(damage * rate * scale));
+    const healed = this.player.heal(amount);
+    if (healed > 0) {
+      this.addHealNumber(x, y, healed);
+      if (this.frameCount % 3 === 0) {
+        this.particles.emit(this.player.x, this.player.y, 3, '#e05243', 2, 10, 2, { drag: 0.9 });
+      }
+    }
+    return healed;
+  }
+
+  addRunReward() {
+    if (this.runRewardClaimed) return 0;
+    this.runRewardClaimed = true;
+    const reward = Math.floor(this.player.kills / 4) + Math.max(0, this.player.wave - 1) * 3 + Math.max(0, this.player.level - 1);
+    this.profile.essence += reward;
+    this.profile.totalKills += this.player.kills;
+    this.profile.bestWave = Math.max(this.profile.bestWave || 1, this.player.wave);
+    this.profile.bestLevel = Math.max(this.profile.bestLevel || 1, this.player.level);
+    this.profile.runs += 1;
+    saveProfile(this.profile);
+    return reward;
+  }
+
+  metaName(upgrade) {
+    return upgrade.name[currentLang] || upgrade.name.en;
+  }
+
+  metaDesc(upgrade, level) {
+    const desc = upgrade.desc[currentLang] || upgrade.desc.en;
+    return desc(level);
+  }
+
+  renderMetaUpgrades(containerId) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    container.innerHTML = '';
+    for (const upgrade of META_UPGRADES) {
+      const lv = this.profile.upgrades[upgrade.id] || 0;
+      const maxed = lv >= upgrade.max;
+      const cost = maxed ? 0 : upgrade.cost(lv);
+      const card = document.createElement('button');
+      card.className = 'meta-upgrade';
+      card.type = 'button';
+      card.disabled = maxed || this.profile.essence < cost;
+      card.innerHTML = `
+        <b>${this.metaName(upgrade)} Lv.${lv}/${upgrade.max}</b>
+        <span>${this.metaDesc(upgrade, lv)}</span>
+        <strong>${maxed ? t('maxed') : t('buyUpgrade', cost)}</strong>
+      `;
+      card.onclick = () => this.buyMetaUpgrade(upgrade.id);
+      container.appendChild(card);
+    }
+  }
+
+  buyMetaUpgrade(id) {
+    const upgrade = META_UPGRADES.find(u => u.id === id);
+    if (!upgrade) return;
+    const lv = this.profile.upgrades[id] || 0;
+    if (lv >= upgrade.max) return;
+    const cost = upgrade.cost(lv);
+    if (this.profile.essence < cost) return;
+    this.profile.essence -= cost;
+    this.profile.upgrades[id] = lv + 1;
+    saveProfile(this.profile);
+    this.refreshMetaPanels();
+  }
+
+  refreshMetaPanels() {
+    const text = t('accountInfo', this.profile.essence, this.profile.bestWave || 1);
+    const pauseInfo = document.getElementById('pause-info');
+    if (pauseInfo) pauseInfo.textContent = text;
+    const gameoverMeta = document.getElementById('gameover-meta');
+    if (gameoverMeta && this.state === 'gameover') gameoverMeta.textContent = text;
+    this.renderMetaUpgrades('pause-upgrades');
+    this.renderMetaUpgrades('gameover-upgrades');
+  }
+
   // 玩家近战攻击（范围伤害，击中所有范围内敌人）
   doMeleeAttack() {
     const p = this.player;
-    const range = p.attackRange + p._areaMul * 10;
+    const range = p.attackRange * p._areaMul + 10;
     const dmg = p.attack;
     const crit = Math.random() < p.critChance;
     const finalDmg = crit ? Math.floor(dmg * (1 + p.critDamage)) : dmg;
@@ -175,13 +361,9 @@ class Game {
         if (p._areaMul > 1 && dist > p.attackRange * 0.6) {
           this.particles.emit(e.x, e.y, 4, '#e67e22', 2, 10, 3);
         }
-        // 吸血（对每个被击中的敌人生效）
-        if (p.lifeSteal > 0) {
-          p.hp = Math.min(p.maxHP, p.hp + Math.floor(finalDmg * p.lifeSteal));
-        }
+        this.applyLifeSteal(finalDmg, p.x, p.y - p.size - 8);
         // 击杀处理
         if (killed) {
-          if (p._novaDamage > 0) this.triggerNova(e.x, e.y);
           this.onEnemyKilled(e);
         }
       }
@@ -226,6 +408,7 @@ class Game {
           proj.hitTargets.add(e);
           const killed = e.takeDamage(proj.damage, this.player);
           this.addDamageNumber(e.x, e.y - e.size - 5, proj.damage, '#85c1e9');
+          this.applyLifeSteal(proj.damage, this.player.x, this.player.y - this.player.size - 8, 0.8);
           this.particles.emitHit(e.x, e.y);
           this.effects.push({ kind: 'ring', x: e.x, y: e.y, radius: 22, color: proj.crit ? '#f3f7ff' : '#a9e8ff', alpha: 0.5, life: 10, maxLife: 10 });
 
@@ -304,6 +487,7 @@ class Game {
       if (dist < 60) {
         const killed = e.takeDamage(this.player._novaDamage, this.player);
         this.addDamageNumber(e.x, e.y - e.size - 5, this.player._novaDamage, '#e74c3c');
+        this.applyLifeSteal(this.player._novaDamage, this.player.x, this.player.y - this.player.size - 8, 0.35);
         if (killed) this.onEnemyKilled(e);
       }
     }
@@ -330,6 +514,7 @@ class Game {
             const thornDmg = Math.floor(dmg * this.player._thorns);
             e.takeDamage(thornDmg, this.player);
             this.addDamageNumber(e.x, e.y - e.size - 5, thornDmg, '#27ae60');
+            this.applyLifeSteal(thornDmg, this.player.x, this.player.y - this.player.size - 8, 0.3);
             this.effects.push({ kind: 'ring', x: e.x, y: e.y, radius: 24, color: '#43d17a', alpha: 0.5, life: 10, maxLife: 10 });
             if (!e.alive) this.onEnemyKilled(e);
           }
@@ -338,6 +523,10 @@ class Game {
             this.onPlayerDeath();
           }
         }
+      } else if (result && result.burn) {
+        this.addDamageNumber(e.x, e.y - e.size - 5, result.dmg, '#e67e22');
+        this.applyLifeSteal(result.dmg, this.player.x, this.player.y - this.player.size - 8, 0.35);
+        this.onEnemyKilled(e);
       }
     }
   }
@@ -349,13 +538,19 @@ class Game {
       this.player.hp = this.player.maxHP;
       this.player.invincible = 60;
       this.particles.emitLevelUp(this.player.x, this.player.y);
+      this.effects.push({ kind: 'ring', x: this.player.x, y: this.player.y, radius: 72, color: '#f2c14e', alpha: 0.8, life: 18, maxLife: 18 });
+      this.addHealNumber(this.player.x, this.player.y - this.player.size - 14, this.player.maxHP);
+      this.updateHUD();
       return;
     }
 
+    const reward = this.addRunReward();
     this.state = 'gameover';
     const panel = document.getElementById('gameover-panel');
     panel.querySelector('#gameover-info').textContent =
       t('gameoverInfo', this.player.level, this.player.wave, this.player.kills);
+    this.refreshMetaPanels();
+    document.getElementById('gameover-meta').textContent = `${t('runEarned', reward)} | ${t('accountInfo', this.profile.essence, this.profile.bestWave || 1)}`;
     panel.classList.remove('hidden');
   }
 
@@ -376,6 +571,7 @@ class Game {
       const newLevel = currentLevel + 1;
       const card = document.createElement('div');
       card.className = 'skill-card';
+      card.tabIndex = 0;
       card.innerHTML = `
         <div class="skill-icon" style="background:${skill.color}20; border:2px solid ${skill.color}"></div>
         <div class="skill-name">${skillName(skill.id)}</div>
@@ -393,10 +589,34 @@ class Game {
         // 升级特效
         this.particles.emitLevelUp(this.player.x, this.player.y);
       };
+      card.onkeydown = e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          card.click();
+        }
+      };
       container.appendChild(card);
     }
 
     panel.classList.remove('hidden');
+  }
+
+  togglePause(force) {
+    if (this.state === 'levelup' || this.state === 'gameover') return;
+    const shouldPause = typeof force === 'boolean' ? force : this.state === 'playing';
+    if (shouldPause) {
+      this.prevState = this.state;
+      this.state = 'paused';
+      this.keys = {};
+      this.moveTarget = null;
+      this.touch.attack = false;
+      this.touch.skill = false;
+      document.getElementById('pause-panel').classList.remove('hidden');
+      this.refreshMetaPanels();
+    } else if (this.state === 'paused') {
+      this.state = 'playing';
+      document.getElementById('pause-panel').classList.add('hidden');
+    }
   }
 
   updateSkillBar() {
@@ -451,10 +671,12 @@ class Game {
     const p = this.player;
     document.getElementById('hud-level').textContent = `Lv.${p.level}`;
     document.getElementById('hud-hp-fill').style.width = `${(p.hp / p.maxHP) * 100}%`;
-    document.getElementById('hud-hp-text').textContent = `${Math.ceil(p.hp)}/${p.maxHP}`;
+    const reviveText = p._reviveMax > 0 ? ` | R${p._revives}` : '';
+    document.getElementById('hud-hp-text').textContent = `${Math.ceil(p.hp)}/${p.maxHP}${reviveText}`;
     document.getElementById('hud-exp-fill').style.width = `${(p.exp / p.expToNext) * 100}%`;
     document.getElementById('hud-exp-text').textContent = `${p.exp}/${p.expToNext}`;
     document.getElementById('hud-wave').textContent = `${t('wave')} ${p.wave}`;
+    document.getElementById('pause-btn').textContent = t('pause');
   }
 
   refreshLanguage() {
@@ -465,11 +687,17 @@ class Game {
       document.getElementById('gameover-info').textContent =
         t('gameoverInfo', this.player.level, this.player.wave, this.player.kills);
     }
+    this.refreshMetaPanels();
   }
 
   setupInput() {
     // 键盘
     document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' || e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        this.togglePause();
+        return;
+      }
       this.keys[e.key] = true;
       if (e.key === 'r' || e.key === 'R') {
         if (this.state === 'gameover') this.initGame();
@@ -603,6 +831,13 @@ class Game {
       btnSkill.addEventListener('touchcancel', e => { this.touch.skill = false; }, { passive: false });
     }
 
+    document.getElementById('pause-btn').addEventListener('click', () => this.togglePause(true));
+    document.getElementById('resume-btn').addEventListener('click', () => this.togglePause(false));
+    document.getElementById('pause-restart-btn').addEventListener('click', () => {
+      this.addRunReward();
+      this.initGame();
+    });
+
     // 重启按钮
     document.getElementById('restart-btn').addEventListener('click', () => {
       this.initGame();
@@ -662,8 +897,9 @@ class Game {
     p.update(WORLD_W, WORLD_H);
 
     // 自动回血
-    if (p._regenBonus > 0 && this.frameCount % 60 === 0) {
-      p.hp = Math.min(p.maxHP, p.hp + p._regenBonus);
+    if (p.regenPerSecond > 0 && this.frameCount % 60 === 0) {
+      const healed = p.heal(p.regenPerSecond);
+      if (healed > 0) this.addHealNumber(p.x, p.y - p.size - 8, healed);
     }
 
     // 近战自动攻击
@@ -674,7 +910,7 @@ class Game {
         const dx = e.x - p.x;
         const dy = e.y - p.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < p.attackRange + e.size + p._areaMul * 10) {
+        if (dist < p.attackRange * p._areaMul + e.size + 10) {
           p.lastMelee = time;
           this.doMeleeAttack();
           attacked = true;
@@ -745,6 +981,7 @@ class Game {
         const dy = e.y - p.y;
         if (Math.sqrt(dx * dx + dy * dy) < 70) {
           e.frozenTimer = Math.max(e.frozenTimer, 5);
+          e.frozenPower = Math.max(e.frozenPower || 0, p._freezePower);
           if (this.frameCount % 20 === 0) this.particles.emitStatus(e.x, e.y - e.size, '#a9e8ff');
         }
       }
@@ -761,6 +998,7 @@ class Game {
           e.burnDamage = Math.max(e.burnDamage, p._burnPower);
           e.takeDamage(p._burnPower, p);
           this.addDamageNumber(e.x, e.y - e.size - 5, p._burnPower, '#e67e22');
+          this.applyLifeSteal(p._burnPower, p.x, p.y - p.size - 8, 0.35);
           this.particles.emitStatus(e.x, e.y - e.size, '#ff6b35');
           if (!e.alive) this.onEnemyKilled(e);
         }
@@ -780,6 +1018,7 @@ class Game {
         if (result) {
           const killed = result.target.takeDamage(result.damage, p);
           this.addDamageNumber(result.target.x, result.target.y - result.target.size - 5, result.damage, '#9b59b6');
+          this.applyLifeSteal(result.damage, p.x, p.y - p.size - 8, 0.5);
           this.particles.emitHit(result.target.x, result.target.y);
           if (killed) this.onEnemyKilled(result.target);
         }

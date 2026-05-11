@@ -26,6 +26,7 @@ class Enemy {
 
     // 状态
     this.frozenTimer = 0;
+    this.frozenPower = 0;
     this.burnTimer = 0;
     this.burnDamage = 0;
     this.alive = true;
@@ -36,7 +37,7 @@ class Enemy {
   }
 
   get speedMul() {
-    if (this.frozenTimer > 0) return 0.4;
+    if (this.frozenTimer > 0) return Math.max(0.2, 1 - this.frozenPower);
     return 1;
   }
 
@@ -59,7 +60,7 @@ class Enemy {
       this.hp -= this.burnDamage;
       if (this.hp <= 0) {
         this.alive = false;
-        return 'burn';
+        return { burn: true, dmg: this.burnDamage };
       }
     }
 

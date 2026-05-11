@@ -128,6 +128,17 @@ canvas {
   font: 700 12px 'Courier New', monospace;
   pointer-events: auto;
   cursor: pointer;
+  touch-action: manipulation;
+}
+
+.lang-toggle:focus-visible,
+.skill-card:focus-visible,
+#restart-btn:focus-visible,
+#resume-btn:focus-visible,
+#pause-restart-btn:focus-visible,
+.meta-upgrade:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
 }
 
 /* 升级面板 */
@@ -172,6 +183,7 @@ canvas {
   cursor: pointer;
   text-align: center;
   transition: all 0.2s;
+  touch-action: manipulation;
 }
 
 .skill-card:hover {
@@ -219,31 +231,110 @@ canvas {
   line-height: 1.4;
 }
 
-/* 游戏结束 */
-#gameover-panel {
+/* 游戏结束 / 暂停 */
+#gameover-panel,
+#pause-panel {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 10px;
+  padding: 24px;
   background: rgba(0,0,0,0.85);
   z-index: 60;
 }
 
-#gameover-panel h2 {
+#pause-panel {
+  background: rgba(6,7,10,0.76);
+  backdrop-filter: blur(4px);
+}
+
+#gameover-panel h2,
+#pause-panel h2 {
   color: #e74c3c;
   font-size: 36px;
-  margin-bottom: 10px;
+  margin-bottom: 2px;
 }
 
-#gameover-panel p {
+#pause-panel h2 {
+  color: #f2c14e;
+}
+
+#gameover-panel p,
+#pause-panel p,
+#gameover-meta {
   color: #aaa;
-  font-size: 16px;
-  margin-bottom: 24px;
+  font-size: 14px;
+  text-align: center;
 }
 
-#restart-btn {
+.meta-upgrades {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(190px, 1fr));
+  gap: 10px;
+  width: min(520px, calc(100% - 20px));
+  margin: 8px 0;
+}
+
+.meta-upgrade {
+  min-height: 88px;
+  padding: 10px;
+  text-align: left;
+  background: rgba(14,18,25,0.9);
+  border: 1px solid rgba(196,201,209,0.28);
+  border-radius: 6px;
+  color: #e8edf5;
+  cursor: pointer;
+  font-family: inherit;
+  touch-action: manipulation;
+}
+
+.meta-upgrade b,
+.meta-upgrade span,
+.meta-upgrade strong {
+  display: block;
+}
+
+.meta-upgrade b {
+  color: #f3f7ff;
+  font-size: 13px;
+  margin-bottom: 5px;
+}
+
+.meta-upgrade span {
+  color: #8f9aaa;
+  font-size: 12px;
+  line-height: 1.35;
+  margin-bottom: 8px;
+}
+
+.meta-upgrade strong {
+  color: #f2c14e;
+  font-size: 12px;
+}
+
+.meta-upgrade:not(:disabled):hover {
+  border-color: #f2c14e;
+  background: rgba(22,28,38,0.96);
+}
+
+.meta-upgrade:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.pause-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+#restart-btn,
+#resume-btn,
+#pause-restart-btn {
   background: #2f80ed;
   color: #fff;
   border: none;
@@ -253,9 +344,21 @@ canvas {
   cursor: pointer;
   font-family: inherit;
   transition: background 0.2s;
+  touch-action: manipulation;
 }
 
-#restart-btn:hover {
+#resume-btn {
+  background: #43d17a;
+  color: #07100a;
+}
+
+#pause-restart-btn {
+  background: #343d4c;
+}
+
+#restart-btn:hover,
+#resume-btn:hover,
+#pause-restart-btn:hover {
   background: #1b4f9c;
 }
 
@@ -395,7 +498,7 @@ canvas {
   border-color: rgba(241,196,15,0.6);
 }
 
-@media (hover: none) and (pointer: coarse) {
+@media (max-width: 700px), (hover: none) and (pointer: coarse) {
   body {
     align-items: stretch;
   }
@@ -439,6 +542,8 @@ canvas {
 
   #skill-choices {
     width: min(92vw, 620px);
+    max-height: min(62dvh, 480px);
+    overflow-y: auto;
     flex-direction: column;
     gap: 10px;
   }
@@ -478,6 +583,22 @@ canvas {
     font-size: clamp(20px, 5vw, 32px);
   }
 
+  #pause-panel,
+  #gameover-panel {
+    padding: max(14px, env(safe-area-inset-top)) 12px max(14px, env(safe-area-inset-bottom));
+  }
+
+  .meta-upgrades {
+    grid-template-columns: 1fr;
+    width: min(92vw, 520px);
+    max-height: min(48dvh, 360px);
+    overflow-y: auto;
+  }
+
+  .meta-upgrade {
+    min-height: 76px;
+  }
+
   #tc-joystick-area {
     width: 58%;
     height: 72%;
@@ -498,6 +619,43 @@ canvas {
   #tc-btn-attack, #tc-btn-skill {
     width: 70px;
     height: 70px;
+  }
+}
+
+@media (max-width: 430px) {
+  #levelup-panel {
+    padding: max(14px, env(safe-area-inset-top)) 12px max(14px, env(safe-area-inset-bottom));
+  }
+
+  #skill-choices {
+    width: calc(100vw - 20px);
+  }
+
+  .skill-card {
+    grid-template-columns: 48px 1fr;
+    min-height: 82px;
+    padding: 10px;
+  }
+
+  .skill-card .skill-icon {
+    width: 44px;
+    height: 44px;
+  }
+
+  #tc-joystick {
+    width: 104px;
+    height: 104px;
+    left: 18px;
+    bottom: max(24px, calc(env(safe-area-inset-bottom) + 16px));
+  }
+
+  #tc-buttons {
+    gap: 10px;
+  }
+
+  #tc-btn-attack, #tc-btn-skill {
+    width: 64px;
+    height: 64px;
   }
 }
 

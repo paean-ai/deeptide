@@ -43,6 +43,7 @@ class Player {
     this._shieldMul = 1;
     this._dodgeBonus = 0;
     this._regenBonus = 0;
+    this._reviveMax = 0;
     this._revives = 0;
     this._speedBonus = 0;
     this._lifeStealBonus = 0;
@@ -54,6 +55,8 @@ class Player {
     this._expMul = 1;
     this._magnetBonus = 0;
     this._novaDamage = 0;
+    this._metaRegen = 0;
+    this._metaMagnetBonus = 0;
 
     // 移动
     this.dx = 0;
@@ -101,6 +104,10 @@ class Player {
     return this.baseLifeSteal + this._lifeStealBonus;
   }
 
+  get regenPerSecond() {
+    return this._regenBonus + this._metaRegen;
+  }
+
   get attackCooldown() {
     return this.attackInterval * this._attackSpeedMul;
   }
@@ -114,7 +121,14 @@ class Player {
   }
 
   getMagnetRange() {
-    return 60 + this._magnetBonus;
+    return 60 + this._magnetBonus + this._metaMagnetBonus;
+  }
+
+  heal(amount) {
+    if (amount <= 0 || this.hp <= 0) return 0;
+    const before = this.hp;
+    this.hp = Math.min(this.maxHP, this.hp + amount);
+    return this.hp - before;
   }
 
   addExp(amount) {
@@ -125,7 +139,7 @@ class Player {
       this.level++;
       this.expToNext = expForLevel(this.level);
       // 升级回血
-      this.hp = Math.min(this.hp + 20, this.maxHP);
+      this.heal(20);
       return true; // 触发升级
     }
     return false;

@@ -18,6 +18,7 @@ const state = {
   touch: {},
   customerTimer: 0,
   helperTimer: 0,
+  frame: 0,
 };
 
 const player = { x: 180, y: 320, speed: 3.2, facing: 1 };
@@ -26,6 +27,132 @@ const zones = {
   shelf: { x: 430, y: 175, w: 125, h: 105, label: 'SHELF' },
   register: { x: 705, y: 310, w: 110, h: 75, label: 'CHECKOUT' },
 };
+
+const PAL = {
+  ink: '#080a0f',
+  edge: '#141922',
+  shadow: '#050608',
+  wall: '#1f2b3a',
+  wallDark: '#111924',
+  wallLight: '#34465c',
+  floor: '#263447',
+  floorAlt: '#2d3c51',
+  floorDark: '#1a2533',
+  cream: '#f2e6bd',
+  gold: '#f2c14e',
+  goldDark: '#a66a25',
+  green: '#43d17a',
+  greenDark: '#1f7f46',
+  greenLight: '#8df09f',
+  blue: '#2f80ed',
+  blueLight: '#a9e8ff',
+  red: '#e05243',
+  redDark: '#8d2630',
+  violet: '#b66cff',
+  violetDark: '#5d328f',
+  wood: '#8b5a32',
+  woodDark: '#4e2e1d',
+  skin: '#e9b57f',
+  skinDark: '#a96f4a',
+  white: '#f3f7ff',
+  metal: '#8b93a1',
+};
+
+const SPRITE_MAP = {
+  k: PAL.ink,
+  e: PAL.edge,
+  w: PAL.white,
+  y: PAL.gold,
+  Y: PAL.goldDark,
+  g: PAL.green,
+  G: PAL.greenDark,
+  l: PAL.greenLight,
+  b: PAL.blue,
+  B: PAL.blueLight,
+  r: PAL.red,
+  R: PAL.redDark,
+  v: PAL.violet,
+  V: PAL.violetDark,
+  n: PAL.wood,
+  N: PAL.woodDark,
+  s: PAL.skin,
+  S: PAL.skinDark,
+  m: PAL.metal,
+  c: PAL.cream,
+};
+
+const SPRITES = {
+  player: [
+    '...kkkk...',
+    '..kssssk..',
+    '..kswwsk..',
+    '.kyyyyyk.',
+    'kyggggyk',
+    'kyggggyk',
+    '.kyNNyk.',
+    '..kn.nk..',
+    '.kn...nk.',
+  ],
+  helper: [
+    '...kkkk...',
+    '..kssssk..',
+    '..kswwsk..',
+    '.kgggggk.',
+    'kgbbbbgk',
+    'kggbbggk',
+    '.kgNNgk.',
+    '..kn.nk..',
+    '.kn...nk.',
+  ],
+  customerA: [
+    '...kkkk...',
+    '..kssssk..',
+    '..kswwsk..',
+    '.kvvvvvk.',
+    'kvyyyyvk',
+    'kvyyyyvk',
+    '.kvNNvk.',
+    '..kn.nk..',
+    '.kn...nk.',
+  ],
+  customerB: [
+    '...kkkk...',
+    '..kssssk..',
+    '..kswwsk..',
+    '.kbbbbbk.',
+    'kbccccbk',
+    'kbccccbk',
+    '.kbNNbk.',
+    '..kn.nk..',
+    '.kn...nk.',
+  ],
+  banana: [
+    '..yy.',
+    '.yYy.',
+    '.yy..',
+    'yY...',
+  ],
+  crate: [
+    'NNNNNN',
+    'NnYYnN',
+    'NYyyYN',
+    'NnYYnN',
+    'NNNNNN',
+  ],
+  register: [
+    'mmmmmmmm',
+    'mBBBBBBm',
+    'mBkkkkBm',
+    'mmmmmmmm',
+    'NNNNNNNN',
+    'NyyyyyyN',
+  ],
+};
+
+function hash2(x, y, seed = 0) {
+  const n = Math.sin(x * 12.9898 + y * 78.233 + seed * 41.17) * 43758.5453;
+  return n - Math.floor(n);
+}
 
 function rectHit(a, b, pad = 0) {
   return a.x > b.x - pad && a.x < b.x + b.w + pad && a.y > b.y - pad && a.y < b.y + b.h + pad;
@@ -69,6 +196,7 @@ function spawnCustomer() {
 }
 
 function update() {
+  state.frame++;
   const left = state.keys.ArrowLeft || state.keys.a || state.touch.left;
   const right = state.keys.ArrowRight || state.keys.d || state.touch.right;
   const up = state.keys.ArrowUp || state.keys.w || state.touch.up;
@@ -124,74 +252,197 @@ function update() {
   updateHud();
 }
 
-function drawRect(x, y, w, h, color, top = '#ffffff22') {
+function rect(x, y, w, h, color) {
   ctx.fillStyle = color;
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = top;
-  ctx.fillRect(x, y, w, 5);
+  ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
 }
 
-function drawPerson(x, y, color, flip = 1) {
-  ctx.save();
-  ctx.translate(Math.round(x), Math.round(y));
-  ctx.scale(flip, 1);
-  ctx.fillStyle = '#141923';
-  ctx.fillRect(-11, -30, 22, 33);
+function pixelText(text, x, y, color = PAL.white, align = 'left', size = 12) {
+  ctx.font = `bold ${size}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+  ctx.textAlign = align;
+  ctx.fillStyle = PAL.shadow;
+  ctx.fillText(text, x + 1, y + 1);
   ctx.fillStyle = color;
-  ctx.fillRect(-9, -20, 18, 18);
-  ctx.fillStyle = '#f0bf8f';
-  ctx.fillRect(-7, -34, 14, 12);
-  ctx.fillStyle = '#10151d';
-  ctx.fillRect(-5, -30, 3, 2);
-  ctx.fillRect(3, -30, 3, 2);
-  ctx.fillStyle = '#263242';
-  ctx.fillRect(-8, 3, 6, 14);
-  ctx.fillRect(2, 3, 6, 14);
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'left';
+}
+
+function drawPixelSprite(sprite, x, y, scale = 3, flip = 1, alpha = 1) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const rows = sprite.length;
+  const cols = sprite[0].length;
+  const ox = Math.round(x - cols * scale / 2);
+  const oy = Math.round(y - rows * scale);
+  ctx.translate(ox + (flip < 0 ? cols * scale : 0), oy);
+  ctx.scale(flip, 1);
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const ch = sprite[row][col];
+      if (ch !== '.' && SPRITE_MAP[ch]) {
+        ctx.fillStyle = SPRITE_MAP[ch];
+        ctx.fillRect(col * scale, row * scale, scale, scale);
+      }
+    }
+  }
   ctx.restore();
 }
 
+function drawShadow(x, y, w = 34, h = 10, alpha = 0.32) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = PAL.shadow;
+  for (let px = -w; px <= w; px += 3) {
+    for (let py = -h; py <= h; py += 3) {
+      if ((px * px) / (w * w) + (py * py) / (h * h) <= 1) {
+        ctx.fillRect(Math.round(x + px), Math.round(y + py), 3, 3);
+      }
+    }
+  }
+  ctx.restore();
+}
+
+function drawPanel(x, y, w, h, fill, hi, edge = PAL.ink) {
+  rect(x + 4, y + 4, w, h, '#00000030');
+  rect(x, y, w, h, edge);
+  rect(x + 3, y + 3, w - 6, h - 6, fill);
+  rect(x + 3, y + 3, w - 6, 5, hi);
+  rect(x + 3, y + h - 8, w - 6, 5, '#00000022');
+}
+
+function drawTileFloor() {
+  drawPanel(42, 96, 876, 382, PAL.floor, PAL.floorAlt, '#0b1119');
+  for (let x = 54; x < 900; x += 32) {
+    for (let y = 112; y < 462; y += 24) {
+      const alt = (Math.floor(x / 32) + Math.floor(y / 24)) % 2 === 0;
+      rect(x, y, 30, 22, alt ? PAL.floor : PAL.floorDark);
+      if (hash2(x, y, 3) > 0.78) rect(x + 5, y + 4, 5, 3, '#3a4d63');
+      if (hash2(x, y, 8) > 0.86) rect(x + 18, y + 14, 4, 3, '#172131');
+    }
+  }
+  rect(42, 96, 876, 12, PAL.wallLight);
+  rect(42, 466, 876, 12, '#0c121a');
+  rect(42, 96, 12, 382, '#0c121a');
+  rect(906, 96, 12, 382, PAL.wallDark);
+}
+
+function drawStorefront() {
+  rect(0, 0, W, H, '#0a0d14');
+  for (let i = 0; i < 70; i++) {
+    const x = (i * 137) % W;
+    const y = 12 + (i * 43) % 78;
+    const c = i % 5 === 0 ? PAL.gold : '#5d6d83';
+    rect(x, y, i % 3 === 0 ? 2 : 1, 1, c);
+  }
+  rect(40, 40, 880, 72, PAL.wallDark);
+  rect(54, 50, 852, 52, PAL.wall);
+  for (let x = 62; x < 900; x += 52) {
+    rect(x, 54, 36, 44, '#233249');
+    rect(x, 54, 36, 5, '#425875');
+  }
+  drawPanel(354, 34, 252, 58, '#14251c', PAL.greenDark, '#071009');
+  pixelText('PIXEL MART', 480, 69, PAL.greenLight, 'center', 26);
+  rect(392 + Math.sin(state.frame * 0.06) * 2, 77, 176, 3, '#d5ffb8');
+  for (let x = 46; x < 914; x += 48) {
+    rect(x, 104, 24, 16, PAL.red);
+    rect(x + 24, 104, 24, 16, PAL.cream);
+    rect(x, 120, 48, 5, PAL.ink);
+  }
+}
+
+function drawBananaGrove() {
+  const z = zones.field;
+  drawPanel(z.x, z.y, z.w, z.h, '#223f2a', PAL.greenDark, '#0c1b10');
+  for (let i = 0; i < 20; i++) {
+    const x = z.x + 14 + (i % 5) * 29;
+    const y = z.y + 24 + Math.floor(i / 5) * 24;
+    rect(x, y + 10, 4, 16, PAL.greenDark);
+    rect(x - 6, y + 4, 16, 8, PAL.green);
+    rect(x + 4, y, 16, 8, PAL.greenLight);
+    drawPixelSprite(SPRITES.banana, x + 10, y + 21, 3, 1);
+  }
+  for (let i = 0; i < Math.min(state.stock, 8); i++) {
+    drawPixelSprite(SPRITES.crate, z.x + 26 + i * 16, z.y + 124, 2, 1);
+  }
+}
+
+function drawShelf() {
+  const z = zones.shelf;
+  drawShadow(z.x + z.w / 2, z.y + z.h + 7, 74, 13, 0.28);
+  drawPanel(z.x, z.y, z.w, z.h, PAL.wood, '#b06d36', PAL.woodDark);
+  for (let r = 0; r < 3; r++) {
+    rect(z.x + 9, z.y + 22 + r * 27, z.w - 18, 7, PAL.woodDark);
+    rect(z.x + 12, z.y + 20 + r * 27, z.w - 24, 3, '#c8864b');
+  }
+  const cap = Math.min(state.shelf, 15);
+  for (let i = 0; i < cap; i++) {
+    const x = z.x + 18 + (i % 5) * 20;
+    const y = z.y + 19 + Math.floor(i / 5) * 27;
+    const colors = [PAL.gold, PAL.green, PAL.blueLight, PAL.red, PAL.violet];
+    rect(x - 1, y + 2, 14, 17, PAL.ink);
+    rect(x, y, 12, 17, colors[i % colors.length]);
+    rect(x + 2, y + 3, 8, 3, PAL.white);
+    rect(x + 2, y + 10, 8, 5, '#00000024');
+  }
+  if (state.shelf > cap) pixelText(`+${state.shelf - cap}`, z.x + z.w - 18, z.y + z.h - 10, PAL.gold, 'center', 10);
+}
+
+function drawRegister() {
+  const z = zones.register;
+  drawShadow(z.x + z.w / 2, z.y + z.h + 6, 66, 12, 0.26);
+  drawPanel(z.x, z.y, z.w, z.h, '#24476b', PAL.blue, '#102034');
+  drawPixelSprite(SPRITES.register, z.x + 54, z.y + 62, 5, 1);
+  rect(z.x + 14, z.y + 12, 24, 18, '#101722');
+  rect(z.x + 18, z.y + 16, 16, 8, PAL.greenLight);
+  rect(z.x + 72, z.y + 18, 22, 8, PAL.gold);
+  rect(z.x + 76, z.y + 30, 15, 4, PAL.ink);
+}
+
+function drawAisles() {
+  for (let i = 0; i < 3; i++) {
+    const x = 300 + i * 98;
+    drawShadow(x + 28, 380, 48, 9, 0.2);
+    drawPanel(x, 318, 58, 58, i === 1 ? '#314b5c' : '#3f3429', i === 1 ? PAL.blue : '#bd8045', PAL.ink);
+    for (let j = 0; j < 6; j++) {
+      const px = x + 10 + (j % 3) * 14;
+      const py = 333 + Math.floor(j / 3) * 18;
+      rect(px, py, 10, 12, [PAL.red, PAL.gold, PAL.green, PAL.blueLight][(i + j) % 4]);
+      rect(px + 2, py + 2, 6, 3, PAL.white);
+    }
+  }
+}
+
+function drawPerson(x, y, sprite, flip = 1, bob = 0) {
+  drawShadow(x, y + 17, 22, 6, 0.34);
+  drawPixelSprite(sprite, x, y + bob, 4, flip);
+}
+
 function draw() {
-  ctx.fillStyle = '#17202d';
-  ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = '#203046';
-  for (let x = 0; x < W; x += 48) {
-    for (let y = 92; y < H; y += 48) ctx.fillRect(x, y, 24, 24);
-  }
-  drawRect(42, 96, 876, 382, '#26344a');
-  drawRect(zones.field.x, zones.field.y, zones.field.w, zones.field.h, '#284b2e', '#4cca6c');
-  drawRect(zones.shelf.x, zones.shelf.y, zones.shelf.w, zones.shelf.h, '#583d25', '#f2c14e');
-  drawRect(zones.register.x, zones.register.y, zones.register.w, zones.register.h, '#2b4562', '#64c7ff');
+  drawStorefront();
+  drawTileFloor();
+  drawAisles();
+  drawBananaGrove();
+  drawShelf();
+  drawRegister();
 
-  ctx.font = '12px monospace';
-  ctx.fillStyle = '#edf4ff';
-  for (const z of Object.values(zones)) ctx.fillText(z.label, z.x, z.y - 8);
-
-  for (let i = 0; i < 12; i++) {
-    const x = zones.field.x + 18 + (i % 4) * 34;
-    const y = zones.field.y + 22 + Math.floor(i / 4) * 32;
-    ctx.fillStyle = '#6ee58a';
-    ctx.fillRect(x, y, 18, 18);
-    ctx.fillStyle = '#f2c14e';
-    ctx.fillRect(x + 5, y + 5, 8, 12);
-  }
-  ctx.fillStyle = '#f2c14e';
-  for (let i = 0; i < state.shelf; i++) {
-    ctx.fillRect(zones.shelf.x + 12 + (i % 5) * 20, zones.shelf.y + 18 + Math.floor(i / 5) * 24, 12, 16);
-  }
+  pixelText(zones.field.label, zones.field.x, zones.field.y - 9, PAL.greenLight);
+  pixelText(zones.shelf.label, zones.shelf.x, zones.shelf.y - 9, PAL.gold);
+  pixelText(zones.register.label, zones.register.x, zones.register.y - 9, PAL.blueLight);
 
   for (const c of state.customers) {
-    drawPerson(c.x, c.y + Math.sin(c.bob) * 2, c.phase === 'paying' ? '#64c7ff' : '#aa7dff', -1);
+    const sprite = c.phase === 'paying' ? SPRITES.customerB : SPRITES.customerA;
+    drawPerson(c.x, c.y, sprite, -1, Math.sin(c.bob) * 2);
   }
-  if (state.helperLevel > 0) drawPerson(350, 255, '#60d882', 1);
-  drawPerson(player.x, player.y, '#f2c14e', player.facing);
+  if (state.helperLevel > 0) {
+    const bob = Math.sin(state.frame * 0.08) * 1.5;
+    drawPerson(350, 255, SPRITES.helper, 1, bob);
+    pixelText(`LV ${state.helperLevel}`, 350, 202, PAL.greenLight, 'center', 10);
+  }
+  drawPerson(player.x, player.y, SPRITES.player, player.facing, (state.keys.ArrowLeft || state.keys.ArrowRight || state.keys.ArrowUp || state.keys.ArrowDown) ? Math.sin(state.frame * 0.28) * 1.5 : 0);
 
   for (const f of state.floaters) {
     ctx.globalAlpha = Math.max(0, f.life / 70);
-    ctx.fillStyle = f.color;
-    ctx.font = '14px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(f.text, f.x, f.y);
-    ctx.textAlign = 'left';
+    pixelText(f.text, f.x, f.y, f.color, 'center', 14);
     ctx.globalAlpha = 1;
   }
 }

@@ -17,6 +17,7 @@
       <div id="hud-hp-bar"><div id="hud-hp-fill"></div><span id="hud-hp-text">100/100</span></div>
       <div id="hud-exp-bar"><div id="hud-exp-fill"></div><span id="hud-exp-text">0/100</span></div>
       <div id="hud-wave">Wave 1</div>
+      <button id="pause-btn" class="lang-toggle" type="button" data-i18n="pause">Pause</button>
       <button id="lang-toggle" class="lang-toggle" type="button">中文</button>
     </div>
 
@@ -31,7 +32,20 @@
     <div id="gameover-panel" class="hidden">
       <h2 data-i18n="gameOver">Game Over</h2>
       <p id="gameover-info"></p>
+      <div id="gameover-meta"></div>
+      <div id="gameover-upgrades" class="meta-upgrades"></div>
       <button id="restart-btn" data-i18n="restart">Restart</button>
+    </div>
+
+    <!-- 暂停 / 局外成长 -->
+    <div id="pause-panel" class="hidden">
+      <h2 data-i18n="paused">Paused</h2>
+      <p id="pause-info"></p>
+      <div id="pause-upgrades" class="meta-upgrades"></div>
+      <div class="pause-actions">
+        <button id="resume-btn" type="button" data-i18n="resume">Resume</button>
+        <button id="pause-restart-btn" type="button" data-i18n="restart">Restart</button>
+      </div>
     </div>
 
     <!-- 技能栏 -->

@@ -1,12 +1,14 @@
 :root {
-  --bg: #0a0d12;
-  --panel: rgba(13, 17, 24, 0.86);
-  --line: rgba(235, 244, 255, 0.24);
-  --text: #edf4ff;
+  --bg: #080a0f;
+  --panel: rgba(10, 13, 19, 0.88);
+  --line: rgba(242, 230, 189, 0.30);
+  --text: #f3f7ff;
   --dim: #9caabe;
-  --green: #60d882;
+  --green: #43d17a;
   --gold: #f2c14e;
-  --blue: #64c7ff;
+  --blue: #a9e8ff;
+  --red: #e05243;
+  --ink: #050608;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -14,7 +16,10 @@
 body {
   min-height: 100dvh;
   overflow: hidden;
-  background: linear-gradient(#111827, #07090e);
+  background:
+    radial-gradient(circle at 50% 18%, rgba(67, 209, 122, 0.18), transparent 36%),
+    radial-gradient(circle at 74% 78%, rgba(242, 193, 78, 0.12), transparent 34%),
+    linear-gradient(#101722, #050608);
   color: var(--text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   display: flex;
@@ -33,6 +38,22 @@ body {
   background: #101722;
   border: 2px solid #303b4d;
   border-radius: 6px;
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.06),
+    0 20px 70px rgba(0,0,0,0.56),
+    inset 0 0 0 3px rgba(0,0,0,0.26);
+}
+
+#shell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background:
+    linear-gradient(rgba(255,255,255,0.035), transparent 1px) 0 0 / 100% 4px,
+    radial-gradient(circle at 50% 42%, transparent 42%, rgba(0,0,0,0.28));
+  mix-blend-mode: screen;
 }
 
 canvas {
@@ -63,14 +84,19 @@ canvas {
 #hud span,
 #panel button {
   min-height: 28px;
-  padding: 5px 9px;
+  padding: 6px 10px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 4px;
   font-size: 12px;
+  box-shadow: inset 0 0 0 2px rgba(0,0,0,0.22), 0 3px 0 rgba(0,0,0,0.22);
+  text-shadow: 1px 1px 0 var(--ink);
 }
 
-#hud b { color: var(--green); }
+#hud b {
+  color: var(--green);
+  border-color: rgba(67, 209, 122, 0.38);
+}
 #hud strong { color: var(--gold); }
 
 #panel {
@@ -86,19 +112,52 @@ button {
   border: 1px solid var(--line);
   border-radius: 5px;
   cursor: pointer;
+  touch-action: manipulation;
+  image-rendering: pixelated;
+  transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease, background 120ms ease;
+}
+
+button:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+button:not(:disabled):active {
+  transform: translateY(2px);
+  filter: brightness(1.1);
 }
 
 #panel button {
   min-width: 150px;
-  color: #06100b;
-  background: var(--green);
-  border-color: #a2efbb;
+  min-height: 42px;
+  color: #07100a;
+  background:
+    linear-gradient(#8df09f 0 18%, var(--green) 18% 78%, #1f8f4d 78%);
+  border: 2px solid #b5f47a;
+  box-shadow: inset 0 0 0 2px rgba(0,0,0,0.18), 0 4px 0 #0c3a21;
+  text-shadow: none;
+  overflow-wrap: anywhere;
+}
+
+#panel button:nth-child(2) {
+  background: linear-gradient(#f9dd83 0 18%, var(--gold) 18% 78%, #a66a25 78%);
+  border-color: #ffe8a2;
+  box-shadow: inset 0 0 0 2px rgba(0,0,0,0.18), 0 4px 0 #5c3715;
+}
+
+#panel button:nth-child(3) {
+  background: linear-gradient(#cdeeff 0 18%, var(--blue) 18% 78%, #2f80ed 78%);
+  border-color: #e8f8ff;
+  box-shadow: inset 0 0 0 2px rgba(0,0,0,0.18), 0 4px 0 #12365f;
 }
 
 #panel button:disabled {
   color: var(--dim);
-  background: rgba(13, 17, 24, 0.72);
+  background: rgba(13, 17, 24, 0.78);
+  border-color: rgba(235, 244, 255, 0.16);
+  box-shadow: inset 0 0 0 2px rgba(0,0,0,0.22), 0 3px 0 rgba(0,0,0,0.25);
   cursor: not-allowed;
+  opacity: 0.72;
 }
 
 #touch {
@@ -119,9 +178,13 @@ button {
 
 #touch button {
   pointer-events: auto;
-  width: 54px;
-  height: 54px;
-  background: rgba(6, 8, 12, 0.54);
+  width: 58px;
+  height: 58px;
+  background: rgba(6, 8, 12, 0.66);
+  border: 2px solid rgba(242, 230, 189, 0.34);
+  color: var(--text);
+  font-weight: 900;
+  text-shadow: 1px 1px #000;
 }
 
 #touch [data-dir="up"] { position: absolute; left: 45px; top: 0; }
@@ -134,10 +197,12 @@ button {
   bottom: max(86px, calc(env(safe-area-inset-bottom) + 78px));
   border-radius: 50%;
   color: #06100b;
-  background: var(--gold);
+  background: linear-gradient(#ffe8a2 0 18%, var(--gold) 18% 78%, #a66a25 78%);
+  border-color: #ffe08a;
+  box-shadow: inset 0 0 0 2px rgba(0,0,0,0.18), 0 8px 24px rgba(0,0,0,0.28), 0 4px 0 #5c3715;
 }
 
-@media (hover: none) and (pointer: coarse) {
+@media (max-width: 700px), (hover: none) and (pointer: coarse) {
   #shell {
     width: 100vw;
     height: 100dvh;
@@ -147,15 +212,56 @@ button {
     border-radius: 0;
   }
   #touch { display: block; }
-  #panel {
+  #hud {
     left: max(8px, env(safe-area-inset-left));
     right: max(8px, env(safe-area-inset-right));
     gap: 5px;
   }
+  #hud b,
+  #hud span {
+    min-height: 25px;
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+  #panel {
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
+    gap: 5px;
+    align-items: stretch;
+  }
   #panel button {
     min-width: 0;
+    max-width: 100%;
     flex: 1;
+    min-height: 44px;
     font-size: 10px;
     padding: 5px;
+    overflow-wrap: anywhere;
+  }
+  #touch div {
+    left: max(12px, env(safe-area-inset-left));
+    bottom: max(76px, calc(env(safe-area-inset-bottom) + 68px));
+  }
+  #action {
+    width: 74px;
+    height: 74px;
+    right: max(16px, env(safe-area-inset-right));
+    bottom: max(92px, calc(env(safe-area-inset-bottom) + 84px));
+  }
+}
+
+@media (max-width: 460px) {
+  #panel {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  #panel button {
+    font-size: 9px;
+    letter-spacing: 0;
+  }
+  #touch div {
+    transform: scale(0.92);
+    transform-origin: left bottom;
   }
 }
