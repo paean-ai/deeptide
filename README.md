@@ -166,6 +166,8 @@ the two.
 - [Zero CLI docs](https://github.com/a8e-ai/zero-cli/tree/main/docs) — comprehensive reference for the CLI engine.
 - [DeepTide native source](https://github.com/paean-ai/deeptide) — Swift codebase for the macOS app.
 - [`native/`](./native) — local DeepSeek runtime source: `ds4` inference engine and `dsgo` gateway.
+- [`docs/deepseek-v4-flash-q2.md`](./docs/deepseek-v4-flash-q2.md) — what the stock local V4 Flash Q2 build is and is not good for, and why deeptide caps it at 64k context. Also covers the higher-fidelity [Q4_K mixed-precision build](./docs/deepseek-v4-flash-q2.md#the-q4_k-mixed-precision-local-build) (153 GiB) for hosts with 192 GB+ memory.
+- [`docs/deepseek-v4-flash-iq2-asymmetric.md`](./docs/deepseek-v4-flash-iq2-asymmetric.md) — dialectical analysis of the asymmetric IQ2_XXS + Q2_K + Q8_0 + F16 quant (80.8 GiB), the size sweet spot for 128 GB Macs and single 80 GB H100 boxes. Walks through what the per-tensor-group precision plan gets right *and* the failure modes it takes on (expert collapse risk, FFN residual contamination, iMatrix dependence).
 
 ## Samples
 
