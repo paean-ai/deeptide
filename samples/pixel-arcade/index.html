@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Arcade</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Hub -->
+  <section id="screen-hub" class="screen">
+    <div class="hub-box">
+      <h1 data-i18n="title">PIXEL ARCADE</h1>
+      <p class="tagline" data-i18n="subtitle">Five quick games. One pixel cabinet.</p>
+      <div class="hub-bar">
+        <span data-i18n="pick">Pick a game</span>
+        <span id="hub-medals" class="medal-tally">🥇 0/5</span>
+      </div>
+      <div id="game-grid"></div>
+      <p class="howto" data-i18n="howto">Each game is a quick skill test.</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Play -->
+  <section id="screen-play" class="screen hidden">
+    <header id="playbar">
+      <button id="btn-back" class="icon-btn">‹</button>
+      <div class="pb-spacer"></div>
+      <button id="btn-pause" class="icon-btn">⏸</button>
+    </header>
+    <div id="stage">
+      <canvas id="arcade-canvas"></canvas>
+    </div>
+
+    <!-- Pause -->
+    <div id="overlay-pause" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="paused">PAUSED</h2>
+        <button id="btn-resume" class="big-btn" data-i18n="resume">Resume</button>
+        <button id="btn-pause-quit" class="ghost-btn" data-i18n="hub">Arcade</button>
+      </div>
+    </div>
+
+    <!-- Game over -->
+    <div id="overlay-over" class="overlay hidden">
+      <div class="panel">
+        <h2 id="over-title" class="lose">GAME OVER</h2>
+        <div id="over-medal" class="over-medal"></div>
+        <div id="over-score" class="over-score">0</div>
+        <div id="over-best" class="over-best">Best: 0</div>
+        <button id="btn-over-retry" class="big-btn" data-i18n="retry">Retry</button>
+        <button id="btn-over-hub" class="ghost-btn" data-i18n="hub">Arcade</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

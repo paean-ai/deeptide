@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Card Spire</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">PIXEL CARD SPIRE</h1>
+      <p class="tagline" data-i18n="subtitle">Climb the spire.</p>
+      <button id="btn-new" class="big-btn" data-i18n="play">NEW RUN</button>
+      <button id="btn-continue" class="ghost-btn hidden" data-i18n="continueRun">CONTINUE</button>
+      <p class="howto" data-i18n="howto">Play cards with Energy each turn.</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Map -->
+  <section id="screen-map" class="screen hidden">
+    <header class="bar">
+      <span id="map-hp" class="pill hp">♥ 72/72</span>
+      <span id="map-gold" class="pill gold">◆ 80</span>
+      <span id="map-floor" class="pill">Floor 1</span>
+      <div id="map-relics" class="relic-strip"></div>
+      <button id="btn-deck-view" class="icon-btn">🂠</button>
+    </header>
+    <h2 class="screen-title" data-i18n="mapTitle">THE SPIRE</h2>
+    <div id="map-scroll"><div id="map-area"></div></div>
+  </section>
+
+  <!-- Combat -->
+  <section id="screen-combat" class="screen hidden">
+    <header class="bar">
+      <span id="cb-hp" class="pill hp">♥ 72/72</span>
+      <span id="cb-energy" class="pill energy">3/3</span>
+      <span id="cb-gold" class="pill gold">◆ 80</span>
+      <span id="cb-turn" class="pill">Turn 1</span>
+      <button id="btn-cb-menu" class="icon-btn">✕</button>
+    </header>
+    <div id="cb-stage" class="stage">
+      <canvas id="scene"></canvas>
+    </div>
+    <footer id="cb-hand-area">
+      <div id="cb-piles">
+        <div class="pile draw"><span id="cb-draw-count">0</span><small data-i18n="draw">Draw</small></div>
+        <div class="pile discard"><span id="cb-discard-count">0</span><small data-i18n="discard">Discard</small></div>
+      </div>
+      <div id="cb-hand"></div>
+      <button id="btn-end-turn" class="end-btn" data-i18n="endTurn">End Turn</button>
+    </footer>
+  </section>
+
+  <!-- Reward -->
+  <section id="screen-reward" class="screen hidden">
+    <div class="sheet">
+      <h2 data-i18n="rewardTitle">SPOILS</h2>
+      <div id="reward-content"></div>
+      <button id="btn-reward-proceed" class="big-btn">Proceed</button>
+    </div>
+  </section>
+
+  <!-- Rest -->
+  <section id="screen-rest" class="screen hidden">
+    <div class="sheet">
+      <h2 data-i18n="restTitle">CAMPFIRE</h2>
+      <div class="campfire-art">♨</div>
+      <div id="rest-content"></div>
+    </div>
+  </section>
+
+  <!-- Shop -->
+  <section id="screen-shop" class="screen hidden">
+    <div class="sheet">
+      <h2 data-i18n="shopTitle">SHOP</h2>
+      <span id="shop-gold" class="pill gold">◆ 0</span>
+      <div id="shop-content"></div>
+      <button id="btn-shop-leave" class="ghost-btn" data-i18n="leave">Leave</button>
+    </div>
+  </section>
+
+  <!-- Event -->
+  <section id="screen-event" class="screen hidden">
+    <div class="sheet">
+      <div id="event-content"></div>
+    </div>
+  </section>
+
+  <!-- Result -->
+  <section id="screen-result" class="screen hidden">
+    <div class="sheet result">
+      <h2 id="result-title" class="win">VICTORY</h2>
+      <p id="result-sub" class="result-sub"></p>
+      <button id="btn-result-new" class="big-btn" data-i18n="newRun">New Run</button>
+      <button id="btn-result-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+    </div>
+  </section>
+
+  <!-- Card picker overlay -->
+  <div id="overlay-picker" class="overlay hidden">
+    <div class="picker-panel">
+      <p id="picker-hint" class="picker-hint"></p>
+      <div id="picker-grid"></div>
+      <button id="btn-picker-close" class="ghost-btn" data-i18n="close">Close</button>
+    </div>
+  </div>
+
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/content.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Town Tycoon</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">PIXEL TOWN TYCOON</h1>
+      <p class="tagline" data-i18n="subtitle">Place, supply, and grow a thriving town.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">PLAY</button>
+      <p class="howto" data-i18n="howto">Tap a building, then tap a tile to place it.</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <div class="hud-line">
+        <span id="hud-coins" class="hud-pill coins">◆ 0</span>
+        <span id="hud-pop" class="hud-pill">👥 0</span>
+        <span id="hud-staff" class="hud-pill staff">✓</span>
+        <div class="hud-rank">
+          <span id="hud-rank" class="rank-name">Hamlet</span>
+          <div class="rank-bar"><div id="rank-fill"></div></div>
+        </div>
+        <button id="btn-quests" class="icon-btn">🎯</button>
+      </div>
+      <div id="res-bar"></div>
+    </header>
+
+    <div id="stage">
+      <canvas id="game"></canvas>
+      <div id="build-panel" class="hidden"></div>
+      <div id="toast" class="hidden"></div>
+    </div>
+
+    <div id="quest-mini">🎯</div>
+    <footer id="palette"></footer>
+
+    <!-- Quests overlay -->
+    <div id="overlay-quests" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="quests">Quests</h2>
+        <div id="quest-list"></div>
+        <button id="btn-quests-close" class="ghost-btn" data-i18n="close">Close</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/data.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

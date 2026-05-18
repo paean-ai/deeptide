@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Survivors</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">PIXEL SURVIVORS</h1>
+      <p class="tagline" data-i18n="subtitle">Auto-attack. Level up. Outlast the horde.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">SURVIVE</button>
+      <button id="btn-armory" class="ghost-btn" data-i18n="armory">ARMORY</button>
+      <p class="howto" data-i18n="howto">Move to dodge — weapons fire on their own.</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Armory -->
+  <section id="screen-armory" class="screen hidden">
+    <div class="armory-box">
+      <h2 data-i18n="metaTitle">PERMANENT UPGRADES</h2>
+      <div class="armory-bank"><span data-i18n="bank">Bank</span>: <span id="armory-bank">◆ 0</span></div>
+      <div id="armory-grid"></div>
+      <button id="btn-armory-back" class="ghost-btn" data-i18n="back">Back</button>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <div class="hud-row">
+        <div id="hud-bars">
+          <div id="hud-hp-bar"><div id="hud-hp-fill"></div><span id="hud-hp-text">100/100</span></div>
+          <div id="hud-xp-bar"><div id="hud-xp-fill"></div></div>
+        </div>
+        <span id="hud-level" class="hud-tag">Lv 1</span>
+        <span id="hud-time" class="hud-tag time">0:00</span>
+        <span id="hud-kills" class="hud-tag">☠ 0</span>
+        <span id="hud-gold" class="hud-tag gold">◆ 0</span>
+        <button id="btn-pause" class="icon-btn">⏸</button>
+      </div>
+      <div id="hud-weapons"></div>
+    </header>
+
+    <div id="stage">
+      <canvas id="game"></canvas>
+      <div id="joystick" class="hidden"><div id="joy-knob"></div></div>
+    </div>
+
+    <!-- Level up -->
+    <div id="overlay-levelup" class="overlay hidden">
+      <div class="lvl-panel">
+        <h2 data-i18n="levelUp">LEVEL UP</h2>
+        <p class="lvl-sub" data-i18n="chooseUpgrade">Choose an upgrade</p>
+        <div id="levelup-cards"></div>
+      </div>
+    </div>
+
+    <!-- Pause -->
+    <div id="overlay-pause" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="paused">PAUSED</h2>
+        <button id="btn-resume" class="big-btn" data-i18n="resume">Resume</button>
+        <button id="btn-pause-restart" class="ghost-btn" data-i18n="restart">Restart</button>
+        <button id="btn-pause-quit" class="ghost-btn" data-i18n="quit">Quit</button>
+      </div>
+    </div>
+
+    <!-- Result -->
+    <div id="overlay-result" class="overlay hidden">
+      <div class="panel">
+        <h2 id="result-title" class="win">YOU SURVIVED</h2>
+        <div id="result-stats" class="result-stats"></div>
+        <button id="btn-result-again" class="big-btn" data-i18n="play">SURVIVE</button>
+        <button id="btn-result-menu" class="ghost-btn" data-i18n="back">Menu</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/data.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

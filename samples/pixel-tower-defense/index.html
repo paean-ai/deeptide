@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Tower Defense</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">PIXEL TOWER DEFENSE</h1>
+      <p class="tagline" data-i18n="subtitle">Build, upgrade, hold the line.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">PLAY</button>
+      <p class="howto" data-i18n="howto">Place towers on grass tiles.</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Level select -->
+  <section id="screen-select" class="screen hidden">
+    <div class="select-box">
+      <h2 data-i18n="selectLevel">SELECT LEVEL</h2>
+      <div id="level-list"></div>
+      <button id="btn-select-back" class="ghost-btn" data-i18n="back">Back</button>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <div id="hud-level" class="hud-level">Level</div>
+      <div class="hud-stats">
+        <span id="hud-lives" class="hud-pill lives">♥ 20</span>
+        <span id="hud-gold" class="hud-pill gold">◆ 250</span>
+        <span id="hud-wave" class="hud-pill wave">Wave 1</span>
+      </div>
+      <div class="hud-ctrl">
+        <div class="speed-group">
+          <button class="speed-btn active" data-speed="1">▶</button>
+          <button class="speed-btn" data-speed="2">▶▶</button>
+          <button class="speed-btn" data-speed="3">▶▶▶</button>
+        </div>
+        <button id="btn-pause" class="icon-btn">⏸</button>
+      </div>
+    </header>
+
+    <div id="stage">
+      <canvas id="game"></canvas>
+      <div id="tower-panel" class="hidden"></div>
+    </div>
+
+    <footer id="build-bar">
+      <div id="build-cards"></div>
+      <button id="btn-start-wave" class="start-btn">Start Wave</button>
+    </footer>
+
+    <!-- Pause overlay -->
+    <div id="overlay-pause" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="paused">PAUSED</h2>
+        <button id="btn-resume" class="big-btn" data-i18n="resume">Resume</button>
+        <button id="btn-pause-restart" class="ghost-btn" data-i18n="restart">Restart</button>
+        <button id="btn-pause-quit" class="ghost-btn" data-i18n="quit">Quit</button>
+      </div>
+    </div>
+
+    <!-- Result overlay -->
+    <div id="overlay-result" class="overlay hidden">
+      <div class="panel">
+        <h2 id="result-title" class="win">VICTORY</h2>
+        <div id="result-stars" class="stars"></div>
+        <p id="result-sub" class="result-sub"></p>
+        <p id="result-info" class="result-info"></p>
+        <button id="btn-result-next" class="big-btn">Next Level</button>
+        <button id="btn-result-retry" class="ghost-btn">Retry</button>
+        <button id="btn-result-menu" class="ghost-btn">Menu</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/data.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
