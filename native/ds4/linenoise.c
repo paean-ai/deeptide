@@ -835,6 +835,7 @@ void linenoiseAddCompletion(linenoiseCompletions *lc, const char *str) {
     size_t len = strlen(str);
     char *copy, **cvec;
 
+    if (len >= LINENOISE_MAX_LINE) return;
     copy = malloc(len+1);
     if (copy == NULL) return;
     memcpy(copy,str,len+1);
@@ -2270,7 +2271,7 @@ int linenoiseHistoryAdd(const char *line) {
 
     /* Initialization on first call. */
     if (history == NULL) {
-        history = malloc(sizeof(char*)*history_max_len);
+        history = calloc(history_max_len, sizeof(char*));
         if (history == NULL) return 0;
         memset(history,0,(sizeof(char*)*history_max_len));
     }
