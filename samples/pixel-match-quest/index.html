@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Match Quest</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">PIXEL MATCH QUEST</h1>
+      <p class="tagline" data-i18n="subtitle">Swap, match, and clear every objective.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">PLAY</button>
+      <p class="howto" data-i18n="howto">Swap two adjacent gems to line up 3 or more.</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Map -->
+  <section id="screen-map" class="screen hidden">
+    <header class="bar">
+      <button id="btn-map-back" class="ghost-btn" data-i18n="back">Back</button>
+      <h2 data-i18n="selectLevel">SELECT LEVEL</h2>
+      <span id="map-coins" class="pill coins">◆ 0</span>
+    </header>
+    <div id="level-list"></div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <button id="btn-game-back" class="icon-btn">‹</button>
+      <div class="hud-stat"><small data-i18n="moves">Moves</small><b id="hud-moves">0</b></div>
+      <div class="hud-stat"><small data-i18n="score">Score</small><b id="hud-score">0</b></div>
+      <span id="hud-coins" class="pill coins">◆ 0</span>
+    </header>
+    <div id="objective-bar">
+      <span id="obj-text">Goal</span>
+      <div class="obj-track"><div id="obj-fill"></div></div>
+    </div>
+
+    <div id="board-stage">
+      <canvas id="board"></canvas>
+      <div id="toast" class="hidden"></div>
+    </div>
+
+    <footer id="booster-bar">
+      <button id="booster-hammer" class="booster"><span class="b-ico">🔨</span><span class="b-count">0</span></button>
+      <button id="booster-shuffle" class="booster"><span class="b-ico">🔀</span><span class="b-count">0</span></button>
+      <button id="booster-moves" class="booster"><span class="b-ico">➕</span><span class="b-count">0</span></button>
+    </footer>
+
+    <!-- Result -->
+    <div id="overlay-result" class="overlay hidden">
+      <div class="panel">
+        <h2 id="result-title" class="win">LEVEL CLEAR</h2>
+        <div id="result-stars" class="stars"></div>
+        <p id="result-info" class="result-info"></p>
+        <button id="btn-result-next" class="big-btn" data-i18n="nextLevel">Next</button>
+        <button id="btn-result-retry" class="ghost-btn" data-i18n="tryAgain">Retry</button>
+        <button id="btn-result-map" class="ghost-btn" data-i18n="menu">Map</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/levels.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

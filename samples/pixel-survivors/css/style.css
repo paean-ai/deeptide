@@ -1,0 +1,137 @@
+/* Pixel Survivors - responsive pixel UI */
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+:root {
+  --bg: #14121f; --bg2: #1d1a2e; --panel: #262138; --panel2: #322b48;
+  --line: #423a5e; --gold: #ffd34d; --cyan: #7fe8ff; --green: #5fe07a;
+  --text: #e8e4f0; --muted: #9a93b4;
+  --safe-b: env(safe-area-inset-bottom, 0px); --safe-t: env(safe-area-inset-top, 0px);
+}
+html, body { height: 100%; background: var(--bg); color: var(--text);
+  font-family: 'Trebuchet MS','Segoe UI',system-ui,sans-serif;
+  overflow: hidden; user-select: none; -webkit-user-select: none; touch-action: none; }
+#app { width: 100vw; height: 100vh; height: 100dvh; position: relative; }
+.hidden { display: none !important; }
+.screen { position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; }
+
+/* ---- buttons ---- */
+.big-btn { font: inherit; font-weight: 700; font-size: clamp(15px,4.4vw,21px);
+  color: #1b1320; background: var(--gold); border: none; border-bottom: 5px solid #a8780f;
+  padding: 13px 38px; border-radius: 10px; cursor: pointer; letter-spacing: 1px; margin: 5px; }
+.big-btn:active { transform: translateY(3px); border-bottom-width: 2px; }
+.ghost-btn { font: inherit; font-weight: 600; font-size: 14px; color: var(--text);
+  background: var(--panel2); border: 2px solid var(--line); border-radius: 8px;
+  padding: 10px 24px; cursor: pointer; margin: 5px; }
+.ghost-btn:active { transform: translateY(2px); }
+.icon-btn { font: inherit; font-size: 15px; cursor: pointer; background: var(--panel);
+  color: var(--text); border: 2px solid var(--line); border-radius: 7px;
+  width: 36px; height: 32px; flex: 0 0 auto; }
+.lang-toggle { position: absolute; top: calc(12px + var(--safe-t)); right: 12px;
+  font: inherit; font-size: 13px; font-weight: 600; background: var(--panel2);
+  color: var(--text); border: 2px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+
+/* ---- title ---- */
+#screen-title { background: radial-gradient(circle at 50% 32%, #2e2748, #14121f 78%); }
+.title-box { text-align: center; padding: 24px; max-width: 460px; }
+.title-box h1 { font-size: clamp(26px,8vw,50px); letter-spacing: 2px; color: var(--gold);
+  text-shadow: 4px 4px 0 #7d5a0a, 0 0 20px rgba(255,211,77,.4); line-height: 1.1; }
+.tagline { color: var(--cyan); margin: 14px 0 24px; font-size: clamp(12px,3.4vw,16px); }
+.howto { color: var(--muted); margin-top: 22px; font-size: 12.5px; line-height: 1.6; }
+
+/* ---- armory ---- */
+.armory-box { text-align: center; padding: 20px; width: 100%; max-width: 540px;
+  max-height: 100%; overflow-y: auto; }
+.armory-box h2 { color: var(--gold); letter-spacing: 2px; margin-bottom: 8px;
+  font-size: clamp(18px,5vw,26px); }
+.armory-bank { color: var(--gold); font-weight: 700; margin-bottom: 16px; font-size: 15px; }
+#armory-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(150px,1fr));
+  gap: 10px; margin-bottom: 16px; }
+.meta-card { background: var(--panel); border: 2px solid var(--line); border-radius: 11px;
+  padding: 12px; display: flex; flex-direction: column; gap: 5px; }
+.mc-name { font-weight: 700; font-size: 15px; color: var(--cyan); }
+.mc-desc { font-size: 11.5px; color: var(--muted); min-height: 30px; }
+.mc-pips { display: flex; gap: 3px; }
+.mc-pips i { width: 13px; height: 9px; background: var(--panel2);
+  border: 1px solid var(--line); border-radius: 2px; }
+.mc-pips i.on { background: var(--gold); }
+.mc-buy { font: inherit; font-weight: 700; font-size: 12px; cursor: pointer;
+  background: var(--gold); color: #1b1320; border: none; border-radius: 6px;
+  padding: 8px; margin-top: 3px; }
+.mc-buy:disabled { background: var(--panel2); color: var(--muted); }
+
+/* ---- HUD ---- */
+#hud { width: 100%; background: var(--bg2); border-bottom: 2px solid var(--line);
+  padding: calc(5px + var(--safe-t)) 8px 5px; }
+.hud-row { display: flex; align-items: center; gap: 6px; }
+#hud-bars { flex: 1 1 auto; min-width: 90px; display: flex; flex-direction: column; gap: 3px; }
+#hud-hp-bar { position: relative; height: 16px; background: #3a1320;
+  border: 2px solid var(--line); border-radius: 5px; overflow: hidden; }
+#hud-hp-fill { height: 100%; background: linear-gradient(90deg,#ff5a5a,#ff8a6a); transition: width .15s; }
+#hud-hp-text { position: absolute; inset: 0; text-align: center; font-size: 10px;
+  font-weight: 700; line-height: 12px; text-shadow: 1px 1px 0 #000; }
+#hud-xp-bar { height: 7px; background: #1a2a3a; border: 2px solid var(--line);
+  border-radius: 4px; overflow: hidden; }
+#hud-xp-fill { height: 100%; background: linear-gradient(90deg,#5fd0ff,#9cffd0); transition: width .12s; }
+.hud-tag { font-weight: 700; font-size: 12px; padding: 4px 6px; background: var(--panel);
+  border: 2px solid var(--line); border-radius: 6px; white-space: nowrap; }
+.hud-tag.time { color: var(--cyan); } .hud-tag.gold { color: var(--gold); }
+#hud-weapons { display: flex; gap: 3px; margin-top: 4px; flex-wrap: wrap; }
+.wchip { display: flex; align-items: center; gap: 2px; background: var(--panel);
+  border: 2px solid var(--line); border-radius: 6px; padding: 2px 5px; font-size: 12px; }
+.wchip b { font-size: 10px; color: var(--gold); }
+.wchip.item { border-color: #5fa8c8; }
+.wchip.evo { border-color: var(--gold); box-shadow: 0 0 6px rgba(255,211,77,.5); }
+
+/* ---- stage ---- */
+#stage { flex: 1 1 auto; position: relative; overflow: hidden; min-height: 0;
+  background: #1a2418; touch-action: none; }
+#game { display: block; image-rendering: pixelated; width: 100%; height: 100%; }
+#joystick { position: fixed; width: 112px; height: 112px; margin: -56px 0 0 -56px;
+  border: 3px solid rgba(255,255,255,.3); border-radius: 50%;
+  background: rgba(255,255,255,.06); pointer-events: none; z-index: 5; }
+#joy-knob { position: absolute; width: 48px; height: 48px; margin: -24px 0 0 -24px;
+  left: 56px; top: 56px; background: rgba(255,211,77,.55);
+  border: 3px solid rgba(255,255,255,.5); border-radius: 50%; }
+
+/* ---- overlays ---- */
+.overlay { position: absolute; inset: 0; z-index: 20; display: flex;
+  align-items: center; justify-content: center; background: rgba(10,8,16,.85); }
+.panel { background: var(--panel); border: 3px solid var(--line); border-radius: 16px;
+  padding: 26px 32px; text-align: center; display: flex; flex-direction: column;
+  align-items: center; gap: 8px; max-width: 90%; }
+.panel h2 { letter-spacing: 2px; font-size: clamp(20px,6vw,30px); margin-bottom: 6px; }
+.panel h2.win, #result-title.win { color: var(--gold); text-shadow: 3px 3px 0 #7d5a0a; }
+.panel h2.lose, #result-title.lose { color: #ff5a5a; text-shadow: 3px 3px 0 #5a1414; }
+.result-stats { display: flex; flex-direction: column; gap: 6px; color: var(--text);
+  font-size: 14px; margin-bottom: 6px; }
+.result-gold { color: var(--gold); font-weight: 700; }
+
+/* ---- level up ---- */
+.lvl-panel { background: var(--panel); border: 3px solid var(--gold); border-radius: 16px;
+  padding: 20px; text-align: center; max-width: 96%; }
+.lvl-panel h2 { color: var(--gold); letter-spacing: 3px; font-size: clamp(20px,6vw,30px);
+  text-shadow: 3px 3px 0 #7d5a0a; }
+.lvl-sub { color: var(--cyan); font-size: 13px; margin: 4px 0 14px; }
+#levelup-cards { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.lvl-card { font: inherit; cursor: pointer; width: 142px; background: var(--panel2);
+  border: 3px solid var(--line); border-radius: 12px; padding: 12px 8px;
+  display: flex; flex-direction: column; align-items: center; gap: 5px; color: var(--text); }
+.lvl-card:active { transform: translateY(3px); }
+.lc-tag { font-size: 9px; letter-spacing: 1px; color: var(--muted); text-transform: uppercase; }
+.lc-icon { font-size: 36px; }
+.lc-name { font-weight: 700; font-size: 14px; }
+.lc-desc { font-size: 11px; color: var(--muted); line-height: 1.35; min-height: 44px; }
+.lvl-card.is-weapon { border-color: #5fa8c8; }
+.lvl-card.is-item { border-color: var(--green); }
+.lvl-card.is-new { box-shadow: 0 0 12px rgba(127,232,255,.4); }
+.lvl-card.is-evo { border-color: var(--gold); box-shadow: 0 0 16px rgba(255,211,77,.6); }
+.lvl-card.is-evo .lc-desc { color: var(--gold); font-weight: 700; }
+.lvl-card.is-heal { border-color: #ff7a8a; }
+
+/* ---- responsive ---- */
+@media (max-width: 420px) {
+  .lvl-card { width: 104px; }
+  .lc-icon { font-size: 28px; }
+  .lc-desc { font-size: 10px; min-height: 52px; }
+  .hud-tag { font-size: 11px; padding: 3px 5px; }
+}
