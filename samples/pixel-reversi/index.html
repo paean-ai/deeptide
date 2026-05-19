@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Reversi</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="lang-toggle">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 data-i18n="title">REVERSI</h1>
+    <p data-i18n="subtitle">Flank and flip — own the most discs.</p>
+    <p data-i18n="howto">Place a disc so it traps a line of the opponent's between yours; every trapped disc flips to your colour.</p>
+    <p id="pick" data-i18n="pickDiff">Choose a difficulty:</p>
+    <div id="diff-row" class="row"></div>
+    <p id="title-stats"></p>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-diff">EASY</span>
+      <span id="hud-score">● 2  ○ 2</span>
+      <span id="hud-turn">YOUR TURN</span>
+    </div>
+    <div class="controls">
+      <button id="btn-menu" class="ctrl ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+
+  <!-- Game over -->
+  <div id="overlay-over" class="overlay hidden">
+    <h2 id="over-title">RESULT</h2>
+    <p id="over-line"></p>
+    <div class="row">
+      <button id="btn-again" data-i18n="again">PLAY AGAIN</button>
+      <button id="btn-over-menu" class="ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
