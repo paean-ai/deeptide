@@ -26,6 +26,10 @@ const LEVELS = [
   { colors: 9, seed: 15971 },
   { colors: 10, seed: 17350 },
   { colors: 10, seed: 18866 },
+  { colors: 10, seed: 20415 },
+  { colors: 10, seed: 22043 },
+  { colors: 10, seed: 23718 },
+  { colors: 10, seed: 25391 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
