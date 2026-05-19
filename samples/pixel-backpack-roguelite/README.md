@@ -34,6 +34,11 @@ Adjacency is the main system: gems, gears, and batteries strengthen neighboring
 weapons. Bosses arrive every fifth wave, and the backpack can expand up to
 `8 x 7`.
 
+The run auto-saves to `localStorage` (pack layout, gold, runes, upgrades, wave,
+language) — close the tab and pick up where you left off. Combat itself is not
+saved, so reloading mid-wave returns you to that wave's pack phase. `Restart`
+begins a fresh run.
+
 ## Structure
 
 - `index.html` - game shell and script loading order.

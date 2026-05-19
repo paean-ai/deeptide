@@ -1,60 +1,30 @@
+// Pixel Fishing Idle - delta-timed fishing idle with a stop-the-marker catch
+// minigame, zones, orders, crew idle income, offline progress and save.
+
+const SAVE_KEY = 'pixel-fishing-idle-save';
+
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-const W = 900;
-const H = 620;
-
-const ZONES = [
-  { name: 'Cove', unlock: 1, sky: ['#17304f', '#295b79'], sea: ['#14506e', '#082b47'], accent: '#65d9ff' },
-  { name: 'Kelp Bay', unlock: 2, sky: ['#203d47', '#407566'], sea: ['#0f604f', '#07392e'], accent: '#68da86' },
-  { name: 'Moon Reef', unlock: 4, sky: ['#241f4d', '#544587'], sea: ['#29315e', '#111936'], accent: '#b7a7ff' },
-  { name: 'Sunken Crown', unlock: 7, sky: ['#40294d', '#7d4f62'], sea: ['#263253', '#121827'], accent: '#f4c85a' },
-];
-
-const RARITY = {
-  common: { mult: 1, color: '#9ee8ff' },
-  uncommon: { mult: 2.1, color: '#72df89' },
-  rare: { mult: 5, color: '#f4c85a' },
-  epic: { mult: 12, color: '#b7a7ff' },
-  mythic: { mult: 30, color: '#ffffff' },
-};
-
-const FISH = [
-  { name: 'Glass Minnow', zone: 0, rarity: 'common', value: 5, weight: 48, color: '#65d9ff' },
-  { name: 'Copper Carp', zone: 0, rarity: 'uncommon', value: 15, weight: 24, color: '#d68a4a' },
-  { name: 'Lantern Koi', zone: 0, rarity: 'rare', value: 45, weight: 8, color: '#f4c85a' },
-  { name: 'Kelp Pike', zone: 1, rarity: 'common', value: 18, weight: 42, color: '#68da86' },
-  { name: 'Emerald Eel', zone: 1, rarity: 'rare', value: 82, weight: 10, color: '#2ee6a6' },
-  { name: 'Moonfin', zone: 2, rarity: 'uncommon', value: 70, weight: 28, color: '#b7a7ff' },
-  { name: 'Star Ray', zone: 2, rarity: 'epic', value: 260, weight: 6, color: '#edf4ff' },
-  { name: 'Crown Levi', zone: 3, rarity: 'mythic', value: 1200, weight: 2, color: '#fff7c4' },
-];
+canvas.width = W;
+canvas.height = H;
 
 const state = {
-  coins: 0,
-  rod: 1,
-  bait: 1,
-  boat: 1,
-  crew: 1,
-  zone: 0,
-  weather: 'Calm',
-  mode: 'ready',
-  timer: 0,
-  biteAt: 0,
-  biteWindow: 0,
-  ripples: [],
-  sparkles: [],
-  log: ['Cast, hit the bite window, fill orders, and upgrade.'],
-  autoTimer: 0,
-  caught: null,
-  collection: {},
-  order: null,
+  coins: 0, rod: 1, bait: 1, boat: 1, crew: 1, zone: 0,
+  weather: 'Calm', collection: {}, order: null,
+  mode: 'ready', biteDelay: 0, waitT: 0, biteT: 0,
+  markerPos: 0.5, markerDir: 1,
+  ripples: [], sparkles: [], swimmers: [], caught: null, caughtFlash: 0,
+  log: [], crewTimer: 0, weatherTimer: 0, lastSave: Date.now(),
 };
 
-function rodCost() { return 24 * state.rod * state.rod; }
-function baitCost() { return 34 * state.bait * state.bait; }
-function boatCost() { return 90 * state.boat * state.boat; }
-function crewCost() { return 120 * state.crew * state.crew; }
+// ---- costs -------------------------------------------------------------
+function cost(key) { return Math.floor(UPGRADE[key].base * state[key] * state[key]); }
+function rodCost() { return cost('rod'); }
+function baitCost() { return cost('bait'); }
+function boatCost() { return cost('boat'); }
+function crewCost() { return cost('crew'); }
 
+// ---- helpers -----------------------------------------------------------
 function log(text) {
   state.log.unshift(text);
   state.log = state.log.slice(0, 4);
@@ -62,162 +32,185 @@ function log(text) {
 }
 
 function newOrder() {
-  const available = FISH.filter(f => f.zone <= state.zone && f.rarity !== 'mythic');
-  const f = available[Math.floor(Math.random() * available.length)];
-  state.order = { type: f.name, need: 2 + Math.floor(state.boat / 2), have: 0, reward: Math.floor(f.value * (4 + state.zone)) };
+  const avail = FISH.filter(f => f.zone <= state.zone && f.rarity !== 'mythic');
+  const f = avail[Math.floor(Math.random() * avail.length)];
+  state.order = { id: f.id, need: 2 + Math.floor(state.boat / 2), have: 0,
+    reward: Math.floor(f.value * (4 + state.zone)) };
 }
 
 function weatherBonus() {
-  if (state.weather === 'Lucky Tide') return 1.35;
-  if (state.weather === 'Storm') return 1.15;
-  return 1;
+  return state.weather === 'Lucky' ? 1.35 : state.weather === 'Storm' ? 1.15 : 1;
 }
-
 function rollWeather() {
   const r = Math.random();
-  state.weather = r > 0.88 ? 'Lucky Tide' : r > 0.72 ? 'Storm' : 'Calm';
+  state.weather = r > 0.88 ? 'Lucky' : r > 0.72 ? 'Storm' : 'Calm';
 }
 
 function weightedFish() {
-  const luck = 1 + state.bait * 0.16 + state.zone * 0.12 + (state.weather === 'Lucky Tide' ? 0.35 : 0);
+  const luck = 1 + state.bait * 0.16 + state.zone * 0.12 + (state.weather === 'Lucky' ? 0.35 : 0);
   const pool = FISH.filter(f => f.zone <= state.zone + (state.weather === 'Storm' ? 1 : 0) && f.zone <= ZONES.length - 1)
-    .map(f => {
-      const rarityRank = Object.keys(RARITY).indexOf(f.rarity);
-      return { ...f, rollWeight: Math.max(1, f.weight / (1 + rarityRank * luck * 0.55)) };
-    });
+    .map(f => ({ ...f, rollWeight: Math.max(1, f.weight / (1 + RARITY[f.rarity].rank * luck * 0.55)) }));
   const total = pool.reduce((s, f) => s + f.rollWeight, 0);
   let roll = Math.random() * total;
-  for (const f of pool) {
-    roll -= f.rollWeight;
-    if (roll <= 0) return f;
-  }
+  for (const f of pool) { roll -= f.rollWeight; if (roll <= 0) return f; }
   return pool[0];
 }
 
-function catchValue(f, perfect = false) {
-  return Math.floor(f.value * RARITY[f.rarity].mult * (1 + state.rod * 0.1) * (1 + state.boat * 0.08) * weatherBonus() * (perfect ? 1.55 : 1));
+function catchValue(f, mult) {
+  return Math.floor(f.value * RARITY[f.rarity].mult * (1 + state.rod * 0.1) *
+    (1 + state.boat * 0.08) * weatherBonus() * mult);
 }
 
-function cast() {
+// ---- catch minigame ----------------------------------------------------
+function bandHalf() { return Math.min(0.3, 0.11 + state.rod * 0.013); }
+function markerSpeed() { return 0.82 + state.zone * 0.13; }
+
+function reel() {
   if (state.mode === 'ready') {
     state.mode = 'waiting';
-    state.timer = 0;
-    state.biteAt = Math.max(45, 170 - state.rod * 15 - Math.random() * 55);
+    state.waitT = 0;
+    state.biteDelay = Math.max(0.5, 2.6 - state.rod * 0.13 - Math.random() * 1.4);
     state.caught = null;
-    log(`${ZONES[state.zone].name}: line cast in ${state.weather.toLowerCase()}.`);
-  } else if (state.mode === 'bite') {
-    const f = weightedFish();
-    const perfect = state.biteWindow > 34 && state.biteWindow < 76;
-    const value = catchValue(f, perfect);
-    state.coins += value;
-    state.mode = 'ready';
-    state.caught = f;
-    state.collection[f.name] = (state.collection[f.name] || 0) + 1;
-    if (state.order.type === f.name) state.order.have++;
-    if (state.order.have >= state.order.need) {
-      state.coins += state.order.reward;
-      log(`Order complete: ${state.order.type}. +${state.order.reward}`);
-      newOrder();
-    }
-    log(`${perfect ? 'Perfect catch' : 'Caught'} ${f.name} (${f.rarity}). +${value}`);
-    splash(560, 360, f.color, f.rarity === 'mythic' ? 40 : 22);
-    updateBook();
+    log(t('castIn', tZone(ZONES[state.zone].id), tWeather(state.weather)));
   } else if (state.mode === 'waiting') {
     state.mode = 'ready';
-    log('Pulled too early. The line went quiet.');
+    log(t('early'));
+  } else if (state.mode === 'bite') {
+    const d = Math.abs(state.markerPos - 0.5);
+    const half = bandHalf();
+    if (d > half) { state.mode = 'ready'; log(`${t('miss')} ${t('tooLate')}`); return; }
+    const perfect = d < half * 0.42;
+    landFish(weightedFish(), perfect ? 1.6 : 1, perfect ? 'perfect' : 'good');
   }
 }
 
-function splash(x, y, color, count) {
-  for (let i = 0; i < count; i++) {
-    state.ripples.push({ x: x + Math.random() * 80 - 40, y: y + Math.random() * 24 - 12, r: 2, life: 38, color });
-    state.sparkles.push({ x, y, vx: (Math.random() - 0.5) * 4.2, vy: -Math.random() * 4 - 1, life: 32, color });
+function landFish(f, mult, quality) {
+  const value = catchValue(f, mult);
+  state.coins += value;
+  state.mode = 'ready';
+  state.caught = f;
+  state.caughtFlash = 1;
+  state.collection[f.id] = (state.collection[f.id] || 0) + 1;
+  creditOrder(f);
+  log(t('caught', t(quality), tFish(f.id), tRarity(f.rarity), value));
+  splash(560, 360, f.color, f.rarity === 'mythic' ? 44 : quality === 'perfect' ? 30 : 20);
+  updateBook();
+  save();
+}
+
+function creditOrder(f) {
+  if (state.order && state.order.id === f.id) {
+    state.order.have++;
+    if (state.order.have >= state.order.need) {
+      state.coins += state.order.reward;
+      log(t('orderDone', tFish(f.id), state.order.reward));
+      newOrder();
+    }
   }
 }
 
 function crewCatch() {
   const f = weightedFish();
-  const value = Math.floor(catchValue(f, false) * (0.22 + state.crew * 0.08));
+  const value = Math.floor(catchValue(f, 1) * (0.22 + state.crew * 0.08));
   state.coins += value;
-  state.collection[f.name] = (state.collection[f.name] || 0) + 1;
-  if (state.order.type === f.name) state.order.have++;
-  splash(260 + Math.random() * 160, 390, f.color, 8);
-  log(`Crew hauled ${f.name}. +${value}`);
-  if (state.order.have >= state.order.need) {
-    state.coins += state.order.reward;
-    log(`Order complete: ${state.order.type}. +${state.order.reward}`);
-    newOrder();
-  }
+  state.collection[f.id] = (state.collection[f.id] || 0) + 1;
+  creditOrder(f);
+  splash(260 + Math.random() * 160, 392, f.color, 8);
+  log(t('crewHaul', tFish(f.id), value));
   updateBook();
 }
 
-function update() {
+function splash(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    state.ripples.push({ x: x + Math.random() * 80 - 40, y: y + Math.random() * 24 - 12, r: 2, life: 1, color });
+    state.sparkles.push({ x, y, vx: (Math.random() - 0.5) * 260, vy: -Math.random() * 250 - 60, life: 1, color });
+  }
+}
+
+// ---- ambient swimmers --------------------------------------------------
+function spawnSwimmers() {
+  state.swimmers = [];
+  const pool = FISH.filter(f => f.zone <= state.zone);
+  for (let i = 0; i < 5; i++) {
+    const f = pool[Math.floor(Math.random() * pool.length)];
+    state.swimmers.push({
+      fish: f, x: Math.random() * W, y: 400 + Math.random() * 170,
+      dir: Math.random() < 0.5 ? -1 : 1, speed: 18 + Math.random() * 34,
+    });
+  }
+}
+
+// ---- update ------------------------------------------------------------
+function update(dt) {
   if (state.mode === 'waiting') {
-    state.timer++;
-    if (state.timer >= state.biteAt) {
+    state.waitT += dt;
+    if (state.waitT >= state.biteDelay) {
       state.mode = 'bite';
-      state.biteWindow = 100;
-      log('BITE! Reel while the marker is centered.');
+      state.biteT = 0;
+      state.markerPos = Math.random();
+      state.markerDir = Math.random() < 0.5 ? -1 : 1;
+      log(t('bite'));
     }
   } else if (state.mode === 'bite') {
-    state.biteWindow -= 1.15 + Math.max(0, state.zone - 1) * 0.12;
-    if (state.biteWindow <= 0) {
-      state.mode = 'ready';
-      log('Too late. The fish shook free.');
-    }
+    state.biteT += dt;
+    state.markerPos += state.markerDir * markerSpeed() * dt;
+    if (state.markerPos <= 0) { state.markerPos = 0; state.markerDir = 1; }
+    if (state.markerPos >= 1) { state.markerPos = 1; state.markerDir = -1; }
+    if (state.biteT > 3.6) { state.mode = 'ready'; log(t('tooLate')); }
   }
 
-  state.autoTimer++;
-  if (state.autoTimer > Math.max(110, 430 - state.boat * 28 - state.crew * 22)) {
-    state.autoTimer = 0;
+  state.crewTimer += dt;
+  const crewInterval = Math.max(2.4, 9 - state.boat * 0.6 - state.crew * 0.55);
+  if (state.crewTimer >= crewInterval) {
+    state.crewTimer = 0;
     if (state.crew > 1 || state.boat > 1) crewCatch();
-    if (Math.random() < 0.18) rollWeather();
   }
+  state.weatherTimer += dt;
+  if (state.weatherTimer >= 12) { state.weatherTimer = 0; if (Math.random() < 0.5) rollWeather(); }
 
-  for (const r of state.ripples) {
-    r.r += 0.45;
-    r.life--;
-  }
+  for (const r of state.ripples) { r.r += 27 * dt; r.life -= dt * 1.6; }
   state.ripples = state.ripples.filter(r => r.life > 0);
-  for (const p of state.sparkles) {
-    p.x += p.vx;
-    p.y += p.vy;
-    p.vy += 0.12;
-    p.life--;
-  }
+  for (const p of state.sparkles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 520 * dt; p.life -= dt * 1.3; }
   state.sparkles = state.sparkles.filter(p => p.life > 0);
-  updateHud();
+  for (const s of state.swimmers) {
+    s.x += s.dir * s.speed * dt;
+    if (s.x < -60) { s.x = W + 60; s.dir = -1; }
+    if (s.x > W + 60) { s.x = -60; s.dir = 1; }
+  }
+  if (state.caughtFlash > 0) state.caughtFlash -= dt;
 }
 
-function drawFish(x, y, f, scale = 1) {
-  ctx.fillStyle = f.color;
-  ctx.fillRect(x, y, 42 * scale, 18 * scale);
-  ctx.fillRect(x + 8 * scale, y - 6 * scale, 22 * scale, 6 * scale);
-  ctx.fillRect(x - 10 * scale, y + 5 * scale, 10 * scale, 8 * scale);
-  ctx.fillStyle = '#071018';
-  ctx.fillRect(x + 31 * scale, y + 5 * scale, 4 * scale, 4 * scale);
-  ctx.fillStyle = RARITY[f.rarity].color;
-  ctx.fillRect(x + 10 * scale, y + 18 * scale, 18 * scale, 4 * scale);
-}
-
-function draw() {
-  const t = performance.now() / 1000;
+// ---- draw --------------------------------------------------------------
+function draw(t) {
   const zone = ZONES[state.zone];
-  const sky = ctx.createLinearGradient(0, 0, 0, H);
-  sky.addColorStop(0, zone.sky[0]);
-  sky.addColorStop(0.52, zone.sky[1]);
-  sky.addColorStop(0.53, zone.sea[0]);
-  sky.addColorStop(1, zone.sea[1]);
-  ctx.fillStyle = sky;
+  const grd = ctx.createLinearGradient(0, 0, 0, H);
+  grd.addColorStop(0, zone.sky[0]);
+  grd.addColorStop(0.52, zone.sky[1]);
+  grd.addColorStop(0.53, zone.sea[0]);
+  grd.addColorStop(1, zone.sea[1]);
+  ctx.fillStyle = grd;
   ctx.fillRect(0, 0, W, H);
 
+  // sky body (sun / storm)
   ctx.fillStyle = state.weather === 'Storm' ? '#d8e6ff' : '#f4c85a';
   ctx.fillRect(690, 70 + Math.sin(t) * 5, 48, 48);
-  if (state.weather === 'Lucky Tide') {
+  if (state.weather === 'Lucky') {
     ctx.fillStyle = 'rgba(255, 241, 166, 0.25)';
     for (let i = 0; i < 16; i++) ctx.fillRect((i * 67 + t * 30) % W, 120 + (i % 5) * 52, 6, 6);
   }
+  if (state.weather === 'Storm') {
+    ctx.fillStyle = 'rgba(216,230,255,0.5)';
+    for (let i = 0; i < 40; i++) ctx.fillRect((i * 53 + t * 260) % W, (i * 71 + t * 420) % 320, 2, 12);
+  }
+  if (state.zone >= 2) {
+    ctx.fillStyle = '#edf4ff';
+    for (let i = 0; i < 22; i++) ctx.fillRect((i * 39) % W, 30 + (i * 29) % 210, 3, 3);
+  }
 
+  // ambient swimming fish below the waterline
+  for (const s of state.swimmers) drawFishSprite(ctx, s.x, s.y, s.fish, 2.1, t, s.dir > 0);
+
+  // waterline highlights
   ctx.fillStyle = 'rgba(255,255,255,0.16)';
   for (let x = 0; x < W; x += 42) {
     const y = 360 + Math.sin(t * 2 + x * 0.03) * 6;
@@ -227,132 +220,184 @@ function draw() {
     ctx.fillStyle = '#185b45';
     for (let x = 30; x < W; x += 70) ctx.fillRect(x, 456 + Math.sin(t + x) * 10, 12, 88);
   }
-  if (state.zone >= 2) {
-    ctx.fillStyle = '#edf4ff';
-    for (let i = 0; i < 22; i++) ctx.fillRect((i * 39) % W, 30 + (i * 29) % 210, 3, 3);
-  }
 
-  ctx.fillStyle = '#5a3f2c';
-  ctx.fillRect(326, 276, 196, 40);
-  ctx.fillStyle = '#7b5738';
-  ctx.fillRect(356, 244, 122, 36);
-  ctx.fillStyle = '#f0bf8f';
-  ctx.fillRect(404, 212, 28, 26);
-  ctx.fillStyle = '#263243';
-  ctx.fillRect(394, 238, 48, 42);
-  ctx.fillStyle = '#65d9ff';
-  for (let i = 0; i < Math.min(4, state.crew); i++) ctx.fillRect(350 + i * 30, 232, 14, 18);
-  ctx.strokeStyle = '#d7b46a';
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.moveTo(430, 230);
-  ctx.lineTo(595, 286);
-  ctx.stroke();
+  const bob = drawBoat(ctx, t, state.crew);
 
+  // line + bobber
   if (state.mode !== 'ready') {
-    const bob = 365 + Math.sin(t * 7) * 8;
+    const by = 365 + Math.sin(t * 7) * 8;
     ctx.strokeStyle = state.mode === 'bite' ? '#f4c85a' : '#edf4ff';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(595, 286);
-    ctx.lineTo(570, bob);
+    ctx.moveTo(595, 286 + bob);
+    ctx.lineTo(570, by);
     ctx.stroke();
     ctx.fillStyle = state.mode === 'bite' ? '#f4c85a' : '#edf4ff';
-    ctx.fillRect(566, bob, 8, 8);
+    ctx.fillRect(566, by, 8, 8);
+    if (state.mode === 'waiting' && state.waitT > state.biteDelay - 0.6) {
+      drawLureShadow(ctx, 570, by + 26, t, zone.accent);
+    }
   }
 
+  // splashes
   for (const r of state.ripples) {
-    ctx.globalAlpha = Math.max(0, r.life / 38);
+    ctx.globalAlpha = Math.max(0, r.life);
     ctx.strokeStyle = r.color;
     ctx.lineWidth = 2;
     ctx.strokeRect(r.x - r.r, r.y - r.r / 2, r.r * 2, r.r);
-    ctx.globalAlpha = 1;
   }
+  ctx.globalAlpha = 1;
   for (const p of state.sparkles) {
-    ctx.globalAlpha = Math.max(0, p.life / 32);
+    ctx.globalAlpha = Math.max(0, p.life);
     ctx.fillStyle = p.color;
     ctx.fillRect(p.x, p.y, 5, 5);
-    ctx.globalAlpha = 1;
   }
-  if (state.caught) drawFish(390, 166, state.caught, 1.25);
+  ctx.globalAlpha = 1;
 
+  // freshly caught fish on display, with a pop
+  if (state.caught) {
+    const pop = 1 + Math.max(0, state.caughtFlash) * 0.5;
+    drawFishSprite(ctx, 450, 176, state.caught, 3 * pop, t, true);
+  }
+
+  // bite bar minigame
   if (state.mode === 'bite') {
-    ctx.fillStyle = 'rgba(5, 9, 15, 0.68)';
-    ctx.fillRect(300, 94, 300, 30);
+    const bx = 300, bw = 300, by = 96;
+    ctx.fillStyle = 'rgba(5, 9, 15, 0.74)';
+    ctx.fillRect(bx - 6, by - 8, bw + 12, 40);
     ctx.fillStyle = '#263243';
-    ctx.fillRect(314, 104, 272, 10);
+    ctx.fillRect(bx, by, bw, 14);
+    const half = bandHalf();
+    ctx.fillStyle = '#3a7d52';
+    ctx.fillRect(bx + (0.5 - half) * bw, by, half * 2 * bw, 14);
     ctx.fillStyle = '#72df89';
-    ctx.fillRect(410, 101, 80, 16);
+    ctx.fillRect(bx + (0.5 - half * 0.42) * bw, by, half * 0.84 * bw, 14);
     ctx.fillStyle = '#f4c85a';
-    ctx.fillRect(314 + state.biteWindow * 2.72, 96, 8, 26);
+    ctx.fillRect(bx + state.markerPos * bw - 3, by - 6, 6, 26);
   }
 }
 
+// ---- hud ---------------------------------------------------------------
 function updateHud() {
   document.getElementById('coins').textContent = Math.floor(state.coins);
   document.getElementById('rod').textContent = state.rod;
   document.getElementById('bait').textContent = state.bait;
   document.getElementById('boat').textContent = state.boat;
-  document.getElementById('zone').textContent = ZONES[state.zone].name;
-  document.getElementById('order').textContent = `${state.order.have}/${state.order.need} ${state.order.type}`;
-  document.getElementById('cast').textContent = state.mode === 'ready' ? 'Cast Line' : state.mode === 'bite' ? 'Reel In!' : 'Pull Back';
-  document.getElementById('rod-up').textContent = `Rod ${rodCost()}`;
-  document.getElementById('bait-up').textContent = `Bait ${baitCost()}`;
-  document.getElementById('boat-up').textContent = `Boat ${boatCost()}`;
-  document.getElementById('crew-up').textContent = `Crew ${crewCost()}`;
-  document.getElementById('zone-next').textContent = `Sail ${state.zone + 1 < ZONES.length ? ZONES[state.zone + 1].name : ZONES[0].name}`;
-  document.getElementById('rod-up').disabled = state.coins < rodCost();
-  document.getElementById('bait-up').disabled = state.coins < baitCost();
-  document.getElementById('boat-up').disabled = state.coins < boatCost();
-  document.getElementById('crew-up').disabled = state.coins < crewCost();
+  document.getElementById('zone').textContent = tZone(ZONES[state.zone].id);
+  document.getElementById('order').textContent = state.order
+    ? `${state.order.have}/${state.order.need} ${tFish(state.order.id)}` : '-';
+  document.getElementById('cast').textContent =
+    state.mode === 'ready' ? t('castLine') : state.mode === 'bite' ? t('reelIn') : t('pullBack');
+  const setBtn = (id, label, c) => {
+    const el = document.getElementById(id);
+    el.textContent = `${label} ${c}`;
+    el.disabled = state.coins < c;
+  };
+  setBtn('rod-up', t('upRod'), rodCost());
+  setBtn('bait-up', t('upBait'), baitCost());
+  setBtn('boat-up', t('upBoat'), boatCost());
+  setBtn('crew-up', t('upCrew'), crewCost());
+  const next = (state.zone + 1) % ZONES.length;
+  document.getElementById('zone-next').textContent = `${t('sail')} ${tZone(ZONES[next].id)}`;
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
 }
 
 function updateBook() {
-  const seen = FISH.filter(f => state.collection[f.name]);
-  document.getElementById('book').innerHTML = seen.slice(-5).map(f => (
-    `<span style="border-color:${RARITY[f.rarity].color};color:${f.color}">${f.name} x${state.collection[f.name]}</span>`
-  )).join('');
+  const seen = FISH.filter(f => state.collection[f.id]);
+  document.getElementById('book').innerHTML = seen.map(f =>
+    `<span style="border-color:${RARITY[f.rarity].color};color:${f.color}">${tFish(f.id)} x${state.collection[f.id]}</span>`
+  ).join('');
 }
 
-function buy(costFn, key, text) {
-  const cost = costFn();
-  if (state.coins < cost) return;
-  state.coins -= cost;
+// ---- upgrades ----------------------------------------------------------
+function buy(key, costFn) {
+  const c = costFn();
+  if (state.coins < c) return;
+  state.coins -= c;
   state[key]++;
-  log(text);
+  log(tUp(key));
+  save();
 }
 
-document.getElementById('cast').onclick = cast;
-document.getElementById('rod-up').onclick = () => buy(rodCost, 'rod', 'Rod upgraded: faster bites and higher value.');
-document.getElementById('bait-up').onclick = () => buy(baitCost, 'bait', 'Bait upgraded: rarer fish now surface more often.');
-document.getElementById('boat-up').onclick = () => buy(boatCost, 'boat', 'Boat upgraded: new waters and stronger idle income.');
-document.getElementById('crew-up').onclick = () => buy(crewCost, 'crew', 'Crew upgraded: idle hauls improved.');
-document.getElementById('zone-next').onclick = () => {
+function sail() {
   const next = (state.zone + 1) % ZONES.length;
   if (state.boat < ZONES[next].unlock) {
-    log(`${ZONES[next].name} requires boat ${ZONES[next].unlock}.`);
+    log(t('needBoat', tZone(ZONES[next].id), ZONES[next].unlock));
     return;
   }
   state.zone = next;
   rollWeather();
   newOrder();
-  log(`Sailed to ${ZONES[state.zone].name}. Weather: ${state.weather}.`);
-};
-document.addEventListener('keydown', e => {
-  if (e.key === ' ' || e.key === 'Enter') {
-    e.preventDefault();
-    cast();
-  }
-});
+  spawnSwimmers();
+  log(t('sailed', tZone(ZONES[state.zone].id), tWeather(state.weather)));
+  save();
+}
 
-function loop() {
-  update();
-  draw();
+// ---- save / load / offline --------------------------------------------
+function save() {
+  state.lastSave = Date.now();
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      coins: state.coins, rod: state.rod, bait: state.bait, boat: state.boat,
+      crew: state.crew, zone: state.zone, weather: state.weather,
+      collection: state.collection, order: state.order, lastSave: state.lastSave,
+    }));
+  } catch (e) { /* storage unavailable */ }
+}
+
+function load() {
+  let d;
+  try { d = JSON.parse(localStorage.getItem(SAVE_KEY)); } catch (e) { d = null; }
+  if (!d) { newOrder(); rollWeather(); return; }
+  Object.assign(state, {
+    coins: d.coins || 0, rod: d.rod || 1, bait: d.bait || 1, boat: d.boat || 1,
+    crew: d.crew || 1, zone: d.zone || 0, weather: d.weather || 'Calm',
+    collection: d.collection || {}, order: d.order || null,
+  });
+  if (!state.order) newOrder();
+  // offline crew income estimate
+  const elapsed = Math.min(OFFLINE_CAP_SECONDS, Math.max(0, (Date.now() - (d.lastSave || Date.now())) / 1000));
+  if (elapsed > 30 && (state.crew > 1 || state.boat > 1)) {
+    const crewInterval = Math.max(2.4, 9 - state.boat * 0.6 - state.crew * 0.55);
+    const hauls = elapsed / crewInterval;
+    const avg = catchValue(FISH[0], 1) * (0.22 + state.crew * 0.08) * (1 + state.zone * 1.5);
+    const earned = Math.floor(hauls * avg);
+    if (earned > 0) {
+      state.coins += earned;
+      setTimeout(() => log(t('welcomeBack', earned)), 300);
+    }
+  }
+}
+
+// ---- input -------------------------------------------------------------
+document.getElementById('cast').onclick = reel;
+document.getElementById('rod-up').onclick = () => buy('rod', rodCost);
+document.getElementById('bait-up').onclick = () => buy('bait', baitCost);
+document.getElementById('boat-up').onclick = () => buy('boat', boatCost);
+document.getElementById('crew-up').onclick = () => buy('crew', crewCost);
+document.getElementById('zone-next').onclick = sail;
+document.addEventListener('keydown', e => {
+  if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); reel(); }
+});
+canvas.addEventListener('pointerdown', e => { e.preventDefault(); reel(); });
+setupLanguageToggle(() => { updateHud(); updateBook(); });
+
+// ---- loop --------------------------------------------------------------
+let lastT = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  update(dt);
+  draw(now / 1000);
+  updateHud();
   requestAnimationFrame(loop);
 }
 
-newOrder();
-rollWeather();
-log('Cast, wait for the bite marker, then reel in.');
+setInterval(save, 5000);
+addEventListener('beforeunload', save);
+
+load();
+spawnSwimmers();
 updateBook();
-loop();
+log(t('howStart'));
+requestAnimationFrame(loop);

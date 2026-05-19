@@ -5,7 +5,7 @@ let currentLang = localStorage.getItem(LANG_KEY) || 'en';
 const TEXT = {
   en: {
     title: 'PIXEL ARCADE',
-    subtitle: 'Five quick games. One pixel cabinet.',
+    subtitle: 'Six quick games. One pixel cabinet.',
     pick: 'Pick a game',
     howto: 'Each game is a 60-second skill test. Beat your best and chase gold medals.',
     play: 'PLAY', back: 'Back', retry: 'Retry', hub: 'Arcade',
@@ -19,6 +19,7 @@ const TEXT = {
       reflex: ['Reflex Tap', '反应点击'],
       stack:  ['Tower Stack', '叠叠高'],
       dash:   ['Pixel Dash', '像素冲刺'],
+      squash: ['Bug Squash', '拍虫子'],
     },
     instr: {
       flap:   'Tap to flap. Fly through the gaps.',
@@ -26,14 +27,15 @@ const TEXT = {
       reflex: 'Tap the targets before they vanish.',
       stack:  'Tap to drop each block. Stack them high.',
       dash:   'Tap to jump. Leap over every obstacle.',
+      squash: 'Tap the bugs before they burrow away. Never hit a bomb.',
     },
     unit: {
-      flap: 'gaps', catch: 'fruit', reflex: 'hits', stack: 'blocks', dash: 'm',
+      flap: 'gaps', catch: 'fruit', reflex: 'hits', stack: 'blocks', dash: 'm', squash: 'bugs',
     },
   },
   zh: {
     title: '像素街机',
-    subtitle: '五个小游戏，一台像素机厅。',
+    subtitle: '六个小游戏，一台像素机厅。',
     pick: '选择一个游戏',
     howto: '每个游戏都是技巧考验，刷新纪录，争夺金牌。',
     play: '开始', back: '返回', retry: '重试', hub: '街机厅',
@@ -47,6 +49,7 @@ const TEXT = {
       reflex: ['Reflex Tap', '反应点击'],
       stack:  ['Tower Stack', '叠叠高'],
       dash:   ['Pixel Dash', '像素冲刺'],
+      squash: ['Bug Squash', '拍虫子'],
     },
     instr: {
       flap:   '点击让小鸟扇翅，穿过缝隙。',
@@ -54,9 +57,10 @@ const TEXT = {
       reflex: '在目标消失前点击它们。',
       stack:  '点击放下方块，把塔叠得更高。',
       dash:   '点击跳跃，越过所有障碍。',
+      squash: '在虫子钻回洞前拍中它们，千万别拍到炸弹。',
     },
     unit: {
-      flap: '个', catch: '个', reflex: '次', stack: '层', dash: '米',
+      flap: '个', catch: '个', reflex: '次', stack: '层', dash: '米', squash: '只',
     },
   },
 };

@@ -11,13 +11,14 @@ canvas.width = W; canvas.height = H;
 ctx.imageSmoothingEnabled = false;
 
 const GROUND = H - 70;
-const GAME_IDS = ['flap', 'catch', 'reflex', 'stack', 'dash'];
+const GAME_IDS = ['flap', 'catch', 'reflex', 'stack', 'dash', 'squash'];
 const MEDALS = {
   flap:   [6, 15, 28],
   catch:  [14, 32, 55],
   reflex: [14, 28, 46],
   stack:  [7, 15, 26],
   dash:   [260, 620, 1150],
+  squash: [10, 22, 40],
 };
 
 // ---- save --------------------------------------------------------------
@@ -336,6 +337,111 @@ GAMES.dash = {
   },
 };
 
+// ========================================================================
+// GAME 6: BUG SQUASH
+// ========================================================================
+GAMES.squash = {
+  init(G) {
+    const holes = [];
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+      holes.push({ cx: 110 + c * 130, cy: 250 + r * 168, occ: null });
+    }
+    G.s = { holes, spawnT: 0.7, escapes: 0 };
+  },
+  update(G, dt) {
+    const s = G.s;
+    s.spawnT -= dt;
+    if (s.spawnT <= 0) {
+      const empty = s.holes.filter(h => !h.occ);
+      if (empty.length) {
+        const h = empty[(Math.random() * empty.length) | 0];
+        const bomb = Math.random() < 0.15 + Math.min(0.13, G.score * 0.004);
+        const stay = Math.max(0.5, 1.3 - G.score * 0.02);
+        h.occ = { type: bomb ? 'bomb' : 'bug', life: stay, maxLife: stay, age: 0 };
+      }
+      s.spawnT = Math.max(0.3, 0.95 - G.score * 0.014) * (0.6 + Math.random() * 0.8);
+    }
+    for (const h of s.holes) {
+      if (!h.occ) continue;
+      h.occ.age += dt;
+      h.occ.life -= dt;
+      if (h.occ.life <= 0) {
+        if (h.occ.type === 'bug') s.escapes++;
+        h.occ = null;
+      }
+    }
+    if (s.escapes >= 6) endGame();
+  },
+  down(G, x, y) {
+    for (const h of G.s.holes) {
+      if (!h.occ) continue;
+      if (Math.abs(x - h.cx) < 56 && Math.abs(y - (h.cy - 8)) < 58) {
+        if (h.occ.type === 'bomb') {
+          G.shake = 0.5; burst(h.cx, h.cy - 10, 22, '#ff5a5a'); endGame(); return;
+        }
+        G.score++;
+        burst(h.cx, h.cy - 10, 12, '#7dff9f');
+        h.occ = null;
+        return;
+      }
+    }
+  },
+  render(G, ctx) {
+    skyGradient(ctx, W, H, '#2a3a2a', '#16241a');
+    ctx.fillStyle = '#3a5a32';
+    ctx.fillRect(0, GROUND, W, H - GROUND);
+    for (let i = 0; i < 6; i++) {
+      ctx.fillStyle = i < G.s.escapes ? '#ff5a5a' : '#2c3c2c';
+      ctx.fillRect(W - 30 - i * 22, 64, 16, 10);
+    }
+    for (const h of G.s.holes) {
+      ctx.fillStyle = '#10180f';
+      ctx.beginPath();
+      ctx.ellipse(h.cx, h.cy + 14, 58, 26, 0, 0, 6.283);
+      ctx.fill();
+      ctx.fillStyle = '#241b14';
+      ctx.beginPath();
+      ctx.ellipse(h.cx, h.cy + 10, 58, 24, 0, 0, 6.283);
+      ctx.fill();
+      if (!h.occ) continue;
+      const o = h.occ;
+      const show = Math.min(1, o.age * 7) * (o.life < 0.3 ? Math.max(0, o.life / 0.3) : 1);
+      const ey = h.cy - 16 + (1 - show) * 50;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(h.cx - 58, 0, 116, h.cy + 14);
+      ctx.clip();
+      if (o.type === 'bug') {
+        ctx.fillStyle = '#3aa84a';
+        ctx.fillRect(h.cx - 22, ey - 18, 44, 36);
+        ctx.fillStyle = '#5fd06a';
+        ctx.fillRect(h.cx - 22, ey - 18, 44, 12);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(h.cx - 13, ey - 8, 11, 11);
+        ctx.fillRect(h.cx + 3, ey - 8, 11, 11);
+        ctx.fillStyle = '#10180f';
+        ctx.fillRect(h.cx - 9, ey - 4, 5, 5);
+        ctx.fillRect(h.cx + 6, ey - 4, 5, 5);
+        ctx.fillStyle = '#2a7d36';
+        ctx.fillRect(h.cx - 16, ey - 28, 5, 12);
+        ctx.fillRect(h.cx + 11, ey - 28, 5, 12);
+      } else {
+        ctx.fillStyle = '#1a1a22';
+        ctx.fillRect(h.cx - 20, ey - 16, 40, 38);
+        ctx.fillStyle = '#3a3a48';
+        ctx.fillRect(h.cx - 20, ey - 16, 40, 10);
+        ctx.fillStyle = '#e0463f';
+        ctx.fillRect(h.cx - 20, ey + 4, 40, 7);
+        ctx.fillStyle = '#8a6526';
+        ctx.fillRect(h.cx - 2, ey - 26, 4, 10);
+        ctx.fillStyle = (Math.floor(G.time * 12) % 2) ? '#ffd34d' : '#ff8a3c';
+        ctx.fillRect(h.cx - 4, ey - 32, 8, 8);
+      }
+      ctx.restore();
+    }
+  },
+};
+
 // ---- HUD ---------------------------------------------------------------
 function drawHud() {
   ctx.font = 'bold 30px monospace';
@@ -469,7 +575,7 @@ function renderHub() {
   // medal tally
   let gold = 0;
   for (const id of GAME_IDS) { if (medalOf(id, save.best[id] || 0) === 3) gold++; }
-  $('hub-medals').textContent = '🥇 ' + gold + '/5';
+  $('hub-medals').textContent = '🥇 ' + gold + '/' + GAME_IDS.length;
 }
 
 // ---- wire --------------------------------------------------------------

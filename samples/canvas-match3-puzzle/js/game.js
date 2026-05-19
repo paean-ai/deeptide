@@ -1,5 +1,6 @@
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+const BEST_KEY = 'canvas-match3-puzzle-best';
 
 const N = 8;
 const TILE = 80;
@@ -29,7 +30,8 @@ const state = {
   particles: [],
   flashes: [],
   target: null,
-  message: '',
+  best: +(localStorage.getItem(BEST_KEY) || 0),
+  msg: null,
   messageTimer: 0,
 };
 
@@ -76,7 +78,7 @@ function restartLevel(resetScore = false) {
   state.combo = 1;
   state.selected = null;
   state.target = makeTarget();
-  state.message = `LEVEL ${state.level}`;
+  state.msg = { k: 'levelMsg', a: [state.level] };
   state.messageTimer = 90;
   makeBoard();
   ensurePlayable();
@@ -205,7 +207,7 @@ async function resolveMatches(origin = null) {
     state.score += 500 + state.moves * 25;
     restartLevel(false);
   } else if (state.moves <= 0) {
-    state.message = 'OUT OF MOVES';
+    state.msg = { k: 'outOfMoves' };
     state.messageTimer = 180;
   } else {
     ensurePlayable();
@@ -239,7 +241,7 @@ async function clickCell(x, y) {
         await resolveMatches(b);
       } else {
         swap(a, b);
-        state.message = 'NO MATCH';
+        state.msg = { k: 'noMatch' };
         state.messageTimer = 45;
       }
     } else {
@@ -350,10 +352,10 @@ function draw() {
   if (state.messageTimer > 0) {
     ctx.fillStyle = 'rgba(8, 12, 19, 0.62)';
     ctx.fillRect(0, 260, canvas.width, 118);
-    ctx.fillStyle = state.moves <= 0 && state.message === 'OUT OF MOVES' ? '#ff7d7d' : '#f4c85a';
+    ctx.fillStyle = state.moves <= 0 && state.msg && state.msg.k === 'outOfMoves' ? '#ff7d7d' : '#f4c85a';
     ctx.font = '900 42px ui-monospace, monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(state.message, canvas.width / 2, 333);
+    ctx.fillText(mt(state.msg), canvas.width / 2, 333);
   }
 }
 
@@ -372,12 +374,18 @@ function tick() {
 }
 
 function updateHud() {
+  if (state.score > state.best) {
+    state.best = state.score;
+    try { localStorage.setItem(BEST_KEY, state.best); } catch (e) { /* storage off */ }
+  }
   document.getElementById('level').textContent = state.level;
   document.getElementById('score').textContent = state.score;
+  document.getElementById('best').textContent = state.best;
   document.getElementById('moves').textContent = state.moves;
   document.getElementById('combo').textContent = `x${state.combo}`;
-  const g = GEMS[state.target?.type || 0];
-  document.getElementById('target').textContent = `${g.name} ${Math.min(state.target.collected, state.target.needed)}/${state.target.needed}`;
+  const ti = state.target ? state.target.type : 0;
+  document.getElementById('target').textContent =
+    `${gemName(ti)} ${Math.min(state.target.collected, state.target.needed)}/${state.target.needed}`;
 }
 
 function boardPos(e) {
@@ -397,11 +405,12 @@ document.getElementById('shuffle').onclick = () => {
   if (state.busy || state.moves <= 0) return;
   makeBoard();
   state.moves = Math.max(0, state.moves - 1);
-  state.message = 'SHUFFLE';
+  state.msg = { k: 'shuffleMsg' };
   state.messageTimer = 45;
   updateHud();
 };
 document.getElementById('restart').onclick = () => restartLevel(true);
+setupLanguageToggle(updateHud);
 
 restartLevel(true);
 tick();

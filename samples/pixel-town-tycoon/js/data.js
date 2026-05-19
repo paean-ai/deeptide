@@ -12,9 +12,12 @@ const RESOURCES = {
   water: { icon: '💧', color: '#5fb8e0', tier: 0 },
   wood:  { icon: '🪵', color: '#a8753a', tier: 0 },
   ore:   { icon: '⛏', color: '#9aa4b4', tier: 0 },
+  cotton:{ icon: '🌼', color: '#e8e0d0', tier: 0 },
   flour: { icon: '🥖', color: '#e8d8a8', tier: 1, sell: 11 },
   plank: { icon: '🧱', color: '#caa14a', tier: 1, sell: 13 },
+  cloth: { icon: '🧵', color: '#d8a0c0', tier: 1, sell: 15 },
   bread: { icon: '🍞', color: '#d99a4a', tier: 2, sell: 26 },
+  garment:{ icon: '👕', color: '#7fb0e0', tier: 2, sell: 48 },
   tools: { icon: '🔧', color: '#7fc8e0', tier: 2, sell: 60 },
 };
 const RES_IDS = Object.keys(RESOURCES);
@@ -34,6 +37,9 @@ const BUILDINGS = {
   sawmill:  { kind: 'processor', cost: 185, in: { wood: 3 },  out: 'plank', rate: 2.0, adj: 'lumber', color: '#a8854a', icon: '🪚', rank: 1, workers: 1 },
   bakery:   { kind: 'processor', cost: 260, in: { flour: 2, water: 2 }, out: 'bread', rate: 1.6, adj: 'mill', color: '#e0a85a', icon: '🥐', rank: 2, workers: 2 },
   smithy:   { kind: 'processor', cost: 320, in: { ore: 2, plank: 2 }, out: 'tools', rate: 1.3, adj: 'mine', color: '#6fa8c8', icon: '⚒', rank: 3, workers: 2 },
+  plantation:{ kind: 'producer', cost: 95,  out: 'cotton', rate: 2.0, adj: 'well', color: '#9ac06a', icon: '🌿', rank: 1, workers: 1 },
+  weaver:   { kind: 'processor', cost: 200, in: { cotton: 3 }, out: 'cloth', rate: 1.9, adj: 'plantation', color: '#c89ab8', icon: '🧶', rank: 1, workers: 1 },
+  tailor:   { kind: 'processor', cost: 300, in: { cloth: 2, water: 1 }, out: 'garment', rate: 1.4, adj: 'weaver', color: '#6f9ad0', icon: '✂', rank: 2, workers: 2 },
   warehouse:{ kind: 'storage',  cost: 220, cap: 80, adj: 'warehouse', color: '#7a8294', icon: '📦', rank: 1, workers: 0 },
 };
 const BUILDING_IDS = Object.keys(BUILDINGS);
@@ -82,8 +88,14 @@ const QUESTS = [
     text: ['Build a Bakery', '建造一座面包房'] },
   { type: 'produced', target: 'bread', n: 60, reward: 600,
     text: ['Produce 60 Bread', '累计生产 60 单位面包'] },
+  { type: 'build', target: 'plantation', n: 1, reward: 220,
+    text: ['Build a Plantation for cotton', '建造棉花田种植棉花'] },
+  { type: 'produced', target: 'cloth', n: 40, reward: 420,
+    text: ['Weave 40 Cloth', '累计织造 40 单位布料'] },
   { type: 'build', target: 'smithy', n: 1, reward: 750,
     text: ['Build a Smithy', '建造一座铁匠铺'] },
+  { type: 'build', target: 'tailor', n: 1, reward: 820,
+    text: ['Build a Tailor for garments', '建造裁缝铺缝制成衣'] },
   { type: 'earned', n: 9000, reward: 1100,
     text: ['Earn 9000 coins total', '累计赚取 9000 金币'] },
   { type: 'earned', n: 24000, reward: 2600,

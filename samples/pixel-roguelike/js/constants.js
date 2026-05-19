@@ -102,6 +102,18 @@ const ENEMY_TYPES = {
     hp: 100, attack: 26, speed: 1.1, size: 16,
     exp: 35, score: 5,
   },
+  spider: {
+    name: '毒蛛',
+    color: '#7d3c98',
+    hp: 24, attack: 6, speed: 2.0, size: 9,
+    exp: 11, score: 2,
+  },
+  golem: {
+    name: '石巨人',
+    color: '#5d6d7e',
+    hp: 170, attack: 28, speed: 0.7, size: 18,
+    exp: 55, score: 8,
+  },
   boss: {
     name: 'Boss',
     color: '#e74c3c',
@@ -116,9 +128,11 @@ function waveConfig(wave) {
   let canSpawn = ['slime', 'bat'];
   if (wave >= 2) canSpawn.push('skeleton');
   if (wave >= 3) canSpawn.push('goblin');
+  if (wave >= 4) canSpawn.push('spider');
   if (wave >= 4) canSpawn.push('orc');
   if (wave >= 6) canSpawn.push('ghost');
   if (wave >= 8) canSpawn.push('elite');
+  if (wave >= 9) canSpawn.push('golem');
   if (wave >= 10) canSpawn.push('demon');
   if (wave % 5 === 0) {
     const bossHp = 300 + wave * 80;

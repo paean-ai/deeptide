@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Pinball</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="lang-toggle">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 data-i18n="title">PIXEL PINBALL</h1>
+    <p data-i18n="subtitle">Keep the ball alive. Rack up the score.</p>
+    <p data-i18n="howto">Hold to charge the launch. Tap the left / right side of the table to flip.</p>
+    <p data-i18n="keys">Keys: A / D or arrows flip · hold Space to launch</p>
+    <button id="btn-play" data-i18n="play">PLAY</button>
+    <p id="title-best"></p>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-score">SCORE 0</span>
+      <span id="hud-best">BEST 0</span>
+      <span id="hud-balls">BALLS ●●●</span>
+    </div>
+  </div>
+
+  <!-- Game over -->
+  <div id="screen-over" class="screen hidden">
+    <h2 data-i18n="gameOver">GAME OVER</h2>
+    <p id="final-score"></p>
+    <p id="final-best"></p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;">
+      <button id="btn-again" data-i18n="again">PLAY AGAIN</button>
+      <button id="btn-menu" class="ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

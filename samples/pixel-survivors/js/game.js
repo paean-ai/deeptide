@@ -273,6 +273,34 @@ function fireWeapon(w, dt) {
       });
     }
     w.cd = s.cd * cdMul();
+  } else if (w.id === 'shards') {
+    // a radial burst of cutting shards in every direction
+    const base = Math.random() * 6.28;
+    for (let i = 0; i < s.count; i++) {
+      const a = base + (i / s.count) * 6.283;
+      G.projectiles.push({
+        type: 'dagger', x: p.x, y: p.y,
+        vx: Math.cos(a) * s.speed, vy: Math.sin(a) * s.speed,
+        dmg: s.dmg * dmgMul(), pierce: s.pierce, life: 1.4, hit: new Set(),
+        angle: a, color: WEAPONS.shards.color,
+      });
+    }
+    w.cd = s.cd * cdMul();
+  } else if (w.id === 'boomerang') {
+    // a spinning blade that sweeps out and curves back to the player
+    const tgt = nearestEnemy(p.x, p.y);
+    const base = tgt ? Math.atan2(tgt.y - p.y, tgt.x - p.x) : Math.random() * 6.28;
+    for (let i = 0; i < s.count; i++) {
+      const a = base + (i - (s.count - 1) / 2) * 0.5;
+      G.projectiles.push({
+        type: 'boomerang', x: p.x, y: p.y,
+        vx: Math.cos(a) * s.speed, vy: Math.sin(a) * s.speed,
+        dmg: s.dmg * dmgMul(), life: 4, speed: s.speed,
+        phase: 'out', outT: s.out, spin: 0, hit: new Set(),
+        color: WEAPONS.boomerang.color,
+      });
+    }
+    w.cd = s.cd * cdMul();
   }
 }
 
@@ -512,6 +540,27 @@ function update(dt) {
           if (pr.pierce < 0) { pr.life = 0; break; }
         }
       }
+    } else if (pr.type === 'boomerang') {
+      pr.spin += dt * 16;
+      if (pr.phase === 'out') {
+        pr.x += pr.vx * dt; pr.y += pr.vy * dt;
+        pr.outT -= dt;
+        if (pr.outT <= 0) { pr.phase = 'back'; pr.hit.clear(); }
+      } else {
+        const dx = G.player.x - pr.x, dy = G.player.y - pr.y;
+        const d = Math.hypot(dx, dy) || 1;
+        pr.x += dx / d * pr.speed * dt;
+        pr.y += dy / d * pr.speed * dt;
+        if (d < 16) pr.life = 0;
+      }
+      for (const e of G.enemies) {
+        if (pr.hit.has(e.eid)) continue;
+        if (Math.hypot(e.x - pr.x, e.y - pr.y) < e.size * 0.5 + 8) {
+          hurtEnemy(e, pr.dmg, 16, pr.x - G.player.x, pr.y - G.player.y);
+          pr.hit.add(e.eid);
+          burst(pr.x, pr.y, 4, pr.color);
+        }
+      }
     } else if (pr.type === 'fireball') {
       pr.x += pr.vx * dt; pr.y += pr.vy * dt; pr.spin += dt * 12;
       let boom = pr.life <= 0;
@@ -669,6 +718,13 @@ function render() {
       ctx.save(); ctx.translate(pr.x + ox, pr.y + oy); ctx.rotate(pr.angle);
       ctx.fillStyle = pr.color; ctx.fillRect(-7, -2, 14, 4);
       ctx.fillStyle = '#fff'; ctx.fillRect(3, -1, 5, 2);
+      ctx.restore();
+    } else if (pr.type === 'boomerang') {
+      ctx.save(); ctx.translate(pr.x + ox, pr.y + oy); ctx.rotate(pr.spin);
+      ctx.fillStyle = pr.color;
+      ctx.fillRect(-9, -3, 18, 5);
+      ctx.fillRect(-3, -9, 5, 18);
+      ctx.fillStyle = '#fff'; ctx.fillRect(-2, -2, 4, 4);
       ctx.restore();
     } else {
       ctx.save(); ctx.translate(pr.x + ox, pr.y + oy); ctx.rotate(pr.spin);

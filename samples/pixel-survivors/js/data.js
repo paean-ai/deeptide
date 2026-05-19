@@ -69,6 +69,28 @@ const WEAPONS = {
       { dmg: 104, count: 3, splash: 84, cd: 0.95, speed: 320 },
     ],
   },
+  shards: {
+    icon: '✶', color: '#ff8fd0',
+    tiers: [
+      { dmg: 8,  count: 4,  cd: 0.95, pierce: 1, speed: 300 },
+      { dmg: 10, count: 5,  cd: 0.90, pierce: 1, speed: 310 },
+      { dmg: 13, count: 6,  cd: 0.82, pierce: 1, speed: 320 },
+      { dmg: 17, count: 8,  cd: 0.74, pierce: 2, speed: 340 },
+      { dmg: 22, count: 10, cd: 0.66, pierce: 2, speed: 360 },
+      { dmg: 32, count: 16, cd: 0.52, pierce: 3, speed: 400 },
+    ],
+  },
+  boomerang: {
+    icon: '🪃', color: '#7ee0c4',
+    tiers: [
+      { dmg: 14, count: 1, cd: 1.25, speed: 320, out: 0.42 },
+      { dmg: 18, count: 1, cd: 1.15, speed: 335, out: 0.45 },
+      { dmg: 23, count: 2, cd: 1.05, speed: 350, out: 0.48 },
+      { dmg: 30, count: 2, cd: 0.95, speed: 365, out: 0.52 },
+      { dmg: 39, count: 3, cd: 0.85, speed: 385, out: 0.55 },
+      { dmg: 56, count: 4, cd: 0.68, speed: 420, out: 0.60 },
+    ],
+  },
 };
 const WEAPON_IDS = Object.keys(WEAPONS);
 

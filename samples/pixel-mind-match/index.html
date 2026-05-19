@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Mind Match</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">MIND MATCH</h1>
+      <p class="tagline" data-i18n="subtitle">Flip the tiles. Remember the creatures.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">PLAY</button>
+      <button id="btn-levels" class="ghost-btn" data-i18n="levelSelect">LEVELS</button>
+      <p class="howto" data-i18n="howto">Tap two tiles to flip them. Match all pairs.</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Level select -->
+  <section id="screen-levels" class="screen hidden">
+    <div class="levels-box">
+      <h2 data-i18n="levelSelect">LEVELS</h2>
+      <div id="level-grid"></div>
+      <button id="btn-levels-back" class="ghost-btn" data-i18n="menu">Menu</button>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <span id="hud-level" class="tag">Level 1</span>
+      <span id="hud-moves" class="tag">Moves 0</span>
+      <span id="hud-combo" class="tag gold">Combo —</span>
+      <button id="btn-restart" class="hbtn" data-i18n="restart">Restart</button>
+      <button id="btn-game-menu" class="hbtn" data-i18n="menu">Menu</button>
+    </header>
+
+    <div id="stage">
+      <canvas id="game"></canvas>
+      <div id="preview-banner" class="hidden">MEMORISE!</div>
+    </div>
+
+    <!-- Level cleared -->
+    <div id="overlay-cleared" class="overlay hidden">
+      <div class="panel">
+        <h2 class="win" data-i18n="cleared">ALL MATCHED</h2>
+        <p id="cleared-stars" class="stars">★★★</p>
+        <p id="cleared-msg" class="panel-msg">Cleared.</p>
+        <p id="cleared-best" class="best">Best</p>
+        <button id="btn-next" class="big-btn" data-i18n="next">NEXT LEVEL</button>
+        <button id="btn-cleared-retry" class="ghost-btn" data-i18n="restart">Restart</button>
+        <button id="btn-cleared-menu" class="ghost-btn" data-i18n="levelSelect">Levels</button>
+      </div>
+    </div>
+
+    <!-- All done -->
+    <div id="overlay-alldone" class="overlay hidden">
+      <div class="panel">
+        <h2 class="win" data-i18n="allDone">MIND MASTER</h2>
+        <p id="alldone-msg" class="panel-msg" data-i18n="allDoneMsg">Every board cleared.</p>
+        <button id="btn-alldone-menu" class="big-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

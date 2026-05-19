@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Crate Cosmos</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">CRATE COSMOS</h1>
+      <p class="tagline" data-i18n="subtitle">Push every power-core onto its socket.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">PLAY</button>
+      <button id="btn-levels" class="ghost-btn" data-i18n="levelSelect">LEVELS</button>
+      <p class="howto" data-i18n="howto">Arrows / WASD or swipe to move. Slide on ice. Undo freely.</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Level select -->
+  <section id="screen-levels" class="screen hidden">
+    <div class="levels-box">
+      <h2 data-i18n="levelSelect">LEVELS</h2>
+      <div id="level-grid"></div>
+      <button id="btn-levels-back" class="ghost-btn" data-i18n="menu">Menu</button>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <span id="hud-level" class="tag">Level 1</span>
+      <span id="hud-moves" class="tag">Moves 0</span>
+      <span id="hud-best" class="tag gold">Best —</span>
+      <button id="btn-game-menu" class="icon-btn" data-i18n="menu">Menu</button>
+    </header>
+
+    <div id="stage">
+      <canvas id="game"></canvas>
+    </div>
+
+    <div id="controls">
+      <div id="dpad">
+        <button id="btn-up" class="pad" aria-label="Move up">▲</button>
+        <button id="btn-left" class="pad" aria-label="Move left">◀</button>
+        <button id="btn-down" class="pad" aria-label="Move down">▼</button>
+        <button id="btn-right" class="pad" aria-label="Move right">▶</button>
+      </div>
+      <div id="act-buttons">
+        <button id="btn-undo" class="act-btn" data-i18n="undo">Undo</button>
+        <button id="btn-restart" class="act-btn" data-i18n="restart">Restart</button>
+      </div>
+    </div>
+
+    <!-- Level cleared -->
+    <div id="overlay-cleared" class="overlay hidden">
+      <div class="panel">
+        <h2 class="win" data-i18n="cleared">STATION ONLINE</h2>
+        <p id="cleared-msg" class="panel-msg">Solved.</p>
+        <p id="cleared-best" class="best">Best</p>
+        <button id="btn-next" class="big-btn" data-i18n="next">NEXT LEVEL</button>
+        <button id="btn-cleared-menu" class="ghost-btn" data-i18n="levelSelect">Levels</button>
+      </div>
+    </div>
+
+    <!-- All done -->
+    <div id="overlay-alldone" class="overlay hidden">
+      <div class="panel">
+        <h2 class="win" data-i18n="allDone">COSMOS RESTORED</h2>
+        <p id="alldone-msg" class="panel-msg" data-i18n="allDoneMsg">Every station is back online.</p>
+        <button id="btn-alldone-menu" class="big-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

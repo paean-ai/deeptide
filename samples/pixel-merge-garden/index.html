@@ -10,23 +10,31 @@
 <body>
   <main class="app">
     <header>
-      <h1>MERGE GARDEN</h1>
-      <div class="stats">
-        <span>Coins <b id="coins">20</b></span>
-        <span>Bank <b id="bank">0</b></span>
-        <span>Best Crop <b id="best">1</b></span>
-        <span>Income <b id="income">0/s</b></span>
-        <span>Order <b id="order">-</b></span>
+      <div class="title-row">
+        <h1 data-i18n="title">MERGE GARDEN</h1>
+        <button id="lang-toggle" class="lang-toggle" type="button">中文</button>
       </div>
+      <div class="stats">
+        <span><i data-i18n="coins">Coins</i> <b id="coins">24</b></span>
+        <span><i data-i18n="bank">Bank</i> <b id="bank">0</b></span>
+        <span><i data-i18n="best">Best Crop</i> <b id="best">1</b></span>
+        <span><i data-i18n="income">Income</i> <b id="income">0/s</b></span>
+        <span><i data-i18n="order">Order</i> <b id="order">-</b></span>
+      </div>
+      <p class="howto" data-i18n="howto">Drag a crop onto a matching one to merge.</p>
     </header>
     <section id="board"></section>
     <footer>
-      <button id="buy" type="button">Buy Seed (10)</button>
+      <button id="buy" type="button">Buy Seed</button>
       <button id="collect" type="button">Collect</button>
-      <button id="water" type="button">Water All</button>
+      <button id="water" type="button">Water</button>
+      <button id="upgrade" type="button">Greenhouse</button>
       <button id="reset" type="button">Reset</button>
     </footer>
   </main>
+  <script src="js/data.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/art.js"></script>
   <script src="js/game.js"></script>
 </body>
 </html>

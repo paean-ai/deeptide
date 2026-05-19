@@ -76,8 +76,26 @@ canvas {
 
 #hud {
   top: max(10px, env(safe-area-inset-top));
+  right: max(64px, calc(env(safe-area-inset-right) + 56px));
   flex-wrap: wrap;
   pointer-events: none;
+}
+
+#hud i { font-style: normal; color: var(--dim); }
+
+#lang-toggle {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  right: max(10px, env(safe-area-inset-right));
+  z-index: 4;
+  min-height: 28px;
+  padding: 5px 11px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: 900 11px ui-monospace, monospace;
+  cursor: pointer;
 }
 
 #hud b,
@@ -149,6 +167,12 @@ button:not(:disabled):active {
   background: linear-gradient(#cdeeff 0 18%, var(--blue) 18% 78%, #2f80ed 78%);
   border-color: #e8f8ff;
   box-shadow: inset 0 0 0 2px rgba(0,0,0,0.18), 0 4px 0 #12365f;
+}
+
+#panel button:nth-child(4) {
+  background: linear-gradient(#e4c4ff 0 18%, var(--violet, #b66cff) 18% 78%, #5d328f 78%);
+  border-color: #efe0ff;
+  box-shadow: inset 0 0 0 2px rgba(0,0,0,0.18), 0 4px 0 #2f1a4d;
 }
 
 #panel button:disabled {
@@ -253,7 +277,7 @@ button:not(:disabled):active {
 @media (max-width: 460px) {
   #panel {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   #panel button {

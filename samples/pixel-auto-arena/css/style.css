@@ -1,0 +1,159 @@
+:root {
+  --bg: #0a0814;
+  --panel: rgba(24, 19, 40, 0.95);
+  --line: rgba(200, 180, 255, 0.18);
+  --text: #ece6fb;
+  --dim: #9a90c0;
+  --accent: #b87ae0;
+  --gold: #f4c85a;
+  --green: #62d879;
+  --red: #ff5d5d;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+
+body {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(184, 122, 224, 0.15), transparent 46%),
+    linear-gradient(#120e22, #060509);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+#app { width: min(520px, 100vw); height: 100dvh; margin: 0 auto; }
+.screen { height: 100%; }
+.hidden { display: none !important; }
+
+/* ---- title ------------------------------------------------------------ */
+#screen-title { display: flex; align-items: center; justify-content: center; padding: 16px; }
+.title-box {
+  width: 100%; max-width: 390px; text-align: center;
+  background: var(--panel); border: 2px solid var(--line); border-radius: 10px;
+  padding: 30px 22px; box-shadow: 0 18px 44px rgba(0,0,0,0.55);
+}
+h1 {
+  color: var(--accent); font-size: clamp(30px, 8.5vw, 50px); line-height: 1;
+  text-shadow: 0 4px 0 #3a2257; letter-spacing: 1px;
+}
+.tagline { margin-top: 12px; color: var(--dim); font-size: 13px; line-height: 1.5; }
+.howto { margin-top: 16px; color: var(--dim); font-size: 11px; line-height: 1.5; }
+.best { margin-top: 10px; color: var(--gold); font-size: 12px; font-weight: 900; }
+
+.big-btn, .ghost-btn {
+  display: block; width: 100%; min-height: 50px; margin-top: 12px;
+  font: 900 15px ui-monospace, monospace; border-radius: 7px; cursor: pointer;
+  transition: transform 100ms ease;
+}
+.big-btn { color: #160c22; background: var(--accent); border: 2px solid #dcc0f5; }
+.ghost-btn { color: var(--text); background: #221b3a; border: 2px solid var(--line); }
+.big-btn:active, .ghost-btn:active { transform: translateY(2px); }
+.lang-toggle {
+  margin-top: 16px; padding: 7px 16px; font: 900 12px ui-monospace, monospace;
+  color: var(--text); background: #221b3a; border: 2px solid var(--line);
+  border-radius: 6px; cursor: pointer;
+}
+
+/* ---- game layout ------------------------------------------------------ */
+#screen-game {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 7px;
+  padding: max(8px, env(safe-area-inset-top)) 9px max(8px, env(safe-area-inset-bottom));
+}
+#hud {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 9px; display: flex; align-items: center; gap: 6px;
+}
+.tag {
+  padding: 4px 8px; background: rgba(0,0,0,0.34); border: 1px solid var(--line);
+  border-radius: 4px; font-size: 12px; font-weight: 900; color: var(--dim); white-space: nowrap;
+}
+.tag.gold { color: var(--gold); }
+.tag.lives { color: var(--red); }
+.icon-btn {
+  margin-left: auto; width: 32px; height: 32px; font-size: 13px; color: var(--text);
+  background: #221b3a; border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+}
+
+#stage { display: grid; place-items: center; }
+#arena {
+  width: 100%;
+  max-width: 100%;
+  aspect-ratio: 480 / 300;
+  background: #0c0a18;
+  border: 2px solid #2a2444;
+  border-radius: 6px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  touch-action: none;
+}
+
+#synergy { display: flex; gap: 6px; justify-content: center; }
+.syn-chip {
+  padding: 3px 9px; font-size: 11px; font-weight: 900;
+  background: rgba(0,0,0,0.34); border: 1px solid var(--line); border-radius: 4px;
+  opacity: 0.5;
+}
+.syn-chip.on { opacity: 1; border-color: currentColor; }
+
+#shop-panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px; display: flex; flex-direction: column; gap: 8px;
+}
+#shop-cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.shop-card {
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 5px 2px; cursor: pointer;
+  background: #1a1430; border: 2px solid var(--line); border-radius: 6px; color: var(--text);
+}
+.shop-card.empty { opacity: 0.25; }
+.shop-card:disabled:not(.empty) { opacity: 0.5; cursor: not-allowed; }
+.shop-card:not(:disabled):active { transform: translateY(2px); }
+.shop-sprite { width: 40px; height: 40px; image-rendering: pixelated; }
+.sc-name { font-size: 9px; font-weight: 900; white-space: nowrap; }
+.sc-stat { font-size: 9px; color: var(--dim); }
+.sc-cost { font-size: 9px; font-weight: 900; }
+
+#shop-actions { display: flex; gap: 6px; }
+.act {
+  flex: 1; min-height: 46px; font: 900 13px ui-monospace, monospace;
+  color: var(--text); background: #221b3a; border: 2px solid var(--line);
+  border-radius: 7px; cursor: pointer;
+}
+.act.primary { color: #160c22; background: var(--accent); border-color: #dcc0f5; flex: 1.6; }
+.act:disabled { opacity: 0.5; cursor: not-allowed; }
+.act:not(:disabled):active { transform: translateY(2px); }
+
+#toast {
+  position: fixed; left: 50%; top: 16%; transform: translateX(-50%);
+  padding: 8px 16px; font-size: 12px; font-weight: 900; z-index: 30;
+  background: var(--panel); border: 2px solid var(--accent); border-radius: 6px;
+}
+
+/* ---- overlays --------------------------------------------------------- */
+.overlay {
+  position: fixed; inset: 0; display: grid; place-items: center;
+  background: rgba(5, 4, 10, 0.86); padding: 20px; z-index: 20;
+}
+.panel {
+  width: 100%; max-width: 320px; text-align: center;
+  background: var(--panel); border: 2px solid var(--line); border-radius: 10px;
+  padding: 24px 20px; box-shadow: 0 18px 44px rgba(0,0,0,0.6);
+}
+.panel h2 { font-size: 26px; color: var(--accent); }
+.panel h2.win { color: var(--green); }
+.panel h2.lose { color: var(--red); }
+.panel h2.draw { color: var(--gold); }
+.panel-msg { margin-top: 9px; color: var(--dim); font-size: 12px; line-height: 1.5; }
+
+button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+
+@media (max-width: 420px) {
+  .sc-name { font-size: 8px; }
+  .sc-stat, .sc-cost { font-size: 8px; }
+}

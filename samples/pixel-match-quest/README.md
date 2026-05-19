@@ -10,7 +10,8 @@ boosters, and a level map.
   L/T shapes a 3x3 bomb; specials chain and activate on swap.
 - 5 objective types: reach a score, clear a colour, melt all ice, smash all
   crates, or drop fruit to the bottom.
-- 12 hand-built levels with ice, crate, and fruit-drop obstacles.
+- 24 hand-built levels across 5 objective types (score, colour, ice, crate,
+  fruit-drop) with escalating layouts and difficulty.
 - 3 boosters (hammer, shuffle, +5 moves) bought with coins earned from levels.
 - Move limits, star ratings, level map with unlocks.
 - Auto-shuffle when no moves remain, combo scoring.

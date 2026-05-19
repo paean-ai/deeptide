@@ -54,10 +54,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text);
 .gc-reflex .gc-art::after { content: '🎯'; }
 .gc-stack .gc-art::after { content: '🧱'; }
 .gc-dash .gc-art::after { content: '🏃'; }
+.gc-squash .gc-art { background: linear-gradient(180deg,#3a5a32,#1a2a18); }
+.gc-squash .gc-art::after { content: '🐛'; }
 .gc-art { display: flex; align-items: center; justify-content: center; font-size: 38px; }
 .gc-name { font-weight: 700; font-size: 14px; }
 .gc-best { font-size: 11px; color: var(--muted); }
-.game-card:nth-child(5) { grid-column: 1 / -1; }
 .howto { color: var(--muted); margin-top: 18px; font-size: 12px; line-height: 1.6; }
 
 /* play */

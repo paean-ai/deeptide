@@ -387,7 +387,7 @@ class PlatformGame {
       icon.width = 54;
       icon.height = 54;
       icon.className = 'skill-icon';
-      drawSkillIcon(icon.getContext('2d'), skill.color);
+      drawSkillIcon(icon.getContext('2d'), skill.color, skill.id);
       card.appendChild(icon);
       card.insertAdjacentHTML('beforeend', `<div class="skill-name">${skill.name[currentLang]}</div><div class="skill-level">Lv.${lv} -> Lv.${lv + 1}</div><div class="skill-desc">${skill.desc[currentLang](lv + 1)}</div>`);
       card.onclick = () => {
@@ -481,7 +481,7 @@ class PlatformGame {
     this.drawPortal(ctx);
     for (const item of this.pickups) if (!item.taken) this.drawPickup(ctx, item);
     for (const e of this.enemies) if (e.alive) drawEnemy(ctx, e, 0);
-    if (this.player.invuln <= 0 || Math.floor(this.player.invuln / 4) % 2 === 0) drawPixelHero(ctx, this.player.x, this.player.y, this.player.facing < 0, Math.max(0, this.player.attackPulse));
+    if (this.player.invuln <= 0 || Math.floor(this.player.invuln / 4) % 2 === 0) drawPixelHero(ctx, this.player.x, this.player.y, this.player.facing < 0, this.player);
     for (const fx of this.particles) {
       ctx.fillStyle = fx.color;
       ctx.globalAlpha = Math.max(0, fx.life / 34);

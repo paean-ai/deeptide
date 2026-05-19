@@ -1,0 +1,125 @@
+:root {
+  --bg: #0a0c12;
+  --panel: rgba(18, 21, 32, 0.95);
+  --line: rgba(200, 215, 255, 0.18);
+  --text: #eaf0fb;
+  --dim: #8c97b4;
+  --accent: #3fc7e0;
+  --gold: #ffd24d;
+  --red: #ff5d5d;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+
+body {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(63, 199, 224, 0.14), transparent 46%),
+    linear-gradient(#101522, #060709);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+#app { width: min(460px, 100vw); height: 100dvh; margin: 0 auto; }
+.screen { height: 100%; }
+.hidden { display: none !important; }
+
+/* ---- title ------------------------------------------------------------ */
+#screen-title { display: flex; align-items: center; justify-content: center; padding: 16px; }
+.title-box {
+  width: 100%; max-width: 380px; text-align: center;
+  background: var(--panel); border: 2px solid var(--line); border-radius: 10px;
+  padding: 30px 22px; box-shadow: 0 18px 44px rgba(0,0,0,0.55);
+}
+h1 {
+  color: var(--accent); font-size: clamp(30px, 8.5vw, 50px); line-height: 1;
+  text-shadow: 0 4px 0 #15414a; letter-spacing: 1px;
+}
+.tagline { margin-top: 12px; color: var(--dim); font-size: 13px; line-height: 1.5; }
+.howto { margin-top: 16px; color: var(--dim); font-size: 11px; line-height: 1.5; }
+.best { margin-top: 10px; color: var(--gold); font-size: 12px; font-weight: 900; }
+
+.big-btn, .ghost-btn {
+  display: block; width: 100%; min-height: 52px; margin-top: 14px;
+  font: 900 15px ui-monospace, monospace; border-radius: 7px; cursor: pointer;
+  transition: transform 100ms ease;
+}
+.big-btn { color: #06222a; background: var(--accent); border: 2px solid #a6ecf7; }
+.ghost-btn { color: var(--text); background: #1c2030; border: 2px solid var(--line); }
+.big-btn:active, .ghost-btn:active { transform: translateY(2px); }
+.lang-toggle {
+  margin-top: 18px; padding: 7px 16px; font: 900 12px ui-monospace, monospace;
+  color: var(--text); background: #1c2030; border: 2px solid var(--line);
+  border-radius: 6px; cursor: pointer;
+}
+
+/* ---- game layout ------------------------------------------------------ */
+#screen-game {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: max(8px, env(safe-area-inset-top)) 10px max(8px, env(safe-area-inset-bottom));
+}
+
+#hud {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 9px; display: flex; align-items: center; gap: 6px;
+}
+.tag {
+  padding: 3px 7px; background: rgba(0,0,0,0.34); border: 1px solid var(--line);
+  border-radius: 4px; font-size: 11px; font-weight: 900; color: var(--dim); white-space: nowrap;
+}
+.tag i { font-style: normal; color: var(--dim); }
+.tag b { color: var(--text); }
+.tag.score b { color: var(--gold); }
+.tag.combo b { color: var(--accent); }
+#hud .tag:nth-child(3) { flex: 1; }
+.icon-btn {
+  margin-left: auto; width: 32px; height: 32px; font-size: 13px; color: var(--text);
+  background: #1c2030; border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+}
+
+#stage { display: grid; place-items: center; min-height: 0; }
+#game {
+  height: 100%;
+  max-height: 100%;
+  width: auto;
+  max-width: 100%;
+  aspect-ratio: 400 / 640;
+  background: #1d3a22;
+  border: 2px solid #232a40;
+  border-radius: 6px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  touch-action: none;
+}
+
+#controls { display: flex; }
+.nitro-btn {
+  flex: 1; min-height: 56px;
+  font: 900 15px ui-monospace, monospace;
+  color: #1a1406; background: var(--gold); border: 2px solid #ffe9a0;
+  border-radius: 8px; cursor: pointer;
+}
+.nitro-btn:active { transform: translateY(2px); }
+.nitro-btn:disabled { color: var(--dim); background: #1c2030; border-color: var(--line); cursor: not-allowed; }
+
+/* ---- overlays --------------------------------------------------------- */
+.overlay {
+  position: fixed; inset: 0; display: grid; place-items: center;
+  background: rgba(5, 6, 12, 0.86); padding: 20px; z-index: 20;
+}
+.panel {
+  width: 100%; max-width: 320px; text-align: center;
+  background: var(--panel); border: 2px solid var(--line); border-radius: 10px;
+  padding: 24px 20px; box-shadow: 0 18px 44px rgba(0,0,0,0.6);
+}
+.panel h2 { font-size: 26px; color: var(--accent); }
+.panel h2.lose { color: var(--red); }
+.panel-msg { margin-top: 9px; color: var(--dim); font-size: 12px; line-height: 1.5; }
+
+button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }

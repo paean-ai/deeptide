@@ -535,6 +535,7 @@ function renderAll() {
   renderShop();
   if (state.phase === 'reward') renderUpgradeChoices();
   renderHud();
+  saveGame();
 }
 
 function startDrag(ev) {
@@ -967,6 +968,51 @@ function resetGame() {
   renderAll();
 }
 
+// ---- save / load -------------------------------------------------------
+// The run persists between sessions. Combat is transient, so it is never
+// saved mid-wave: reloading drops you back at the pack phase of that wave.
+const SAVE_KEY = 'pixel-backpack-roguelite-save';
+
+function saveGame() {
+  if (state.phase === 'combat') return;
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      v: 1, lang: state.lang, phase: state.phase, wave: state.wave,
+      gold: state.gold, runes: state.runes, lives: state.lives, maxLives: state.maxLives,
+      cols: state.cols, rows: state.rows,
+      items: state.items.map(i => ({ id: i.id, type: i.type, tier: i.tier, x: i.x, y: i.y, rotated: !!i.rotated })),
+      shop: state.shop, upgrades: state.upgrades, rewardChoices: state.rewardChoices,
+      messages: state.messages, nextItemId,
+    }));
+  } catch (e) { /* storage unavailable - play without persistence */ }
+}
+
+function loadGame() {
+  let d;
+  try { d = JSON.parse(localStorage.getItem(SAVE_KEY)); } catch (e) { return false; }
+  if (!d || !Array.isArray(d.items) || d.items.some(it => !ITEM_DEFS[it.type])) return false;
+  const baseUpgrades = {
+    weaponDamage: 0, quickHands: 0, merchant: 0, vitality: 0,
+    alchemy: 0, salvage: 0, lucky: 0, deepPack: 0,
+  };
+  Object.assign(state, {
+    lang: d.lang === 'zh' ? 'zh' : 'en',
+    phase: d.phase === 'combat' ? 'prep' : (d.phase || 'prep'),
+    wave: d.wave || 1, gold: d.gold || 0, runes: d.runes || 0,
+    lives: d.lives || 20, maxLives: d.maxLives || 20,
+    cols: d.cols || 6, rows: d.rows || 5,
+    items: d.items.map(i => ({ id: i.id, type: i.type, tier: i.tier, x: i.x, y: i.y, rotated: !!i.rotated, cooldown: Math.random() * 30 })),
+    shop: Array.isArray(d.shop) ? d.shop.filter(o => ITEM_DEFS[o.type]) : [],
+    upgrades: Object.assign(baseUpgrades, d.upgrades || {}),
+    rewardChoices: Array.isArray(d.rewardChoices) ? d.rewardChoices : [],
+    messages: Array.isArray(d.messages) ? d.messages : [],
+    selected: null, enemies: [], projectiles: [], particles: [], floaters: [], spawnQueue: [],
+  });
+  nextItemId = Math.max(d.nextItemId || 1, ...state.items.map(i => i.id + 1), 1);
+  if (state.phase === 'prep' && !state.shop.length) rollShop();
+  return true;
+}
+
 document.getElementById('rerollBtn').addEventListener('click', rerollShop);
 document.getElementById('expandBtn').addEventListener('click', expandPack);
 document.getElementById('startBtn').addEventListener('click', startCombat);
@@ -976,6 +1022,13 @@ document.getElementById('mergeBtn').addEventListener('click', mergeItems);
 document.getElementById('forgeBtn').addEventListener('click', forgeArtifact);
 document.getElementById('sellBtn').addEventListener('click', sellSelected);
 document.getElementById('langBtn').addEventListener('click', () => setLanguage(state.lang === 'en' ? 'zh' : 'en'));
+window.addEventListener('beforeunload', saveGame);
 
-resetGame();
+if (loadGame()) {
+  document.documentElement.lang = state.lang === 'zh' ? 'zh-CN' : 'en';
+  logEl.innerHTML = state.messages.map(m => `<div>${m}</div>`).join('');
+  renderAll();
+} else {
+  resetGame();
+}
 requestAnimationFrame(loop);

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Dungeon Delve</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">DUNGEON DELVE</h1>
+      <p class="tagline" data-i18n="subtitle">A turn-based crawl into the dark.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">DESCEND</button>
+      <button id="btn-resume" class="ghost-btn hidden" data-i18n="resume">CONTINUE RUN</button>
+      <p class="howto" data-i18n="howto">Move with arrows / WASD or swipe. Bump foes to attack.</p>
+      <p id="title-best" class="best">Deepest delve: 1</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <div class="hud-top">
+        <span id="hud-depth" class="tag">Depth 1</span>
+        <span id="hud-lvl" class="tag">Lv 1</span>
+        <span id="hud-gold" class="tag gold">◆ 0</span>
+        <button id="btn-pause" class="icon-btn">⏸</button>
+      </div>
+      <div id="hp-bar"><div id="hp-fill"></div><span id="hp-text">60/60</span></div>
+      <div id="xp-bar"><div id="xp-fill"></div></div>
+      <div class="hud-gear">
+        <span id="hud-weapon" class="tag">⚔ Dagger</span>
+        <span id="hud-armor" class="tag">🛡 Cloth</span>
+      </div>
+    </header>
+
+    <div id="stage">
+      <canvas id="game"></canvas>
+    </div>
+
+    <div id="log"></div>
+
+    <div id="controls">
+      <div id="dpad">
+        <button id="btn-up" class="pad" aria-label="Move up">▲</button>
+        <button id="btn-left" class="pad" aria-label="Move left">◀</button>
+        <button id="btn-wait" class="pad wait" aria-label="Wait a turn">•</button>
+        <button id="btn-right" class="pad" aria-label="Move right">▶</button>
+        <button id="btn-down" class="pad" aria-label="Move down">▼</button>
+      </div>
+      <button id="btn-potion" class="potion-btn">🧪 Potions 2</button>
+    </div>
+
+    <!-- Pause -->
+    <div id="overlay-pause" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="paused">PAUSED</h2>
+        <button id="btn-pause-close" class="big-btn" data-i18n="close">Resume</button>
+        <button id="btn-pause-restart" class="ghost-btn" data-i18n="restart">New Run</button>
+        <button id="btn-pause-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+
+    <!-- Game over -->
+    <div id="overlay-over" class="overlay hidden">
+      <div class="panel">
+        <h2 class="lose" data-i18n="gameOver">YOU DIED</h2>
+        <p id="over-msg" class="panel-msg">You fell.</p>
+        <p id="over-best" class="best">Deepest delve: 1</p>
+        <button id="btn-over-again" class="big-btn" data-i18n="again">DELVE AGAIN</button>
+        <button id="btn-over-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+
+    <!-- Victory -->
+    <div id="overlay-victory" class="overlay hidden">
+      <div class="panel">
+        <h2 class="win" data-i18n="victory">THE WYRM FALLS</h2>
+        <p id="victory-msg" class="panel-msg">The dragon is slain.</p>
+        <button id="btn-victory-continue" class="big-btn" data-i18n="keepGoing">KEEP DELVING</button>
+        <button id="btn-victory-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

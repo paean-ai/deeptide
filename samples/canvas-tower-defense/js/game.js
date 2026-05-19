@@ -2,6 +2,7 @@ const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const W = 960;
 const H = 540;
+const BEST_KEY = 'canvas-tower-defense-best';
 
 const path = [
   { x: 24, y: 318 },
@@ -76,7 +77,9 @@ const state = {
   towers: [],
   shots: [],
   particles: [],
-  messages: ['Build towers, then start the wave.'],
+  messages: [t('introMsg')],
+  best: +(localStorage.getItem(BEST_KEY) || 0),
+  over: false,
   shake: 0,
   frame: 0,
 };
@@ -121,7 +124,7 @@ function startWave() {
   state.spawnTimer = 0;
   state.selectedTower = null;
   state.selectedPad = null;
-  log(`Wave ${state.wave} incoming: ${state.spawnQueue.length} enemies.`);
+  log(t('waveIncoming', state.wave, state.spawnQueue.length));
 }
 
 function spawnEnemy(type) {
@@ -187,7 +190,7 @@ function buildTower(pad, type) {
   if (towerAtPad(pad)) return;
   const def = TOWERS[type];
   if (state.gold < def.cost) {
-    log(`Need ${def.cost} gold for ${def.name}.`);
+    log(t('needGoldFor', def.cost, towerName(type)));
     pulse(pad.x, pad.y, '#e85d75', 8);
     return;
   }
@@ -203,7 +206,7 @@ function buildTower(pad, type) {
   };
   state.towers.push(tower);
   state.selectedTower = tower;
-  log(`${def.name} tower built.`);
+  log(t('towerBuilt', towerName(type)));
   pulse(pad.x, pad.y, def.color, 12);
 }
 
@@ -212,14 +215,14 @@ function upgradeSelected() {
   if (!tower) return;
   const cost = upgradeCost(tower);
   if (state.gold < cost) {
-    log(`Need ${cost} gold to upgrade.`);
+    log(t('needGoldUpgrade', cost));
     return;
   }
   state.gold -= cost;
   tower.level++;
   tower.spent += cost;
   pulse(tower.pad.x, tower.pad.y, TOWERS[tower.type].color, 18);
-  log(`${TOWERS[tower.type].name} upgraded to Lv.${tower.level}.`);
+  log(t('towerUpgraded', towerName(tower.type), tower.level));
 }
 
 function sellSelected() {
@@ -228,7 +231,7 @@ function sellSelected() {
   state.gold += sellValue(tower);
   state.towers = state.towers.filter(t => t !== tower);
   state.selectedTower = null;
-  log('Tower sold.');
+  log(t('towerSold'));
 }
 
 function towerStat(tower, key) {
@@ -379,7 +382,7 @@ function update() {
     state.wave++;
     const bonus = 28 + state.wave * 4;
     state.gold += bonus;
-    log(`Wave cleared. Bonus ${bonus} gold.`);
+    log(t('waveCleared', bonus));
   }
   updateHud();
 }
@@ -436,10 +439,10 @@ function drawGate() {
   ctx.fillStyle = '#071018';
   ctx.font = '10px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('RIFT', 30, 323);
+  ctx.fillText(t('rift'), 30, 323);
   drawPixelPanel(904, 184, 52, 86, '#562632', '#e85d75');
   ctx.fillStyle = '#071018';
-  ctx.fillText('CORE', 930, 231);
+  ctx.fillText(t('core'), 930, 231);
 }
 
 function drawPixelPanel(x, y, w, h, body, trim) {
@@ -612,7 +615,7 @@ function drawBuildBar() {
     ctx.fillStyle = active ? '#071018' : def.color;
     ctx.font = '12px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(def.name, bx + 8, y + 16);
+    ctx.fillText(towerName(id), bx + 8, y + 16);
     ctx.fillText(`${def.cost}g`, bx + 8, y + 32);
   });
 }
@@ -628,20 +631,20 @@ function drawInfoPanel() {
   ctx.font = '11px monospace';
   ctx.textAlign = 'left';
   if (state.selectedTower) {
-    const t = state.selectedTower;
-    const def = TOWERS[t.type];
+    const tw = state.selectedTower;
+    const def = TOWERS[tw.type];
     ctx.fillStyle = def.color;
-    ctx.fillText(`${def.name} Lv.${t.level}`, x + 10, y + 17);
+    ctx.fillText(`${towerName(tw.type)} Lv.${tw.level}`, x + 10, y + 17);
     ctx.fillStyle = '#9aacbf';
-    ctx.fillText(`Damage ${towerStat(t, 'damage')}  Range ${towerStat(t, 'range')}`, x + 10, y + 34);
-    ctx.fillText(`U: upgrade ${upgradeCost(t)}g   S: sell ${sellValue(t)}g`, x + 10, y + 51);
+    ctx.fillText(t('statLine', towerStat(tw, 'damage'), towerStat(tw, 'range')), x + 10, y + 34);
+    ctx.fillText(t('actionLine', upgradeCost(tw), sellValue(tw)), x + 10, y + 51);
   } else {
     const def = TOWERS[state.selectedType];
     ctx.fillStyle = def.color;
-    ctx.fillText(`${def.name} Tower`, x + 10, y + 17);
+    ctx.fillText(t('towerHeading', towerName(state.selectedType)), x + 10, y + 17);
     ctx.fillStyle = '#9aacbf';
-    ctx.fillText(def.desc, x + 10, y + 34);
-    ctx.fillText('Tap a pad to build. Keys 1/2/3 switch.', x + 10, y + 51);
+    ctx.fillText(towerDesc(state.selectedType), x + 10, y + 34);
+    ctx.fillText(t('buildHint'), x + 10, y + 51);
   }
 }
 
@@ -654,7 +657,9 @@ function drawHudText() {
   ctx.font = '12px monospace';
   ctx.textAlign = 'left';
   const next = wavePlan(state.wave);
-  const preview = state.waveActive ? `${state.enemies.length + state.spawnQueue.length} remaining` : `${next.length} enemies next`;
+  const preview = state.waveActive
+    ? t('remaining', state.enemies.length + state.spawnQueue.length)
+    : t('enemiesNext', next.length);
   ctx.fillText(preview, 24, 101);
 }
 
@@ -682,19 +687,27 @@ function draw() {
     ctx.fillStyle = '#f4c85a';
     ctx.font = '44px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('CORE DESTROYED', W / 2, H / 2 - 10);
+    ctx.fillText(t('coreDestroyed'), W / 2, H / 2 - 10);
     ctx.fillStyle = '#9aacbf';
     ctx.font = '16px monospace';
-    ctx.fillText(`Score ${state.score}`, W / 2, H / 2 + 24);
+    ctx.fillText(t('scoreLine', state.score), W / 2, H / 2 + 24);
   }
 }
 
 function updateHud() {
+  if (state.lives <= 0 && !state.over) {
+    state.over = true;
+    if (state.score > state.best) {
+      state.best = state.score;
+      try { localStorage.setItem(BEST_KEY, state.best); } catch (e) { /* storage off */ }
+    }
+  }
   document.getElementById('gold').textContent = state.gold;
   document.getElementById('lives').textContent = state.lives;
   document.getElementById('wave').textContent = state.wave;
   document.getElementById('score').textContent = state.score;
-  document.getElementById('tower-type').textContent = TOWERS[state.selectedType].name;
+  document.getElementById('best').textContent = Math.max(state.best, state.score);
+  document.getElementById('tower-type').textContent = towerName(state.selectedType);
   const btn = document.getElementById('start');
   btn.disabled = state.waveActive || state.enemies.length > 0 || state.lives <= 0;
 }
@@ -728,6 +741,7 @@ canvas.addEventListener('pointerdown', handleCanvasPointer);
 document.getElementById('start').onclick = startWave;
 document.getElementById('upgrade').onclick = upgradeSelected;
 document.getElementById('sell').onclick = sellSelected;
+setupLanguageToggle(updateHud);
 document.querySelectorAll('[data-tower]').forEach(btn => {
   btn.onclick = () => {
     state.selectedType = btn.dataset.tower;

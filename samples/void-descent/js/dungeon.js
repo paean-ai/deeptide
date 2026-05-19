@@ -140,8 +140,10 @@ function pickEnemyType(floor, rng) {
   const roll = rng();
   if (floor >= 5 && roll < 0.08) return 'void_lord';
   if (floor >= 4 && roll < 0.20) return 'golem';
-  if (floor >= 2 && roll < 0.40) return 'shade';
-  if (floor >= 1 && roll < 0.65) return 'wraith';
+  if (floor >= 3 && roll < 0.32) return 'revenant';
+  if (floor >= 2 && roll < 0.46) return 'shade';
+  if (floor >= 1 && roll < 0.62) return 'wraith';
+  if (floor >= 1 && roll < 0.80) return 'bat';
   return 'slime';
 }
 
@@ -205,6 +207,16 @@ const ENEMY_BLUEPRINTS = {
     char: 'G', name: 'Golem', color: '#ff8844',
     hp: 45, atk: 12, def: 4, xp: 35,
     behavior: 'slow_chase',
+  },
+  bat: {
+    char: 'b', name: 'Void Bat', color: '#88aaff',
+    hp: 10, atk: 4, def: 0, xp: 12,
+    behavior: 'chase',
+  },
+  revenant: {
+    char: 'R', name: 'Revenant', color: '#ccd4e0',
+    hp: 34, atk: 10, def: 2, xp: 30,
+    behavior: 'flank',
   },
   void_lord: {
     char: 'V', name: 'Void Lord', color: '#ff2244',

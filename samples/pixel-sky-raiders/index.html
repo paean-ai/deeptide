@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Sky Raiders</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">SKY RAIDERS</h1>
+      <p class="tagline" data-i18n="subtitle">Pilot the raider. Hold nothing back.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">LAUNCH</button>
+      <p class="howto" data-i18n="howto">Move to aim — guns fire on their own. Tap BOMB to clear the screen.</p>
+      <p id="title-best" class="best">Best: 0</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <span id="hud-score" class="tag score">0</span>
+      <span id="hud-wave" class="tag">Wave 1</span>
+      <div id="hp-bar"><div id="hp-fill"></div></div>
+      <span id="hud-weapon" class="tag">⚡1</span>
+      <button id="btn-bomb" class="bomb-btn">BOMB 2</button>
+      <button id="btn-pause" class="icon-btn">⏸</button>
+    </header>
+
+    <div id="stage">
+      <canvas id="game"></canvas>
+    </div>
+
+    <!-- Pause -->
+    <div id="overlay-pause" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="paused">PAUSED</h2>
+        <button id="btn-pause-resume" class="big-btn" data-i18n="resume">Resume</button>
+        <button id="btn-pause-restart" class="ghost-btn" data-i18n="restart">Restart</button>
+        <button id="btn-pause-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+
+    <!-- Game over -->
+    <div id="overlay-over" class="overlay hidden">
+      <div class="panel">
+        <h2 class="lose" data-i18n="gameOver">RAIDER DOWN</h2>
+        <p id="over-score" class="panel-msg">Final score: 0</p>
+        <p id="over-wave" class="panel-msg">Reached wave 1</p>
+        <p id="over-best" class="best">Best: 0</p>
+        <button id="btn-over-again" class="big-btn" data-i18n="again">FLY AGAIN</button>
+        <button id="btn-over-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

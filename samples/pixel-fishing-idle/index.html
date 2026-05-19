@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Pixel Fishing Idle</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="css/style.css">
@@ -10,26 +10,30 @@
 <body>
   <main id="shell">
     <canvas id="game" width="900" height="620"></canvas>
+    <button id="lang-toggle" type="button">中文</button>
     <section id="hud">
-      <b>PIXEL FISHING</b>
-      <span>Coins <strong id="coins">0</strong></span>
-      <span>Rod <strong id="rod">1</strong></span>
-      <span>Bait <strong id="bait">1</strong></span>
-      <span>Boat <strong id="boat">1</strong></span>
-      <span>Zone <strong id="zone">Cove</strong></span>
-      <span>Order <strong id="order">-</strong></span>
+      <b data-i18n="title">PIXEL FISHING</b>
+      <span><i data-i18n="coins">Coins</i> <strong id="coins">0</strong></span>
+      <span><i data-i18n="rod">Rod</i> <strong id="rod">1</strong></span>
+      <span><i data-i18n="bait">Bait</i> <strong id="bait">1</strong></span>
+      <span><i data-i18n="boat">Boat</i> <strong id="boat">1</strong></span>
+      <span><i data-i18n="zone">Zone</i> <strong id="zone">Cove</strong></span>
+      <span><i data-i18n="order">Order</i> <strong id="order">-</strong></span>
     </section>
     <section id="controls">
       <button id="cast" type="button">Cast Line</button>
       <button id="rod-up" type="button">Rod</button>
       <button id="bait-up" type="button">Bait</button>
       <button id="boat-up" type="button">Boat</button>
-      <button id="zone-next" type="button">Sail</button>
       <button id="crew-up" type="button">Crew</button>
+      <button id="zone-next" type="button">Sail</button>
     </section>
     <section id="book"></section>
     <section id="log"></section>
   </main>
+  <script src="js/data.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/art.js"></script>
   <script src="js/game.js"></script>
 </body>
 </html>

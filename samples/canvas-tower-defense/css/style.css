@@ -61,6 +61,7 @@ canvas {
 
 .hud b { color: #68da86; }
 .hud strong { color: #f4c85a; }
+.hud i, .tower-menu i { font-style: normal; }
 
 button {
   color: #071018;

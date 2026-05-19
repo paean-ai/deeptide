@@ -2,6 +2,7 @@ const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const W = 960;
 const H = 540;
+const BEST_KEY = 'canvas-brick-breaker-best';
 
 const POWERUPS = {
   wide: { label: 'W', color: '#68da86', name: 'Wide Paddle' },
@@ -20,7 +21,8 @@ const state = {
   shake: 0,
   slowTimer: 0,
   laserTimer: 0,
-  message: 'Break every core brick.',
+  msg: { k: 'breakAll' },
+  best: +(localStorage.getItem(BEST_KEY) || 0),
   paddle: { x: W / 2, y: H - 58, w: 132, h: 16, target: W / 2, cooldown: 0 },
   balls: [],
   bricks: [],
@@ -40,7 +42,7 @@ function restart() {
     shake: 0,
     slowTimer: 0,
     laserTimer: 0,
-    message: 'Break every core brick.',
+    msg: { k: 'breakAll' },
     powerups: [],
     particles: [],
     lasers: [],
@@ -73,7 +75,7 @@ function makeStage() {
       state.bricks.push({ x: ox + x * (bw + gap), y: 76 + y * (bh + gap), w: bw, h: bh, hp, maxHp: hp, type, hit: 0 });
     }
   }
-  state.message = `Stage ${state.stage}: ${state.bricks.length} bricks online.`;
+  state.msg = { k: 'stageMsg', a: [state.stage, state.bricks.length] };
   resetBall();
 }
 
@@ -103,7 +105,7 @@ function burst(x, y, color, count = 10, power = 1) {
 }
 
 function activatePowerup(type) {
-  state.message = POWERUPS[type].name;
+  state.msg = { k: 'pu_' + type };
   if (type === 'wide') state.paddle.w = Math.min(230, state.paddle.w + 34);
   if (type === 'multi') {
     const source = state.balls[0] || { x: state.paddle.x, y: state.paddle.y - 18 };
@@ -183,8 +185,13 @@ function update() {
   if (!state.balls.length) {
     state.lives--;
     state.paddle.w = Math.max(132, state.paddle.w - 24);
-    if (state.lives <= 0) state.running = false;
-    else resetBall();
+    if (state.lives <= 0) {
+      state.running = false;
+      if (state.score > state.best) {
+        state.best = state.score;
+        try { localStorage.setItem(BEST_KEY, state.best); } catch (e) { /* storage off */ }
+      }
+    } else resetBall();
   }
 
   state.bricks = state.bricks.filter(b => !b.dead);
@@ -362,12 +369,12 @@ function drawOverlay() {
   ctx.fillStyle = '#a7b5c8';
   ctx.font = '12px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText(`${state.message}  Combo x${state.combo}`, 24, H - 24);
+  ctx.fillText(`${mt(state.msg)}  ${t('combo')} x${state.combo}`, 24, H - 24);
   if (!state.launched && state.running) {
     ctx.fillStyle = '#a7b5c8';
     ctx.font = '18px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('Press Space or tap to launch', W / 2, H / 2 + 112);
+    ctx.fillText(t('launchHint'), W / 2, H / 2 + 112);
   }
   if (!state.running) {
     ctx.fillStyle = 'rgba(0,0,0,0.65)';
@@ -375,10 +382,10 @@ function drawOverlay() {
     ctx.fillStyle = '#f4c85a';
     ctx.font = '42px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('GAME OVER', W / 2, H / 2 - 12);
+    ctx.fillText(t('gameOver'), W / 2, H / 2 - 12);
     ctx.fillStyle = '#a7b5c8';
     ctx.font = '16px monospace';
-    ctx.fillText(`Final Score ${state.score}`, W / 2, H / 2 + 24);
+    ctx.fillText(t('finalScore', state.score), W / 2, H / 2 + 24);
   }
 }
 
@@ -386,6 +393,7 @@ function updateHud() {
   document.getElementById('score').textContent = state.score;
   document.getElementById('stage').textContent = state.stage;
   document.getElementById('lives').textContent = state.lives;
+  document.getElementById('best').textContent = Math.max(state.best, state.score);
 }
 
 function pointerX(e) {
@@ -409,6 +417,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowRight') state.paddle.target += 64;
 });
 document.getElementById('restart').onclick = restart;
+setupLanguageToggle(updateHud);
 
 function loop() {
   update();

@@ -30,10 +30,12 @@ const TEXT = {
       cottage: 'Cottage', farm: 'Farm', well: 'Well', lumber: 'Lumber Camp',
       market: 'Market', mine: 'Mine', mill: 'Mill', sawmill: 'Sawmill',
       bakery: 'Bakery', smithy: 'Smithy', warehouse: 'Warehouse',
+      plantation: 'Plantation', weaver: 'Weaver', tailor: 'Tailor',
     },
     rNames: {
-      wheat: 'Wheat', water: 'Water', wood: 'Wood', ore: 'Ore',
-      flour: 'Flour', plank: 'Plank', bread: 'Bread', tools: 'Tools',
+      wheat: 'Wheat', water: 'Water', wood: 'Wood', ore: 'Ore', cotton: 'Cotton',
+      flour: 'Flour', plank: 'Plank', cloth: 'Cloth',
+      bread: 'Bread', garment: 'Garment', tools: 'Tools',
     },
   },
   zh: {
@@ -63,10 +65,12 @@ const TEXT = {
       cottage: '小屋', farm: '农场', well: '水井', lumber: '伐木场',
       market: '集市', mine: '矿场', mill: '磨坊', sawmill: '锯木厂',
       bakery: '面包房', smithy: '铁匠铺', warehouse: '仓库',
+      plantation: '棉花田', weaver: '织布坊', tailor: '裁缝铺',
     },
     rNames: {
-      wheat: '小麦', water: '水', wood: '木材', ore: '矿石',
-      flour: '面粉', plank: '木板', bread: '面包', tools: '工具',
+      wheat: '小麦', water: '水', wood: '木材', ore: '矿石', cotton: '棉花',
+      flour: '面粉', plank: '木板', cloth: '布料',
+      bread: '面包', garment: '成衣', tools: '工具',
     },
   },
 };

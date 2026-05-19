@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Putt Quest</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="lang-toggle">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 data-i18n="title">PUTT QUEST</h1>
+    <p data-i18n="subtitle">Drag back, aim, and sink it under par.</p>
+    <p data-i18n="howto">Drag from the ball to aim and set power, release to putt.</p>
+    <div class="row">
+      <button id="btn-play" data-i18n="play">PLAY</button>
+      <button id="btn-levels" class="ghost" data-i18n="levelSelect">HOLES</button>
+    </div>
+    <p id="title-best"></p>
+  </div>
+
+  <!-- Hole select -->
+  <div id="screen-levels" class="screen hidden">
+    <h2 data-i18n="levelSelect">HOLES</h2>
+    <div id="hole-grid"></div>
+    <button id="btn-levels-back" class="ghost" data-i18n="menu">Menu</button>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-hole">Hole 1</span>
+      <span id="hud-par">Par 3</span>
+      <span id="hud-strokes">Strokes 0</span>
+      <span id="hud-best">— —</span>
+    </div>
+    <div class="game-buttons">
+      <button id="btn-restart" data-i18n="restart">Replay</button>
+      <button id="btn-game-menu" class="ghost" data-i18n="menu">Menu</button>
+    </div>
+  </div>
+
+  <!-- Hole result -->
+  <div id="overlay-result" class="overlay hidden">
+    <h2 data-i18n="sunk">IN THE CUP!</h2>
+    <p id="result-strokes"></p>
+    <p id="result-diff"></p>
+    <div class="row">
+      <button id="btn-next" data-i18n="next">NEXT HOLE</button>
+      <button id="btn-result-menu" class="ghost" data-i18n="levelSelect">HOLES</button>
+    </div>
+  </div>
+
+  <!-- Course complete -->
+  <div id="overlay-alldone" class="overlay hidden">
+    <h1 data-i18n="allDone">COURSE COMPLETE</h1>
+    <p id="alldone-msg"></p>
+    <button id="btn-alldone-menu" data-i18n="menu">Menu</button>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

@@ -1,220 +1,128 @@
-const SIZE = 25;
-const WIDTH = 5;
-const CROPS = [
-  { name: 'Sprout', color: '#62d879', stem: '#244b2d' },
-  { name: 'Mintbud', color: '#75e3a2', stem: '#2f6d3a' },
-  { name: 'Dewcap', color: '#64c7ff', stem: '#315f80' },
-  { name: 'Glowroot', color: '#aa7dff', stem: '#594b94' },
-  { name: 'Sunpod', color: '#f4c85a', stem: '#8c671e' },
-  { name: 'Pepperstar', color: '#ff9266', stem: '#8a4a30' },
-  { name: 'Roseflare', color: '#f0647f', stem: '#8b3148' },
-  { name: 'Pearlfruit', color: '#ffffff', stem: '#798499' },
-];
-const MUTATIONS = {
-  plain: { label: '', mult: 1, color: '#ffffff' },
-  silver: { label: 'S', mult: 2.2, color: '#c9d7e8' },
-  gold: { label: 'G', mult: 5, color: '#f4c85a' },
-};
+// Pixel Merge Garden - merge-idle garden with orders, mutations, greenhouse
+// tiers, wild crops, offline income and a juicy particle layer.
+
+const SAVE_KEY = 'pixel-merge-garden-save';
 
 const state = {
   coins: 24,
   board: Array(SIZE).fill(null),
-  selected: null,
   bank: 0,
   best: 1,
-  tick: 0,
-  rain: 0,
-  streak: 0,
-  greenhouse: 1,
+  greenhouse: 0,        // index into GREENHOUSE
+  rain: 0,              // seconds of rain boost remaining
+  streak: 0,            // current merge combo
   order: null,
-  floaters: [],
+  selected: null,
+  lastSave: Date.now(),
 };
 
-function crop(level = 1, mutation = 'plain') {
-  return { level, mutation, age: 0 };
-}
+let fx = [];            // particles + floating text on the overlay canvas
 
-function cropName(level) {
-  return CROPS[(level - 1) % CROPS.length].name;
-}
+// ---- economy -----------------------------------------------------------
+function ghTier() { return GREENHOUSE[state.greenhouse]; }
 
 function seedCost() {
   const filled = state.board.filter(Boolean).length;
-  return Math.floor(9 + filled * 2.4 + state.best * 3.5 + state.greenhouse * 5);
+  return Math.floor(9 + filled * 2.6 + state.best * 4 + state.greenhouse * 14);
 }
-
-function waterCost() {
-  return 30 + state.greenhouse * 18 + state.best * 5;
-}
+function waterCost() { return Math.floor((34 + state.best * 6) * (1 + state.greenhouse * 0.5)); }
 
 function cropValue(c) {
   if (!c) return 0;
-  return Math.pow(2, c.level - 1) * 0.16 * MUTATIONS[c.mutation].mult * state.greenhouse * (state.rain > 0 ? 2 : 1);
+  const m = MUTATIONS[c.mutation].mult * (c.wild ? 3 : 1);
+  return Math.pow(2, c.level - 1) * 0.16 * m * ghTier().income * (state.rain > 0 ? 2 : 1);
 }
+function incomeRate() { return state.board.reduce((s, c) => s + cropValue(c), 0); }
 
-function incomeRate() {
-  return state.board.reduce((sum, c) => sum + cropValue(c), 0);
+function crop(level = 1, mutation = 'plain', wild = false) { return { level, mutation, wild }; }
+
+function rollMutation(a, b) {
+  let base = Math.max(MUTATION_RANK.indexOf(a.mutation), MUTATION_RANK.indexOf(b.mutation));
+  const chance = 0.05 + state.greenhouse * 0.02 + Math.min(0.25, state.streak * 0.012);
+  if (Math.random() < chance) base++;
+  if (Math.random() < chance * 0.18) base++; // rare double-bump
+  return MUTATION_RANK[Math.min(base, MUTATION_RANK.length - 1)];
 }
 
 function newOrder() {
-  const target = Math.max(2, Math.min(state.best, 2 + Math.floor(Math.random() * Math.max(1, state.best))));
+  const reach = Math.max(1, state.best - 1);
+  const level = Math.max(2, 2 + Math.floor(Math.random() * reach));
   state.order = {
-    level: target,
-    need: 2 + Math.floor(target / 3),
+    level,
+    need: 2 + Math.floor(level / 3),
     have: 0,
-    reward: Math.floor(35 * Math.pow(1.72, target - 1)),
+    reward: Math.floor(40 * Math.pow(1.78, level - 1)),
   };
 }
 
-function addFloater(text, color = '#f4c85a') {
-  state.floaters.push({ text, color, life: 70 });
-}
+// ---- merge logic -------------------------------------------------------
+function canMerge(a, b) { return !!a && !!b && (a.wild || b.wild || a.level === b.level); }
 
-function rollMutation(a, b) {
-  const rank = { plain: 0, silver: 1, gold: 2 };
-  let base = Math.max(rank[a.mutation], rank[b.mutation]);
-  const chance = 0.05 + state.greenhouse * 0.015 + state.streak * 0.01;
-  if (Math.random() < chance) base++;
-  return Object.keys(rank)[Math.min(base, 2)];
-}
+function doMerge(srcIdx, dstIdx) {
+  const a = state.board[srcIdx], b = state.board[dstIdx];
+  if (!canMerge(a, b) || srcIdx === dstIdx) { state.streak = 0; return false; }
 
-function drawCrop(c) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 56;
-  canvas.height = 56;
-  canvas.className = 'crop';
-  const ctx = canvas.getContext('2d');
-  ctx.imageSmoothingEnabled = false;
-  const data = CROPS[(c.level - 1) % CROPS.length];
-  ctx.fillStyle = '#172016';
-  ctx.fillRect(0, 0, 56, 56);
-  ctx.fillStyle = '#233a22';
-  ctx.fillRect(8, 44, 40, 5);
-  ctx.fillStyle = data.stem;
-  ctx.fillRect(25, 27, 7, 19);
-  ctx.fillRect(19, 33, 18, 5);
-  ctx.fillStyle = data.color;
-  const size = Math.min(34, 13 + c.level * 3);
-  ctx.fillRect(28 - size / 2, 24 - size / 2, size, size);
-  ctx.fillRect(28 - size / 3, 15, Math.max(8, size / 1.5), 8);
-  ctx.fillStyle = 'rgba(255,255,255,0.35)';
-  ctx.fillRect(19, 16, 14, 5);
-  if (c.mutation !== 'plain') {
-    ctx.strokeStyle = MUTATIONS[c.mutation].color;
-    ctx.lineWidth = 3;
-    ctx.strokeRect(5, 5, 46, 46);
-    ctx.fillStyle = MUTATIONS[c.mutation].color;
-    ctx.fillRect(40, 8, 8, 8);
-  }
-  return canvas;
-}
+  let level, wild = false;
+  if (a.wild && b.wild) { level = Math.max(a.level, b.level) + 1; wild = true; }
+  else if (a.wild)      { level = b.level + 1; }
+  else if (b.wild)      { level = a.level + 1; }
+  else                  { level = a.level + 1; }
 
-function render() {
-  const board = document.getElementById('board');
-  board.innerHTML = '';
-  state.board.forEach((c, i) => {
-    const cell = document.createElement('button');
-    cell.className = `cell${state.selected === i ? ' selected' : ''}${c && c.mutation !== 'plain' ? ` ${c.mutation}` : ''}`;
-    cell.type = 'button';
-    cell.onclick = () => clickCell(i);
-    if (c) {
-      const mutationLabel = c.mutation === 'plain' ? '' : ` ${c.mutation}`;
-      cell.setAttribute('aria-label', `Plot ${i + 1}: level ${c.level}${mutationLabel} ${cropName(c.level)}. Tap another matching crop to merge.`);
-      cell.title = `L${c.level}${mutationLabel} ${cropName(c.level)}`;
-      cell.appendChild(drawCrop(c));
-      const label = document.createElement('span');
-      label.className = 'level';
-      label.textContent = `L${c.level}${MUTATIONS[c.mutation].label}`;
-      cell.appendChild(label);
-      if (state.order && c.level === state.order.level) {
-        const pin = document.createElement('span');
-        pin.className = 'pin';
-        pin.textContent = '!';
-        cell.appendChild(pin);
-      }
-    } else {
-      cell.setAttribute('aria-label', `Plot ${i + 1}: empty`);
+  const merged = crop(level, rollMutation(a, b), wild);
+  state.board[dstIdx] = merged;
+  state.board[srcIdx] = null;
+  state.best = Math.max(state.best, level);
+  state.streak++;
+
+  const bonus = Math.floor(level * 4 * MUTATIONS[merged.mutation].mult * (1 + state.streak * 0.15));
+  state.coins += bonus;
+
+  // order fulfilment
+  if (state.order && level === state.order.level) {
+    state.order.have++;
+    if (state.order.have >= state.order.need) {
+      state.coins += state.order.reward;
+      floatText(`${t('order_')} +${fmt(state.order.reward)}`, dstIdx, '#f4c85a', 1.4);
+      burst(dstIdx, '#f4c85a', 26);
+      newOrder();
     }
-    board.appendChild(cell);
-  });
-  document.getElementById('coins').textContent = Math.floor(state.coins);
-  document.getElementById('bank').textContent = Math.floor(state.bank);
-  document.getElementById('best').textContent = `${state.best} ${cropName(state.best)}`;
-  document.getElementById('income').textContent = `${incomeRate().toFixed(1)}/s${state.rain > 0 ? ' rain' : ''}`;
-  document.getElementById('order').textContent = `L${state.order.level} ${state.order.have}/${state.order.need} +${state.order.reward}`;
-  document.getElementById('buy').textContent = `Buy Seed ${seedCost()}`;
-  document.getElementById('buy').disabled = state.coins < seedCost() || !state.board.includes(null);
-  document.getElementById('collect').textContent = `Collect ${Math.floor(state.bank)}`;
-  document.getElementById('water').textContent = `Water All ${waterCost()}`;
-  document.getElementById('water').disabled = state.coins < waterCost() || state.rain > 0;
-  renderFloaters();
+  }
+  floatText(`${t('merge')} +${fmt(bonus)}`, dstIdx, MUTATIONS[merged.mutation].color);
+  if (state.streak >= 3) floatText(`${t('combo')} x${state.streak}`, dstIdx, '#ff9ce0', 0.85);
+  burst(dstIdx, merged.wild ? '#ffffff' : cropArt(level).leaf, 14 + Math.min(20, state.streak * 2));
+  save();
+  return true;
 }
 
-function renderFloaters() {
-  let layer = document.getElementById('floaters');
-  if (!layer) {
-    layer = document.createElement('div');
-    layer.id = 'floaters';
-    document.querySelector('.app').appendChild(layer);
-  }
-  layer.innerHTML = state.floaters.map(f => `<span style="color:${f.color};opacity:${Math.max(0, f.life / 70)}">${f.text}</span>`).join('');
-}
-
-function clickCell(i) {
-  const current = state.board[i];
-  if (!current) {
-    state.selected = null;
-    render();
-    return;
-  }
-  if (state.selected === null) {
-    state.selected = i;
-  } else if (state.selected === i) {
-    state.selected = null;
-  } else {
-    const aIndex = state.selected;
-    const a = state.board[aIndex];
-    if (a && current && a.level === current.level) {
-      const next = crop(current.level + 1, rollMutation(a, current));
-      state.board[i] = next;
-      state.board[aIndex] = null;
-      state.best = Math.max(state.best, next.level);
-      state.streak++;
-      const bonus = Math.floor(next.level * 3 * MUTATIONS[next.mutation].mult + state.streak);
-      state.coins += bonus;
-      if (state.order.level === next.level) state.order.have++;
-      if (state.order.have >= state.order.need) {
-        state.coins += state.order.reward;
-        addFloater(`ORDER +${state.order.reward}`, '#f4c85a');
-        newOrder();
-      } else {
-        addFloater(`MERGE +${bonus}`, MUTATIONS[next.mutation].color);
-      }
-      if (state.best % 4 === 0 && next.level === state.best) state.greenhouse = Math.max(state.greenhouse, 1 + Math.floor(state.best / 4));
-    } else {
-      state.streak = 0;
-    }
-    state.selected = null;
-  }
-  render();
-}
-
+// ---- actions -----------------------------------------------------------
 function buySeed() {
   const cost = seedCost();
-  const empty = state.board.map((v, i) => v ? -1 : i).filter(i => i >= 0);
+  const empty = state.board.map((v, i) => (v ? -1 : i)).filter(i => i >= 0);
   if (state.coins < cost || !empty.length) return;
   state.coins -= cost;
-  const mutation = Math.random() < 0.04 + state.greenhouse * 0.01 ? 'silver' : 'plain';
-  state.board[empty[Math.floor(Math.random() * empty.length)]] = crop(1, mutation);
-  addFloater(mutation === 'silver' ? 'SILVER SEED' : 'SEED', mutation === 'silver' ? '#c9d7e8' : '#62d879');
-  render();
+  const luck = 0.04 + ghTier().seedLuck;
+  let c;
+  if (Math.random() < 0.035 + state.greenhouse * 0.01) {
+    c = crop(1, 'plain', true); floatTextCentered(t('wildSeed'), '#ffffff');
+  } else if (Math.random() < luck) {
+    c = crop(1, 'silver'); floatTextCentered(t('silverSeed'), '#c9d7e8');
+  } else {
+    c = crop(1, 'plain'); floatTextCentered(t('seed'), '#7fe089');
+  }
+  const idx = empty[Math.floor(Math.random() * empty.length)];
+  state.board[idx] = c;
+  burst(idx, c.wild ? '#ffffff' : '#7fe089', 10);
+  state.streak = 0;
+  renderBoard(); renderStats(); save();
 }
 
 function collect() {
-  state.coins += Math.floor(state.bank);
-  if (state.bank >= 1) addFloater(`COLLECT +${Math.floor(state.bank)}`, '#f4c85a');
+  const amt = Math.floor(state.bank);
+  if (amt < 1) return;
+  state.coins += amt;
   state.bank = 0;
-  render();
+  floatTextCentered(`${t('collectF')} +${fmt(amt)}`, '#f4c85a');
+  renderStats(); save();
 }
 
 function waterAll() {
@@ -222,40 +130,310 @@ function waterAll() {
   if (state.coins < cost || state.rain > 0) return;
   state.coins -= cost;
   state.rain = 30;
-  addFloater('RAIN BOOST', '#64c7ff');
-  render();
+  floatTextCentered(t('rainBoost'), '#64c7ff');
+  for (let i = 0; i < SIZE; i++) if (state.board[i]) burst(i, '#64c7ff', 6);
+  renderStats(); save();
 }
 
-function reset() {
-  state.coins = 24;
-  state.board = Array(SIZE).fill(null);
-  state.selected = null;
-  state.bank = 0;
-  state.best = 1;
-  state.rain = 0;
-  state.streak = 0;
-  state.greenhouse = 1;
-  state.floaters = [];
-  state.board[12] = crop(1);
-  state.board[13] = crop(1);
-  state.board[7] = crop(1);
+function upgradeGreenhouse() {
+  if (state.greenhouse >= GREENHOUSE.length - 1) return;
+  const cost = GREENHOUSE[state.greenhouse + 1].cost;
+  if (state.coins < cost) return;
+  state.coins -= cost;
+  state.greenhouse++;
+  floatTextCentered(`${t('greenhouseUp')} ${state.greenhouse + 1}`, '#a8f0b0');
+  renderStats(); save();
+}
+
+function resetGame() {
+  if (!confirm(t('confirmReset'))) return;
+  localStorage.removeItem(SAVE_KEY);
+  Object.assign(state, {
+    coins: 24, board: Array(SIZE).fill(null), bank: 0, best: 1,
+    greenhouse: 0, rain: 0, streak: 0, selected: null, lastSave: Date.now(),
+  });
+  state.board[12] = crop(1); state.board[7] = crop(1); state.board[13] = crop(1);
   newOrder();
-  render();
+  renderBoard(); renderStats(); save();
 }
 
+// ---- save / load / offline --------------------------------------------
+function save() {
+  state.lastSave = Date.now();
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      coins: state.coins, board: state.board, bank: state.bank, best: state.best,
+      greenhouse: state.greenhouse, order: state.order, lastSave: state.lastSave,
+    }));
+  } catch (e) { /* storage unavailable - play without persistence */ }
+}
+
+function load() {
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(SAVE_KEY)); } catch (e) { data = null; }
+  if (!data || !Array.isArray(data.board)) {
+    state.board[12] = crop(1); state.board[7] = crop(1); state.board[13] = crop(1);
+    newOrder();
+    return;
+  }
+  state.coins = data.coins ?? 24;
+  state.board = data.board.slice(0, SIZE);
+  while (state.board.length < SIZE) state.board.push(null);
+  state.bank = data.bank ?? 0;
+  state.best = data.best ?? 1;
+  state.greenhouse = Math.min(data.greenhouse ?? 0, GREENHOUSE.length - 1);
+  state.order = data.order || null;
+  if (!state.order) newOrder();
+  // Offline income - the garden keeps banking coins while you're away.
+  const elapsed = Math.max(0, (Date.now() - (data.lastSave || Date.now())) / 1000);
+  const earned = incomeRate() * Math.min(elapsed, OFFLINE_CAP_SECONDS);
+  if (earned >= 1) {
+    state.bank += earned;
+    setTimeout(() => floatTextCentered(`${t('welcomeBack')}: +${fmt(earned)}`, '#f4c85a', 1.6), 400);
+  }
+}
+
+// ---- rendering ---------------------------------------------------------
+const boardEl = document.getElementById('board');
+
+function renderBoard() {
+  boardEl.innerHTML = '';
+  state.board.forEach((c, i) => {
+    const cell = document.createElement('button');
+    cell.type = 'button';
+    cell.dataset.idx = i;
+    cell.className = 'cell'
+      + (state.selected === i ? ' selected' : '')
+      + (c && c.mutation !== 'plain' ? ` ${c.mutation}` : '')
+      + (c && c.wild ? ' wild' : '');
+    if (c) {
+      const cv = document.createElement('canvas');
+      cv.className = 'crop';
+      cv.style.animationDelay = ((i * 137) % 1000) + 'ms';
+      paintCrop(cv, c);
+      cell.appendChild(cv);
+      const lbl = document.createElement('span');
+      lbl.className = 'level';
+      lbl.textContent = `L${c.level}${MUTATIONS[c.mutation].label}`;
+      cell.appendChild(lbl);
+      if (state.order && c.level === state.order.level && !c.wild) {
+        const pin = document.createElement('span');
+        pin.className = 'pin'; pin.textContent = '!';
+        cell.appendChild(pin);
+      }
+      const name = c.wild ? t('wildSeed') : cropName(c.level);
+      cell.setAttribute('aria-label', `Plot ${i + 1}: level ${c.level} ${name}. Drag onto a matching crop to merge.`);
+      cell.title = c.wild ? t('wildHint') : `L${c.level} ${name}`;
+    } else {
+      cell.setAttribute('aria-label', `Plot ${i + 1}: empty`);
+    }
+    boardEl.appendChild(cell);
+  });
+}
+
+function renderStats() {
+  set('coins', fmt(state.coins));
+  set('bank', fmt(state.bank));
+  set('best', `${state.best} ${cropName(state.best)}`);
+  set('income', `${incomeRate().toFixed(1)}${t('perSec')}${state.rain > 0 ? ' ' + t('rain') : ''}`);
+  set('order', state.order ? `L${state.order.level} ${state.order.have}/${state.order.need} +${fmt(state.order.reward)}` : '-');
+
+  const buy = document.getElementById('buy');
+  buy.textContent = `${t('buySeed')} ${fmt(seedCost())}`;
+  buy.disabled = state.coins < seedCost() || !state.board.includes(null);
+
+  const col = document.getElementById('collect');
+  col.textContent = `${t('collect')} ${fmt(state.bank)}`;
+  col.disabled = state.bank < 1;
+
+  const wat = document.getElementById('water');
+  wat.textContent = `${t('water')} ${fmt(waterCost())}`;
+  wat.disabled = state.coins < waterCost() || state.rain > 0;
+
+  const up = document.getElementById('upgrade');
+  const maxed = state.greenhouse >= GREENHOUSE.length - 1;
+  up.textContent = maxed
+    ? `${t('upgrade')} ${t('maxGreenhouse')}`
+    : `${t('upgrade')} ${fmt(GREENHOUSE[state.greenhouse + 1].cost)}`;
+  up.disabled = maxed || state.coins < GREENHOUSE[state.greenhouse + 1].cost;
+
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+}
+
+function set(id, v) { document.getElementById(id).textContent = v; }
+function fmt(n) {
+  n = Math.floor(n);
+  if (n < 1000) return '' + n;
+  const u = ['', 'K', 'M', 'B', 'T'];
+  let i = 0;
+  while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+  return n.toFixed(n < 10 ? 1 : 0) + u[i];
+}
+
+// ---- particle / floating-text overlay ---------------------------------
+const fxCanvas = document.createElement('canvas');
+fxCanvas.id = 'fx';
+document.body.appendChild(fxCanvas);
+const fxCtx = fxCanvas.getContext('2d');
+
+function resizeFx() {
+  fxCanvas.width = innerWidth;
+  fxCanvas.height = innerHeight;
+}
+addEventListener('resize', resizeFx);
+resizeFx();
+
+function cellCenter(idx) {
+  const cell = boardEl.querySelector(`[data-idx="${idx}"]`);
+  if (!cell) return { x: innerWidth / 2, y: innerHeight / 2 };
+  const r = cell.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+function burst(idx, color, count) {
+  const { x, y } = cellCenter(idx);
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 1.5 + Math.random() * 3.5;
+    fx.push({ kind: 'spark', x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 1,
+      life: 1, color, size: 2 + Math.random() * 3 });
+  }
+}
+function floatText(text, idx, color = '#f4c85a', scale = 1) {
+  const { x, y } = cellCenter(idx);
+  fx.push({ kind: 'text', x, y: y - 12, vy: -0.7, life: 1, text, color, scale });
+}
+function floatTextCentered(text, color = '#f4c85a', scale = 1.2) {
+  fx.push({ kind: 'text', x: innerWidth / 2, y: innerHeight * 0.32, vy: -0.5, life: 1, text, color, scale });
+}
+
+function fxLoop() {
+  fxCtx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
+  for (const f of fx) {
+    f.life -= f.kind === 'text' ? 0.012 : 0.022;
+    if (f.kind === 'spark') {
+      f.x += f.vx; f.y += f.vy; f.vy += 0.16; f.vx *= 0.98;
+      fxCtx.globalAlpha = Math.max(0, f.life);
+      fxCtx.fillStyle = f.color;
+      fxCtx.fillRect(f.x | 0, f.y | 0, f.size, f.size);
+    } else {
+      f.y += f.vy;
+      fxCtx.globalAlpha = Math.max(0, Math.min(1, f.life * 1.4));
+      const px = Math.round(13 * f.scale);
+      fxCtx.font = `900 ${px}px ui-monospace, Menlo, monospace`;
+      fxCtx.textAlign = 'center';
+      fxCtx.lineWidth = 4; fxCtx.strokeStyle = '#000';
+      fxCtx.strokeText(f.text, f.x, f.y);
+      fxCtx.fillStyle = f.color;
+      fxCtx.fillText(f.text, f.x, f.y);
+    }
+  }
+  fxCtx.globalAlpha = 1;
+  fx = fx.filter(f => f.life > 0);
+  requestAnimationFrame(fxLoop);
+}
+requestAnimationFrame(fxLoop);
+
+// ---- input: drag-to-merge + tap-to-merge ------------------------------
+let drag = null; // { from, ghost, moved }
+
+function cellIndexAt(clientX, clientY) {
+  const el = document.elementFromPoint(clientX, clientY);
+  const cell = el && el.closest('.cell');
+  return cell ? +cell.dataset.idx : -1;
+}
+
+function highlight(idx) {
+  boardEl.querySelectorAll('.cell.target').forEach(c => c.classList.remove('target'));
+  if (idx >= 0 && drag && idx !== drag.from && canMerge(state.board[drag.from], state.board[idx])) {
+    boardEl.querySelector(`[data-idx="${idx}"]`).classList.add('target');
+  }
+}
+
+boardEl.addEventListener('pointerdown', e => {
+  const cell = e.target.closest('.cell');
+  if (!cell) return;
+  const idx = +cell.dataset.idx;
+  if (!state.board[idx]) { state.selected = null; renderBoard(); renderStats(); return; }
+  drag = { from: idx, moved: false, ghost: null };
+  boardEl.setPointerCapture(e.pointerId);
+});
+
+boardEl.addEventListener('pointermove', e => {
+  if (!drag) return;
+  if (!drag.moved) {
+    drag.moved = true;
+    const ghost = document.createElement('canvas');
+    ghost.className = 'crop drag-ghost';
+    paintCrop(ghost, state.board[drag.from]);
+    document.body.appendChild(ghost);
+    drag.ghost = ghost;
+    boardEl.querySelector(`[data-idx="${drag.from}"]`).classList.add('lifting');
+  }
+  drag.ghost.style.left = e.clientX + 'px';
+  drag.ghost.style.top = e.clientY + 'px';
+  highlight(cellIndexAt(e.clientX, e.clientY));
+});
+
+boardEl.addEventListener('pointerup', e => {
+  if (!drag) return;
+  const from = drag.from;
+  const dropped = drag.moved;
+  if (drag.ghost) drag.ghost.remove();
+  drag = null;
+  boardEl.querySelectorAll('.lifting,.target').forEach(c => c.classList.remove('lifting', 'target'));
+
+  const target = cellIndexAt(e.clientX, e.clientY);
+
+  if (dropped && target >= 0 && target !== from) {
+    if (canMerge(state.board[from], state.board[target])) {
+      doMerge(from, target);
+      state.selected = null;
+    }
+    renderBoard(); renderStats();
+    return;
+  }
+  // No drag: tap-to-select / tap-to-merge.
+  if (state.selected === null) {
+    state.selected = from;
+  } else if (state.selected === from) {
+    state.selected = null;
+  } else if (canMerge(state.board[state.selected], state.board[from])) {
+    doMerge(state.selected, from);
+    state.selected = null;
+  } else {
+    state.selected = from;
+  }
+  renderBoard(); renderStats();
+});
+
+boardEl.addEventListener('pointercancel', () => {
+  if (drag && drag.ghost) drag.ghost.remove();
+  drag = null;
+  boardEl.querySelectorAll('.lifting,.target').forEach(c => c.classList.remove('lifting', 'target'));
+});
+
+// ---- wiring ------------------------------------------------------------
 document.getElementById('buy').onclick = buySeed;
 document.getElementById('collect').onclick = collect;
 document.getElementById('water').onclick = waterAll;
-document.getElementById('reset').onclick = reset;
+document.getElementById('upgrade').onclick = upgradeGreenhouse;
+document.getElementById('reset').onclick = resetGame;
+setupLanguageToggle(() => { renderBoard(); renderStats(); });
 
+// economy tick - bank passive income, count down rain.
 setInterval(() => {
   state.bank += incomeRate();
-  state.tick++;
-  for (const c of state.board) if (c) c.age++;
-  for (const f of state.floaters) f.life -= 14;
-  state.floaters = state.floaters.filter(f => f.life > 0);
-  if (state.rain > 0) state.rain--;
-  render();
+  if (state.rain > 0) {
+    state.rain--;
+    if (state.rain === 0) renderBoard();
+  }
+  renderStats();
 }, 1000);
 
-reset();
+// periodic autosave keeps offline income accurate.
+setInterval(save, 5000);
+addEventListener('beforeunload', save);
+
+load();
+renderBoard();
+renderStats();

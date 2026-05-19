@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Data Serpent</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">DATA SERPENT</h1>
+      <p class="tagline" data-i18n="subtitle">Devour the data nodes. Don't bite your own tail.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">JACK IN</button>
+      <p class="howto" data-i18n="howto">Arrows / WASD or swipe to turn. Walls and firewalls are fatal.</p>
+      <p id="title-best" class="best">Best: 0</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <span id="hud-score" class="tag gold">0</span>
+      <span id="hud-sector" class="tag">Sector 1</span>
+      <span id="hud-len" class="tag">Len 3</span>
+      <button id="btn-pause" class="icon-btn">⏸</button>
+    </header>
+
+    <div id="stage"><canvas id="game"></canvas></div>
+
+    <div id="dpad">
+      <button id="btn-up" class="pad" aria-label="Up">▲</button>
+      <button id="btn-left" class="pad" aria-label="Left">◀</button>
+      <button id="btn-down" class="pad" aria-label="Down">▼</button>
+      <button id="btn-right" class="pad" aria-label="Right">▶</button>
+    </div>
+
+    <!-- Pause -->
+    <div id="overlay-pause" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="paused">PAUSED</h2>
+        <button id="btn-pause-resume" class="big-btn" data-i18n="resume">Resume</button>
+        <button id="btn-pause-restart" class="ghost-btn" data-i18n="restart">Restart</button>
+        <button id="btn-pause-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+
+    <!-- Game over -->
+    <div id="overlay-over" class="overlay hidden">
+      <div class="panel">
+        <h2 class="lose" data-i18n="gameOver">CONNECTION LOST</h2>
+        <p id="over-score" class="panel-msg">Score: 0</p>
+        <p id="over-sector" class="panel-msg">Reached sector 1</p>
+        <p id="over-best" class="best">Best: 0</p>
+        <button id="btn-over-again" class="big-btn" data-i18n="again">RECONNECT</button>
+        <button id="btn-over-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

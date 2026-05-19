@@ -1,0 +1,174 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  min-height: 100dvh;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 14%, rgba(72, 168, 96, 0.22), transparent 40%),
+    linear-gradient(#0e2118, #06120c);
+  color: #edf6ec;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+#shell {
+  position: relative;
+  width: min(100vw, calc(100dvh * 480 / 340));
+  aspect-ratio: 480 / 340;
+  max-height: 100dvh;
+  overflow: hidden;
+  background: #0c1c12;
+  border: 2px solid #2c4533;
+  border-radius: 6px;
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.45);
+}
+
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+  touch-action: none;
+}
+
+.screen, .overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  padding: 18px;
+  z-index: 4;
+}
+
+.screen { background: linear-gradient(#0e2118ee, #06120ccc); }
+.overlay { background: rgba(6, 14, 9, 0.82); }
+.hidden { display: none !important; }
+
+#screen-game { background: none; pointer-events: none; }
+
+h1 {
+  font-size: clamp(22px, 6vw, 38px);
+  color: #ffe14d;
+  text-shadow: 2px 2px #000, 0 0 14px rgba(255, 225, 77, 0.4);
+  letter-spacing: 2px;
+}
+h2 { font-size: clamp(16px, 4vw, 24px); color: #7ad08a; text-shadow: 2px 2px #000; }
+p { font-size: clamp(11px, 2.6vw, 14px); color: #b6c7b6; line-height: 1.5; max-width: 360px; }
+
+button {
+  min-height: 44px;
+  padding: 10px 22px;
+  color: #06120c;
+  background: #7ad08a;
+  border: 0;
+  border-radius: 5px;
+  font: 900 13px ui-monospace, monospace;
+  letter-spacing: 1px;
+  cursor: pointer;
+}
+button:active { transform: translateY(1px); }
+button.ghost {
+  color: #edf6ec;
+  background: rgba(8, 18, 11, 0.85);
+  border: 1px solid rgba(230, 246, 236, 0.25);
+}
+
+.row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+
+#lang-toggle {
+  position: absolute;
+  top: max(8px, env(safe-area-inset-top));
+  right: max(8px, env(safe-area-inset-right));
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 11px;
+  z-index: 6;
+  background: rgba(8, 18, 11, 0.85);
+  color: #edf6ec;
+  border: 1px solid rgba(230, 246, 236, 0.25);
+  pointer-events: auto;
+}
+
+/* in-game HUD */
+.hud {
+  position: absolute;
+  top: max(8px, env(safe-area-inset-top));
+  left: max(8px, env(safe-area-inset-left));
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  z-index: 5;
+}
+.hud span {
+  padding: 5px 9px;
+  border: 1px solid rgba(230, 246, 236, 0.22);
+  border-radius: 5px;
+  background: rgba(6, 14, 9, 0.78);
+  font-size: 11px;
+  text-shadow: 1px 1px #000;
+}
+#hud-strokes { color: #ffe14d; }
+#hud-best { color: #7ad08a; }
+
+.game-buttons {
+  position: absolute;
+  bottom: max(8px, env(safe-area-inset-bottom));
+  right: max(8px, env(safe-area-inset-right));
+  display: flex;
+  gap: 6px;
+  z-index: 5;
+}
+.game-buttons button {
+  min-height: 38px;
+  padding: 7px 12px;
+  font-size: 11px;
+  pointer-events: auto;
+}
+
+/* hole select grid */
+#hole-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  max-width: 340px;
+}
+.hole-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 56px;
+  min-height: 56px;
+  padding: 6px;
+  background: rgba(122, 208, 138, 0.16);
+  border: 1px solid #7ad08a;
+  color: #edf6ec;
+}
+.hole-cell b { font-size: 18px; color: #ffe14d; }
+.hole-cell span { font-size: 10px; color: #9fb39f; }
+.hole-cell.locked {
+  background: rgba(8, 18, 11, 0.7);
+  border-color: rgba(230, 246, 236, 0.18);
+  opacity: 0.55;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  #shell {
+    width: 100vw;
+    height: 100dvh;
+    max-height: none;
+    aspect-ratio: auto;
+    border: 0;
+    border-radius: 0;
+  }
+}

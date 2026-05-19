@@ -54,6 +54,7 @@ canvas {
 
 #hud {
   top: max(10px, env(safe-area-inset-top));
+  right: max(74px, calc(env(safe-area-inset-right) + 64px));
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
@@ -76,6 +77,23 @@ canvas {
 
 #hud b { color: var(--blue); }
 #hud strong { color: var(--gold); }
+#hud i { font-style: normal; color: var(--dim); }
+
+#lang-toggle {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  right: max(10px, env(safe-area-inset-right));
+  z-index: 3;
+  min-height: 30px;
+  width: auto;
+  padding: 5px 12px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: 900 11px ui-monospace, monospace;
+  cursor: pointer;
+}
 
 #controls {
   bottom: max(112px, calc(env(safe-area-inset-bottom) + 108px));

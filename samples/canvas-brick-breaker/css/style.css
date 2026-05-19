@@ -56,6 +56,7 @@ canvas {
 
 .hud b { color: #7fe8ff; }
 .hud strong { color: #f4c85a; }
+.hud i { font-style: normal; }
 
 button {
   color: #071018;

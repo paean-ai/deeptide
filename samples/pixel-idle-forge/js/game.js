@@ -4,6 +4,8 @@ class IdleForge {
     this.ctx = this.canvas.getContext('2d');
     this.tab = 'upgrades';
     this.floaters = [];
+    this.sparks = [];
+    this.strike = 0;
     this.last = performance.now();
     this.saveTimer = 0;
     this.state = this.load();
@@ -47,6 +49,9 @@ class IdleForge {
 
   bind() {
     document.getElementById('mine').onclick = () => this.mine();
+    // tapping the forge anvil also mines - a direct, mobile-friendly hit.
+    this.canvas.style.cursor = 'pointer';
+    this.canvas.addEventListener('pointerdown', e => { e.preventDefault(); this.mine(); });
     document.getElementById('prestige-btn').onclick = () => this.prestigeReset();
     document.getElementById('reset-save').onclick = () => {
       if (!confirm(t('resetConfirm'))) return;
@@ -98,8 +103,10 @@ class IdleForge {
     const gain = this.state.clickValue;
     this.state.dust += gain;
     this.state.totalDust += gain;
-    this.floaters.push({ x: 160 + (Math.random() - 0.5) * 90, y: 176 + (Math.random() - 0.5) * 40, text: `+${format(gain)}`, life: 55, color: '#f4c656' });
-    this.drawForge(true);
+    this.floaters.push({ x: 160 + (Math.random() - 0.5) * 70, y: 120, text: `+${format(gain)}`, life: 55, color: '#f4c656' });
+    this.strike = 1;
+    this.sparks.push(...forgeSparks());
+    if (this.sparks.length > 120) this.sparks.splice(0, this.sparks.length - 120);
     this.updateHud();
   }
 
@@ -168,7 +175,7 @@ class IdleForge {
       icon.width = 54;
       icon.height = 54;
       icon.className = 'icon';
-      this.drawIcon(icon.getContext('2d'), item.color, lv);
+      drawItemIcon(icon.getContext('2d'), item, lv);
       const meta = document.createElement('div');
       meta.className = 'meta';
       meta.innerHTML = `<h2>${item.name[currentLang]}</h2><p>${item.desc[currentLang](lv)}</p><span class="level">Lv.${lv}</span>`;
@@ -200,7 +207,15 @@ class IdleForge {
       f.life -= 60 * dt;
     }
     this.floaters = this.floaters.filter(f => f.life > 0);
-    this.drawForge(false);
+    if (this.strike > 0) this.strike = Math.max(0, this.strike - dt / 0.34);
+    for (const s of this.sparks) {
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vy += 520 * dt;
+      s.life -= dt / 0.5;
+    }
+    this.sparks = this.sparks.filter(s => s.life > 0);
+    this.drawForge();
     this.updateHud();
     requestAnimationFrame(t => this.loop(t));
   }
@@ -230,59 +245,23 @@ class IdleForge {
     });
   }
 
-  drawForge(active) {
+  drawForge() {
     const ctx = this.ctx;
-    ctx.clearRect(0, 0, 320, 320);
-    ctx.fillStyle = '#080b12';
-    ctx.fillRect(0, 0, 320, 320);
-    for (let y = 0; y < 320; y += 16) {
-      ctx.fillStyle = y % 32 === 0 ? '#0f1724' : '#0b111b';
-      ctx.fillRect(0, y, 320, 8);
-    }
-    const t = performance.now() / 1000;
-    ctx.fillStyle = '#182337';
-    ctx.fillRect(48, 210, 224, 58);
-    ctx.fillStyle = '#38465c';
-    ctx.fillRect(64, 194, 192, 26);
-    ctx.fillStyle = '#101722';
-    ctx.fillRect(92, 70, 136, 136);
-    ctx.fillStyle = active ? '#f4c656' : '#aa7dff';
-    ctx.fillRect(110, 88, 100, 100);
-    ctx.fillStyle = '#67e7ff';
-    const pulse = Math.floor(Math.sin(t * 5) * 6);
-    ctx.fillRect(128 - pulse / 2, 106 - pulse / 2, 64 + pulse, 64 + pulse);
-    ctx.fillStyle = '#071018';
-    ctx.fillRect(140, 118, 40, 40);
-    ctx.fillStyle = '#51d889';
-    ctx.fillRect(148, 126, 24, 24);
-    ctx.fillStyle = '#26364c';
-    for (let i = 0; i < 8; i++) {
-      const a = t * 0.8 + i * Math.PI / 4;
-      const x = 160 + Math.cos(a) * 108;
-      const y = 142 + Math.sin(a) * 78;
-      ctx.fillRect(Math.round(x), Math.round(y), 10, 10);
-    }
+    const heat = Math.min(1, Math.log10(1 + this.state.dustRate) / 4);
+    renderForge(ctx, performance.now() / 1000, this.strike, heat, this.sparks, this.strike > 0.4);
+    // mined-amount text floaters on top of the scene
     for (const f of this.floaters) {
       ctx.globalAlpha = Math.max(0, f.life / 55);
       ctx.fillStyle = f.color;
-      ctx.font = '14px monospace';
+      ctx.font = 'bold 16px ui-monospace, Menlo, monospace';
       ctx.textAlign = 'center';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#000';
+      ctx.strokeText(f.text, f.x, f.y);
       ctx.fillText(f.text, f.x, f.y);
       ctx.globalAlpha = 1;
     }
-  }
-
-  drawIcon(ctx, color, lv) {
-    ctx.fillStyle = '#080b12';
-    ctx.fillRect(0, 0, 54, 54);
-    ctx.fillStyle = color;
-    const offset = lv % 5;
-    ctx.fillRect(12, 12, 30, 30);
-    ctx.fillStyle = '#edf4ff';
-    ctx.fillRect(18 + offset, 18, 6, 6);
-    ctx.fillRect(30 - offset, 30, 6, 6);
-    ctx.fillStyle = 'rgba(0,0,0,0.35)';
-    ctx.fillRect(8, 42, 38, 4);
+    ctx.textAlign = 'left';
   }
 
   toast(text) {

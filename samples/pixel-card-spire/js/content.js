@@ -73,13 +73,61 @@ const CARD_DEFS = {
               effects: [], power: 'juggernaut', powerV: 5, u: { powerV: 8, power: 'juggernaut' } },
   metal:    { name: ['Metallicize','金属化'], type: 'power', rarity: 'uncommon', cost: 1,
               effects: [], power: 'metal', powerV: 3, u: { powerV: 4, power: 'metal' } },
+  // --- expansion: common ---
+  sidestep: { name: ['Sidestep','侧步'], type: 'skill', rarity: 'common', cost: 1,
+              effects: [{ op: 'block', v: 5 }, { op: 'draw', v: 1 }],
+              u: { effects: [{ op: 'block', v: 8 }, { op: 'draw', v: 1 }] } },
+  hack:     { name: ['Hack','劈砍'], type: 'attack', rarity: 'common', cost: 1,
+              effects: [{ op: 'dmg', v: 6 }, { op: 'weak', v: 1 }],
+              u: { effects: [{ op: 'dmg', v: 8 }, { op: 'weak', v: 2 }] } },
+  // --- expansion: uncommon ---
+  frenzy:   { name: ['Frenzy','狂乱'], type: 'attack', rarity: 'uncommon', cost: 1, hits: 3,
+              effects: [{ op: 'dmg', v: 3 }], u: { hits: 3, effects: [{ op: 'dmg', v: 4 }] } },
+  toxicCloud:{ name: ['Toxic Cloud','毒云'], type: 'skill', rarity: 'uncommon', cost: 1, aoe: true,
+              effects: [{ op: 'poison', v: 3 }], u: { effects: [{ op: 'poison', v: 5 }] } },
+  fortify:  { name: ['Fortify','加固'], type: 'skill', rarity: 'uncommon', cost: 2,
+              effects: [{ op: 'block', v: 14 }], u: { effects: [{ op: 'block', v: 20 }] } },
+  reckless: { name: ['Reckless Strike','鲁莽一击'], type: 'attack', rarity: 'uncommon', cost: 1,
+              effects: [{ op: 'dmg', v: 9 }, { op: 'loseHp', v: 2 }],
+              u: { effects: [{ op: 'dmg', v: 13 }, { op: 'loseHp', v: 2 }] } },
+  // --- expansion: rare ---
+  execute:  { name: ['Execute','处决'], type: 'attack', rarity: 'rare', cost: 2,
+              effects: [{ op: 'dmg', v: 20 }], u: { effects: [{ op: 'dmg', v: 28 }] } },
+  bulwark:  { name: ['Bulwark','壁垒'], type: 'skill', rarity: 'rare', cost: 1,
+              effects: [{ op: 'block', v: 10 }, { op: 'str', v: 2 }],
+              u: { effects: [{ op: 'block', v: 14 }, { op: 'str', v: 3 }] } },
+  venomBurst:{ name: ['Venom Burst','剧毒爆发'], type: 'attack', rarity: 'rare', cost: 1, aoe: true,
+              effects: [{ op: 'dmg', v: 6 }, { op: 'poison', v: 5 }],
+              u: { effects: [{ op: 'dmg', v: 8 }, { op: 'poison', v: 7 }] } },
+  adrenaline:{ name: ['Adrenaline','肾上腺素'], type: 'skill', rarity: 'rare', cost: 0,
+              effects: [{ op: 'energy', v: 2 }, { op: 'draw', v: 2 }],
+              u: { effects: [{ op: 'energy', v: 3 }, { op: 'draw', v: 2 }] } },
+  // --- expansion 2: common ---
+  heavyGuard:{ name: ['Heavy Guard','重甲'], type: 'skill', rarity: 'common', cost: 2,
+              effects: [{ op: 'block', v: 13 }], u: { effects: [{ op: 'block', v: 18 }] } },
+  gash:     { name: ['Gash','割裂'], type: 'attack', rarity: 'common', cost: 1,
+              effects: [{ op: 'dmg', v: 6 }, { op: 'vuln', v: 1 }],
+              u: { effects: [{ op: 'dmg', v: 8 }, { op: 'vuln', v: 2 }] } },
+  // --- expansion 2: uncommon ---
+  warcry:   { name: ['War Cry','战吼'], type: 'skill', rarity: 'uncommon', cost: 0,
+              effects: [{ op: 'str', v: 1 }, { op: 'draw', v: 1 }],
+              u: { effects: [{ op: 'str', v: 1 }, { op: 'draw', v: 2 }] } },
+  siphon:   { name: ['Siphon Strike','汲取'], type: 'attack', rarity: 'uncommon', cost: 1,
+              effects: [{ op: 'dmg', v: 6 }, { op: 'heal', v: 3 }],
+              u: { effects: [{ op: 'dmg', v: 8 }, { op: 'heal', v: 5 }] } },
+  crescent: { name: ['Crescent Sweep','弦月斩'], type: 'attack', rarity: 'uncommon', cost: 2, aoe: true,
+              effects: [{ op: 'dmg', v: 9 }, { op: 'weak', v: 1 }],
+              u: { effects: [{ op: 'dmg', v: 12 }, { op: 'weak', v: 2 }] } },
+  // --- expansion 2: rare ---
+  cataclysm:{ name: ['Cataclysm','天灾'], type: 'attack', rarity: 'rare', cost: 3, aoe: true,
+              effects: [{ op: 'dmg', v: 14 }], u: { effects: [{ op: 'dmg', v: 20 }] } },
 };
 
 const STARTER_DECK = ['strike','strike','strike','strike','strike','guard','guard','guard','guard','bash'];
 
-const COMMON_POOL = ['cleave','quickJab','ironWall','pommel','twinSlice'];
-const UNCOMMON_POOL = ['rampage','bloodlet','riposte','inflame','shrugOff','whirl','poisonBl','secWind','trance','intimid','metal'];
-const RARE_POOL = ['offering','reaper','impervious','limitBrk','demonForm','berserk','juggern'];
+const COMMON_POOL = ['cleave','quickJab','ironWall','pommel','twinSlice','sidestep','hack','heavyGuard','gash'];
+const UNCOMMON_POOL = ['rampage','bloodlet','riposte','inflame','shrugOff','whirl','poisonBl','secWind','trance','intimid','metal','frenzy','toxicCloud','fortify','reckless','warcry','siphon','crescent'];
+const RARE_POOL = ['offering','reaper','impervious','limitBrk','demonForm','berserk','juggern','execute','bulwark','venomBurst','adrenaline','cataclysm'];
 
 function rollCardReward(rng, count) {
   const out = [];

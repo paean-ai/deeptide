@@ -31,12 +31,31 @@ footer {
   padding: 12px;
 }
 
+.title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
 h1 {
   color: #b7a7ff;
   font-size: clamp(26px, 7vw, 50px);
   line-height: 0.95;
   text-shadow: 0 0 24px rgba(183, 167, 255, 0.22);
 }
+
+#lang-toggle {
+  flex: none;
+  min-height: 32px;
+  padding: 6px 12px;
+  color: #edf4ff;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(230, 240, 255, 0.22);
+  font-size: 12px;
+}
+
+.stats i { font-style: normal; }
 
 .stats {
   display: flex;

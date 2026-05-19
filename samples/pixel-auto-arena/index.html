@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Auto Arena</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">AUTO ARENA</h1>
+      <p class="tagline" data-i18n="subtitle">Draft a squad. They fight on their own.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">ENTER ARENA</button>
+      <p class="howto" data-i18n="howto">Buy units, merge three alike, tap two to swap. Then battle.</p>
+      <p id="title-best" class="best">Best round: 0</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <span id="hud-round" class="tag">Round 1</span>
+      <span id="hud-gold" class="tag gold">◆ 5</span>
+      <span id="hud-lives" class="tag lives">♥ 5</span>
+      <span id="hud-cap" class="tag">0/3</span>
+      <button id="btn-pause" class="icon-btn">⏸</button>
+    </header>
+
+    <div id="stage"><canvas id="arena"></canvas></div>
+
+    <div id="synergy"></div>
+
+    <section id="shop-panel">
+      <div id="shop-cards"></div>
+      <div id="shop-actions">
+        <button id="btn-reroll" class="act" data-i18n="reroll">Reroll</button>
+        <button id="btn-sell" class="act" data-i18n="sell">Sell</button>
+        <button id="btn-battle" class="act primary" data-i18n="battle">BATTLE</button>
+      </div>
+    </section>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <!-- Pause -->
+    <div id="overlay-pause" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="paused">PAUSED</h2>
+        <button id="btn-pause-resume" class="big-btn" data-i18n="resume">Resume</button>
+        <button id="btn-pause-restart" class="ghost-btn" data-i18n="restart">Restart</button>
+        <button id="btn-pause-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+
+    <!-- Result -->
+    <div id="overlay-result" class="overlay hidden">
+      <div class="panel">
+        <h2 id="result-title" class="win">VICTORY</h2>
+        <p id="result-msg" class="panel-msg"></p>
+        <button id="btn-next" class="big-btn" data-i18n="next">NEXT ROUND</button>
+      </div>
+    </div>
+
+    <!-- Game over -->
+    <div id="overlay-over" class="overlay hidden">
+      <div class="panel">
+        <h2 class="lose" data-i18n="gameOver">ARENA CLOSED</h2>
+        <p id="over-msg" class="panel-msg">You fell.</p>
+        <p id="over-best" class="best">Best round: 0</p>
+        <button id="btn-over-again" class="big-btn" data-i18n="again">FIGHT AGAIN</button>
+        <button id="btn-over-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

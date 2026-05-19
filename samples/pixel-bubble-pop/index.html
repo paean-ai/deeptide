@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Bubble Pop</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Title -->
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 data-i18n="title">BUBBLE POP</h1>
+      <p class="tagline" data-i18n="subtitle">Aim, shoot, and burst clusters of three or more.</p>
+      <button id="btn-play" class="big-btn" data-i18n="play">PLAY</button>
+      <p class="howto" data-i18n="howto">Aim with the mouse or finger, release to shoot.</p>
+      <p id="title-best" class="best">Best: 0</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <span class="tag score"><i data-i18n="score">Score</i> <b id="hud-score">0</b></span>
+      <button id="btn-pause" class="icon-btn">⏸</button>
+    </header>
+
+    <div id="stage"><canvas id="game"></canvas></div>
+
+    <!-- Pause -->
+    <div id="overlay-pause" class="overlay hidden">
+      <div class="panel">
+        <h2 data-i18n="paused">PAUSED</h2>
+        <button id="btn-pause-resume" class="big-btn" data-i18n="resume">Resume</button>
+        <button id="btn-pause-restart" class="ghost-btn" data-i18n="restart">Restart</button>
+        <button id="btn-pause-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+
+    <!-- Game over -->
+    <div id="overlay-over" class="overlay hidden">
+      <div class="panel">
+        <h2 class="lose" data-i18n="gameOver">BUBBLES OVERFLOW</h2>
+        <p id="over-score" class="panel-msg">Score: 0</p>
+        <p id="over-best" class="best">Best: 0</p>
+        <button id="btn-over-again" class="big-btn" data-i18n="again">POP AGAIN</button>
+        <button id="btn-over-menu" class="ghost-btn" data-i18n="menu">Menu</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
