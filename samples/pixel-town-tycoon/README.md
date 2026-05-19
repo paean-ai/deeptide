@@ -5,14 +5,14 @@ supply chains, and grow a town.
 
 ## Features
 
-- 14 building types across producers, processors, homes, a market, and storage.
-- Four real supply chains: raw resources → processed goods → coins
+- 17 building types across producers, processors, homes, a market, and storage.
+- Five real supply chains: raw resources → processed goods → coins
   (wheat → flour → bread; wood → plank; cotton → cloth → garment;
-  ore + plank → tools).
+  ore + plank → tools; herb → tonic → elixir).
 - Adjacency bonuses (+15%) reward thoughtful placement.
 - Worker economy — cottages house workers; under-staffed towns slow down.
 - 5 building levels with upgrade costs; demolish for a partial refund.
-- 5 town ranks that unlock new buildings; 15 chained quests with rewards.
+- 5 town ranks that unlock new buildings; 18 chained quests with rewards.
 - Storage caps raised by warehouses; offline production credited on return.
 - `localStorage` autosave, English/中文 toggle.
 - Responsive desktop + mobile: tap-to-place, tap-to-upgrade, scalable grid.
