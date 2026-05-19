@@ -6,7 +6,7 @@ through every crystal. A fresh light-routing puzzle genre alongside the other
 
 ## Features
 
-- 8-level campaign of hand-built grids — every level is brute-force verified
+- 12-level campaign of hand-built grids — every level is brute-force verified
   solvable within its mirror budget.
 - A deterministic beam: the laser leaves the emitter, walls stop it, mirrors
   deflect it 90°, and crystals light up when the beam passes through.
