@@ -320,6 +320,24 @@ function fireWeapon(w, dt) {
       cur = best;
     }
     w.cd = s.cd * cdMul();
+  } else if (w.id === 'skyfall') {
+    // meteors plunge from above onto random enemies, exploding on impact
+    for (let i = 0; i < s.count; i++) {
+      const tgt = G.enemies.length
+        ? G.enemies[Math.floor(Math.random() * G.enemies.length)]
+        : null;
+      const tx = tgt ? tgt.x : p.x + (Math.random() - 0.5) * 300;
+      const ty = tgt ? tgt.y : p.y + (Math.random() - 0.5) * 120;
+      const sx = tx + (Math.random() - 0.5) * 50, sy = -24;
+      const a = Math.atan2(ty - sy, tx - sx);
+      G.projectiles.push({
+        type: 'fireball', x: sx, y: sy, tx, ty,
+        vx: Math.cos(a) * s.speed, vy: Math.sin(a) * s.speed,
+        dmg: s.dmg * dmgMul(), splash: s.splash, life: 4,
+        spin: 0, color: WEAPONS.skyfall.color,
+      });
+    }
+    w.cd = s.cd * cdMul();
   }
 }
 

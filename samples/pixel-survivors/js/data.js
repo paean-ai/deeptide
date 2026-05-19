@@ -103,6 +103,17 @@ const WEAPONS = {
       { dmg: 56, count: 9, cd: 0.70, range: 195 },
     ],
   },
+  skyfall: {
+    icon: '☄', color: '#ffd24a',
+    tiers: [
+      { dmg: 30,  count: 2, splash: 46, cd: 2.0,  speed: 300 },
+      { dmg: 39,  count: 2, splash: 50, cd: 1.85, speed: 310 },
+      { dmg: 50,  count: 3, splash: 56, cd: 1.7,  speed: 320 },
+      { dmg: 64,  count: 3, splash: 62, cd: 1.5,  speed: 335 },
+      { dmg: 82,  count: 4, splash: 70, cd: 1.3,  speed: 355 },
+      { dmg: 116, count: 6, splash: 88, cd: 1.05, speed: 390 },
+    ],
+  },
 };
 const WEAPON_IDS = Object.keys(WEAPONS);
 
