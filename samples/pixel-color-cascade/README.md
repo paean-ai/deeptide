@@ -6,7 +6,7 @@ Flood the entire board into one colour before your moves run out.
 
 ## Features
 
-- 12 hand-seeded levels on an escalating curve — growing boards (7×7 → 14×14)
+- 16 hand-seeded levels on an escalating curve — growing boards (7×7 → 16×16)
   and colour counts (4 → 6).
 - Every level's move limit is derived at load time from a built-in greedy
   solver, so each one is guaranteed winnable — and beating the solver earns

@@ -22,6 +22,10 @@ const LEVELS = [
   { n: 13, k: 6, seed: 10718 },
   { n: 13, k: 6, seed: 11829 },
   { n: 14, k: 6, seed: 12940 },
+  { n: 14, k: 6, seed: 14051 },
+  { n: 15, k: 6, seed: 15162 },
+  { n: 15, k: 6, seed: 16273 },
+  { n: 16, k: 6, seed: 17384 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
