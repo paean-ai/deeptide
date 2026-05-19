@@ -19,6 +19,8 @@ const LEVELS = [
   { name: ['Tundra', '冻原'],   seed: 246, n: 7 },
   { name: ['Iceberg', '冰山'],  seed: 358, n: 8 },
   { name: ['Glacier', '冰川'],  seed: 489, n: 8 },
+  { name: ['Polar', '极地'],    seed: 612, n: 9 },
+  { name: ['Aurora', '极光'],   seed: 758, n: 9 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
