@@ -114,6 +114,18 @@ const ENEMY_TYPES = {
     hp: 170, attack: 28, speed: 0.7, size: 18,
     exp: 55, score: 8,
   },
+  imp: {
+    name: '小恶魔',
+    color: '#ff8a3d',
+    hp: 45, attack: 16, speed: 1.9, size: 10,
+    exp: 16, score: 3,
+  },
+  wraith: {
+    name: '怨灵',
+    color: '#a9e8ff',
+    hp: 80, attack: 24, speed: 1.4, size: 14,
+    exp: 30, score: 4,
+  },
   boss: {
     name: 'Boss',
     color: '#e74c3c',
@@ -134,6 +146,8 @@ function waveConfig(wave) {
   if (wave >= 8) canSpawn.push('elite');
   if (wave >= 9) canSpawn.push('golem');
   if (wave >= 10) canSpawn.push('demon');
+  if (wave >= 5) canSpawn.push('imp');
+  if (wave >= 7) canSpawn.push('wraith');
   if (wave % 5 === 0) {
     const bossHp = 300 + wave * 80;
     return { count: count + 3, types: canSpawn, hasBoss: true, bossHp };
