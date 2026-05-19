@@ -301,6 +301,25 @@ function fireWeapon(w, dt) {
       });
     }
     w.cd = s.cd * cdMul();
+  } else if (w.id === 'coil') {
+    // electricity arcs from the nearest enemy through its clustered neighbours
+    let cur = nearestEnemy(p.x, p.y);
+    if (!cur) { w.cd = 0.15; return; }
+    const chained = new Set();
+    for (let j = 0; j < s.count && cur; j++) {
+      hurtEnemy(cur, s.dmg * dmgMul(), 0);
+      chained.add(cur);
+      G.effects.push({ type: 'bolt', x: cur.x, y: cur.y, life: 0.2, max: 0.2 });
+      burst(cur.x, cur.y, 5, WEAPONS.coil.color);
+      let best = null, bd = s.range * s.range;
+      for (const e of G.enemies) {
+        if (chained.has(e)) continue;
+        const d = (e.x - cur.x) ** 2 + (e.y - cur.y) ** 2;
+        if (d < bd) { bd = d; best = e; }
+      }
+      cur = best;
+    }
+    w.cd = s.cd * cdMul();
   }
 }
 

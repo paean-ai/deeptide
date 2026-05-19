@@ -91,6 +91,18 @@ const WEAPONS = {
       { dmg: 56, count: 4, cd: 0.68, speed: 420, out: 0.60 },
     ],
   },
+  coil: {
+    icon: '↯', color: '#ffe04a',
+    tiers: [
+      // count = number of chain jumps, range = max jump distance
+      { dmg: 14, count: 2, cd: 1.30, range: 110 },
+      { dmg: 18, count: 3, cd: 1.20, range: 120 },
+      { dmg: 23, count: 4, cd: 1.10, range: 130 },
+      { dmg: 30, count: 5, cd: 1.00, range: 145 },
+      { dmg: 39, count: 6, cd: 0.90, range: 160 },
+      { dmg: 56, count: 9, cd: 0.70, range: 195 },
+    ],
+  },
 };
 const WEAPON_IDS = Object.keys(WEAPONS);
 

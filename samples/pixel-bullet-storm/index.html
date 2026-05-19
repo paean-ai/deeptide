@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Bullet Storm</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="lang-toggle">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 data-i18n="title">BULLET STORM</h1>
+    <p data-i18n="subtitle">Weave through the storm. Trust your tiny core.</p>
+    <p data-i18n="howto">Drag to fly — your ship rides above your finger. The bright dot is your only hitbox.</p>
+    <p data-i18n="keys">Keys: arrows / WASD to move · Space to bomb</p>
+    <button id="btn-play" data-i18n="play">LAUNCH</button>
+    <p id="title-best"></p>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-score">SCORE 0</span>
+      <span id="hud-wave">WAVE 1</span>
+      <span id="hud-lives">♥♥♥</span>
+    </div>
+    <div class="controls">
+      <button id="btn-bomb" class="ctrl">BOMB 3</button>
+      <button id="btn-menu" class="ctrl ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+
+  <!-- Game over -->
+  <div id="screen-over" class="screen hidden">
+    <h2 data-i18n="gameOver">SHIP DOWN</h2>
+    <p id="final-score"></p>
+    <p id="final-best"></p>
+    <div class="row">
+      <button id="btn-again" data-i18n="again">RETRY</button>
+      <button id="btn-back" class="ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
