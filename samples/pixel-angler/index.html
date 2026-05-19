@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Angler</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="lang-toggle">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 data-i18n="title">ANGLER</h1>
+    <p data-i18n="subtitle">Cast, hook, and reel in the big one.</p>
+    <p data-i18n="howto">Cast your line, tap the instant a fish bites, then hold to keep the catch bar over the fish until it's landed.</p>
+    <button id="btn-play" data-i18n="play">GO FISHING</button>
+    <p id="title-coins"></p>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-coins">◎ 0</span>
+      <span id="hud-waters">SHALLOWS</span>
+    </div>
+    <div class="controls">
+      <button id="btn-cast" class="ctrl">CAST</button>
+      <button id="btn-shop" class="ctrl">SHOP</button>
+      <button id="btn-menu" class="ctrl ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+
+  <!-- Shop -->
+  <div id="screen-shop" class="screen hidden">
+    <h2 data-i18n="shop">TACKLE SHOP</h2>
+    <p id="shop-coins"></p>
+    <div id="shop-list"></div>
+    <button id="btn-shop-back" class="ghost" data-i18n="back">BACK</button>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

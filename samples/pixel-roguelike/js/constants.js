@@ -126,6 +126,18 @@ const ENEMY_TYPES = {
     hp: 80, attack: 24, speed: 1.4, size: 14,
     exp: 30, score: 4,
   },
+  cultist: {
+    name: '邪教徒',
+    color: '#8a5fd0',
+    hp: 55, attack: 20, speed: 1.5, size: 12,
+    exp: 22, score: 4,
+  },
+  behemoth: {
+    name: '巨兽',
+    color: '#7a5a3a',
+    hp: 240, attack: 34, speed: 0.65, size: 20,
+    exp: 80, score: 12,
+  },
   boss: {
     name: 'Boss',
     color: '#e74c3c',
@@ -148,6 +160,8 @@ function waveConfig(wave) {
   if (wave >= 10) canSpawn.push('demon');
   if (wave >= 5) canSpawn.push('imp');
   if (wave >= 7) canSpawn.push('wraith');
+  if (wave >= 6) canSpawn.push('cultist');
+  if (wave >= 11) canSpawn.push('behemoth');
   if (wave % 5 === 0) {
     const bossHp = 300 + wave * 80;
     return { count: count + 3, types: canSpawn, hasBoss: true, bossHp };
