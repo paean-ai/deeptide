@@ -16,6 +16,8 @@ const LAYOUTS = [
   { name: ['Dragon Hall', '龙阙'], w: 10, h: 8, layers: 3 },
   { name: ['Citadel', '城塞'],  w: 11, h: 8, layers: 3 },
   { name: ['Empire', '帝阙'],   w: 12, h: 9, layers: 3 },
+  { name: ['Coliseum', '竞技场'], w: 14, h: 8, layers: 3 },
+  { name: ['Pinnacle', '绝顶'], w: 14, h: 9, layers: 3 },
 ];
 const LAYOUT_COUNT = LAYOUTS.length;
 
