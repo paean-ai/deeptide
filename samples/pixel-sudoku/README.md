@@ -6,7 +6,7 @@ the digits 1–9. A fresh number-logic puzzle genre alongside the other
 
 ## Features
 
-- 6-puzzle campaign across three difficulty tiers (Easy / Medium / Hard).
+- 9-puzzle campaign across three difficulty tiers (Easy / Medium / Hard).
 - Every puzzle is generated to have **exactly one solution** — cells are dug
   out only while a solution-counting solver confirms uniqueness; seeded so each
   level is the same puzzle every time.

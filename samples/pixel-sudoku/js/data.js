@@ -7,10 +7,13 @@ const VW = 360, VH = 480;
 const LEVELS = [
   { tier: 0, seed: 1841, holes: 38 },
   { tier: 0, seed: 5093, holes: 41 },
+  { tier: 0, seed: 12604, holes: 43 },
   { tier: 1, seed: 2677, holes: 46 },
   { tier: 1, seed: 8214, holes: 49 },
+  { tier: 1, seed: 15330, holes: 50 },
   { tier: 2, seed: 4408, holes: 52 },
   { tier: 2, seed: 9526, holes: 54 },
+  { tier: 2, seed: 17782, holes: 55 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
