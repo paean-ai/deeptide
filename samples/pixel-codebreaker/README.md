@@ -6,7 +6,7 @@ the other `samples/` pixel games.
 
 ## Features
 
-- 9-level campaign on an escalating curve — longer codes (3 → 5 pegs), more
+- 12-level campaign on an escalating curve — longer codes (3 → 6 pegs), more
   colours (5 → 7) and fewer attempts deeper in.
 - Classic Mastermind feedback: a solid peg for each right colour in the right
   spot, a hollow peg for a right colour in the wrong spot — repeated colours
