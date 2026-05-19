@@ -25,6 +25,10 @@ const LEVELS = [
   { size: 9, seed: 23117 },
   { size: 10, seed: 25602 },
   { size: 10, seed: 28140 },
+  { size: 10, seed: 30774 },
+  { size: 10, seed: 33218 },
+  { size: 11, seed: 35903 },
+  { size: 11, seed: 38641 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
