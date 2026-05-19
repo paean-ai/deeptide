@@ -371,6 +371,70 @@ const LEVELS = [
       'I.x..x.I',
     ],
   },
+  { // 37 - glacier vault
+    moves: 22, objective: { type: 'ice' },
+    stars: [13000, 22000, 34000],
+    layout: [
+      'IIIIIIII',
+      'I.iiii.I',
+      'I.iIIi.I',
+      'IiI..IiI',
+      'IiI..IiI',
+      'I.iIIi.I',
+      'I.iiii.I',
+      'IIIIIIII',
+    ],
+  },
+  { // 38 - colour deluge
+    moves: 24, objective: { type: 'color', color: 2, n: 44 },
+    stars: [14000, 24000, 36000],
+  },
+  { // 39 - crate bastion
+    moves: 26, objective: { type: 'crate' },
+    stars: [13500, 23000, 35000],
+    layout: [
+      'x.xxxx.x',
+      '.x....x.',
+      'x..xx..x',
+      'x.x..x.x',
+      'x.x..x.x',
+      'x..xx..x',
+      '.x....x.',
+      'x.xxxx.x',
+    ],
+  },
+  { // 40 - ingredient deluge
+    moves: 36, objective: { type: 'drop', n: 12 },
+    stars: [15000, 26000, 40000],
+    layout: [
+      'C.C.C.C.',
+      '........',
+      '.C....C.',
+      '........',
+      '........',
+      '.C....C.',
+      '........',
+      'C.C.C.C.',
+    ],
+  },
+  { // 41 - score ascent IV
+    moves: 28, objective: { type: 'score', n: 72000 },
+    stars: [72000, 95000, 124000],
+  },
+  { // 42 - the eternal spire
+    moves: 34, objective: { type: 'score', n: 88000 },
+    stars: [88000, 114000, 148000],
+    layout: [
+      'x.IiiI.x',
+      '.IiIIiI.',
+      'IiI..IiI',
+      'iI....Ii',
+      'iI....Ii',
+      'IiI..IiI',
+      '.IiIIiI.',
+      'x.IiiI.x',
+    ],
+  },
 ];
 
 // boosters
