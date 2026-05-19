@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Mine Sweeper</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="lang-toggle">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 data-i18n="title">MINE SWEEPER</h1>
+    <p data-i18n="subtitle">Clear the field without tripping a mine.</p>
+    <p data-i18n="howto">Tap to dig. Each number counts the mines touching that tile. Flag every mine to clear the field.</p>
+    <p data-i18n="tip">Tip: long-press (or right-click) a tile to flag it.</p>
+    <div class="row">
+      <button id="btn-play" data-i18n="play">PLAY</button>
+      <button id="btn-levels" class="ghost" data-i18n="levelSelect">LEVELS</button>
+    </div>
+  </div>
+
+  <!-- Level select -->
+  <div id="screen-levels" class="screen hidden">
+    <h2 data-i18n="levelSelect">LEVELS</h2>
+    <div id="level-grid"></div>
+    <button id="btn-levels-back" class="ghost" data-i18n="menu">MENU</button>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-level">LEVEL 1</span>
+      <span id="hud-mines">MINES 0</span>
+      <span id="hud-time">0:00</span>
+    </div>
+    <div class="controls">
+      <button id="btn-flag" class="ctrl">MODE: DIG</button>
+      <button id="btn-scan" class="ctrl">SCAN (1)</button>
+      <button id="btn-game-menu" class="ctrl ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+
+  <!-- Win -->
+  <div id="overlay-win" class="overlay hidden">
+    <h2 id="win-title" data-i18n="win">FIELD CLEARED!</h2>
+    <div id="win-stars" class="stars">★★★</div>
+    <p id="win-line"></p>
+    <p id="win-best"></p>
+    <div class="row">
+      <button id="btn-next" data-i18n="next">NEXT</button>
+      <button id="btn-retry" class="ghost" data-i18n="retry">RETRY</button>
+      <button id="btn-win-levels" class="ghost" data-i18n="levelSelect">LEVELS</button>
+    </div>
+  </div>
+
+  <!-- Lose -->
+  <div id="overlay-over" class="overlay hidden">
+    <h2 data-i18n="lose">BOOM!</h2>
+    <p data-i18n="loseMsg">You stepped on a mine. Take another run at it.</p>
+    <div class="row">
+      <button id="btn-over-retry" data-i18n="retry">RETRY</button>
+      <button id="btn-over-levels" class="ghost" data-i18n="levelSelect">LEVELS</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
