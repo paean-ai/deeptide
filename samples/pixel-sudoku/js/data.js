@@ -9,14 +9,17 @@ const LEVELS = [
   { tier: 0, seed: 5093, holes: 41 },
   { tier: 0, seed: 12604, holes: 43 },
   { tier: 0, seed: 20118, holes: 44 },
+  { tier: 0, seed: 27905, holes: 45 },
   { tier: 1, seed: 2677, holes: 46 },
   { tier: 1, seed: 8214, holes: 49 },
   { tier: 1, seed: 15330, holes: 50 },
   { tier: 1, seed: 22904, holes: 51 },
+  { tier: 1, seed: 30471, holes: 51 },
   { tier: 2, seed: 4408, holes: 52 },
   { tier: 2, seed: 9526, holes: 54 },
   { tier: 2, seed: 17782, holes: 55 },
   { tier: 2, seed: 25617, holes: 56 },
+  { tier: 2, seed: 33188, holes: 57 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
