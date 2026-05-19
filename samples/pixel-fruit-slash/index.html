@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Fruit Slash</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="lang-toggle">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 data-i18n="title">FRUIT SLASH</h1>
+    <p data-i18n="subtitle">Swipe to slice. Chain combos. Never touch a bomb.</p>
+    <p data-i18n="howto">Drag across the fruit to slice it. Slice several in one swipe for a combo bonus.</p>
+    <p data-i18n="keys">Let three fruit drop and the run ends — slicing a bomb ends it instantly.</p>
+    <button id="btn-play" data-i18n="play">SLICE</button>
+    <p id="title-best"></p>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-score">SCORE 0</span>
+      <span id="hud-best">BEST 0</span>
+      <span id="hud-lives">♥♥♥</span>
+    </div>
+  </div>
+
+  <!-- Game over -->
+  <div id="screen-over" class="screen hidden">
+    <h2 id="over-title" data-i18n="gameOver">RUN OVER</h2>
+    <p id="final-score"></p>
+    <p id="final-best"></p>
+    <div class="row">
+      <button id="btn-again" data-i18n="again">SLICE AGAIN</button>
+      <button id="btn-menu" class="ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

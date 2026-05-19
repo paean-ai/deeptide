@@ -138,12 +138,14 @@ function findEmptyTile(grid, rooms, entities, rng) {
 
 function pickEnemyType(floor, rng) {
   const roll = rng();
-  if (floor >= 5 && roll < 0.08) return 'void_lord';
-  if (floor >= 4 && roll < 0.20) return 'golem';
-  if (floor >= 3 && roll < 0.32) return 'revenant';
-  if (floor >= 2 && roll < 0.46) return 'shade';
-  if (floor >= 1 && roll < 0.62) return 'wraith';
-  if (floor >= 1 && roll < 0.80) return 'bat';
+  if (floor >= 5 && roll < 0.07) return 'void_lord';
+  if (floor >= 4 && roll < 0.17) return 'golem';
+  if (floor >= 4 && roll < 0.27) return 'stalker';
+  if (floor >= 3 && roll < 0.38) return 'revenant';
+  if (floor >= 3 && roll < 0.48) return 'phantom';
+  if (floor >= 2 && roll < 0.60) return 'shade';
+  if (floor >= 1 && roll < 0.74) return 'wraith';
+  if (floor >= 1 && roll < 0.88) return 'bat';
   return 'slime';
 }
 
@@ -216,6 +218,16 @@ const ENEMY_BLUEPRINTS = {
   revenant: {
     char: 'R', name: 'Revenant', color: '#ccd4e0',
     hp: 34, atk: 10, def: 2, xp: 30,
+    behavior: 'flank',
+  },
+  phantom: {
+    char: 'P', name: 'Phantom', color: '#6c8cff',
+    hp: 30, atk: 9, def: 2, xp: 28,
+    behavior: 'chase',
+  },
+  stalker: {
+    char: 'T', name: 'Stalker', color: '#c0414e',
+    hp: 24, atk: 14, def: 1, xp: 40,
     behavior: 'flank',
   },
   void_lord: {
