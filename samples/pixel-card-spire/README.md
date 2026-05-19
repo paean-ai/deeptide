@@ -4,7 +4,7 @@ A dependency-free HTML Canvas roguelike deck-builder with a data-driven card eng
 
 ## Features
 
-- 48-card pool (starter / common / uncommon / rare) plus a card upgrade system,
+- 54-card pool (starter / common / uncommon / rare) plus a card upgrade system,
   all resolved by a small data-driven effect engine (damage, block, draw,
   energy, strength, vulnerable, weak, poison, heal, persistent powers).
 - 11 enemies with intent telegraphs, scaling patterns, blocking, buffs,
