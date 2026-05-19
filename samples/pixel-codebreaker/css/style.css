@@ -1,0 +1,172 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  min-height: 100dvh;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 16%, rgba(150, 110, 220, 0.2), transparent 46%),
+    linear-gradient(#1c1630, #09070f);
+  color: #ece8f4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+#shell {
+  position: relative;
+  width: min(100vw, calc(100dvh * 360 / 480));
+  aspect-ratio: 360 / 480;
+  max-height: 100dvh;
+  overflow: hidden;
+  background: #09070f;
+  border: 2px solid #392c54;
+  border-radius: 6px;
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.55);
+}
+
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+  touch-action: none;
+}
+
+.screen, .overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 13px;
+  text-align: center;
+  padding: 22px;
+  z-index: 4;
+}
+.screen { background: linear-gradient(#1c1630ee, #09070fdd); }
+.overlay { background: rgba(9, 7, 15, 0.86); z-index: 7; }
+#screen-game { background: none; pointer-events: none; }
+.hidden { display: none !important; }
+
+h1 {
+  font-size: clamp(21px, 6.4vw, 34px);
+  color: #b48bff;
+  text-shadow: 2px 2px #000, 0 0 16px rgba(180, 139, 255, 0.42);
+  letter-spacing: 2px;
+}
+h2 { font-size: clamp(17px, 5vw, 26px); color: #5fc06e; text-shadow: 2px 2px #000; }
+p { font-size: clamp(11px, 2.9vw, 14px); color: #aaa0c0; line-height: 1.55; max-width: 292px; }
+.stars { font-size: 34px; color: #f2cf3f; letter-spacing: 4px; text-shadow: 2px 2px #000; }
+
+button {
+  min-height: 46px;
+  padding: 11px 24px;
+  color: #09070f;
+  background: #b48bff;
+  border: 0;
+  border-radius: 5px;
+  font: 900 14px ui-monospace, monospace;
+  letter-spacing: 1px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+button:active { transform: translateY(1px); }
+button.ghost {
+  color: #ece8f4;
+  background: rgba(57, 44, 84, 0.92);
+  border: 1px solid rgba(236, 232, 244, 0.24);
+}
+.row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+
+#lang-toggle {
+  position: absolute;
+  top: max(8px, env(safe-area-inset-top));
+  right: max(8px, env(safe-area-inset-right));
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 11px;
+  z-index: 6;
+  background: rgba(57, 44, 84, 0.92);
+  color: #ece8f4;
+  border: 1px solid rgba(236, 232, 244, 0.24);
+}
+
+.hud {
+  position: absolute;
+  top: max(6px, env(safe-area-inset-top));
+  left: max(8px, env(safe-area-inset-left));
+  display: flex;
+  gap: 7px;
+  z-index: 5;
+}
+.hud span {
+  padding: 4px 9px;
+  border: 1px solid rgba(236, 232, 244, 0.18);
+  border-radius: 5px;
+  background: rgba(9, 7, 15, 0.82);
+  font-size: 11px;
+  text-shadow: 1px 1px #000;
+}
+#hud-level { color: #b48bff; }
+#hud-tries { color: #f2cf3f; }
+
+.controls {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: max(6px, env(safe-area-inset-bottom));
+  display: flex;
+  gap: 7px;
+  justify-content: center;
+  padding: 0 8px;
+  z-index: 5;
+}
+button.ctrl {
+  flex: 1;
+  min-height: 38px;
+  max-width: 116px;
+  padding: 7px 6px;
+  font-size: 11px;
+}
+button.ctrl:disabled { opacity: 0.4; cursor: default; }
+#btn-submit { background: #5fc06e; }
+
+#level-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 9px;
+  width: 100%;
+  max-width: 300px;
+}
+.level-cell {
+  min-height: 58px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 7px 3px;
+  background: rgba(57, 44, 84, 0.92);
+  color: #ece8f4;
+  border: 1px solid rgba(236, 232, 244, 0.16);
+}
+.level-cell b { font-size: 17px; color: #b48bff; }
+.level-cell span { font-size: 11px; color: #f2cf3f; min-height: 13px; }
+.level-cell em { font-size: 10px; color: #8a80a4; font-style: normal; }
+.level-cell.locked { opacity: 0.45; cursor: default; }
+.level-cell.locked b { color: #8a80a4; }
+
+@media (hover: none) and (pointer: coarse) {
+  #shell {
+    width: 100vw;
+    height: 100dvh;
+    max-height: none;
+    aspect-ratio: auto;
+    border: 0;
+    border-radius: 0;
+  }
+}

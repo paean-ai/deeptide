@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Codebreaker</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="lang-toggle">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 data-i18n="title">CODEBREAKER</h1>
+    <p data-i18n="subtitle">Crack the hidden colour code by deduction.</p>
+    <p data-i18n="howto">Tap colours to build a guess, then submit it. Solid pegs mean right colour & spot; hollow pegs mean right colour, wrong spot.</p>
+    <div class="row">
+      <button id="btn-play" data-i18n="play">PLAY</button>
+      <button id="btn-levels" class="ghost" data-i18n="levelSelect">LEVELS</button>
+    </div>
+  </div>
+
+  <!-- Level select -->
+  <div id="screen-levels" class="screen hidden">
+    <h2 data-i18n="levelSelect">LEVELS</h2>
+    <div id="level-grid"></div>
+    <button id="btn-levels-back" class="ghost" data-i18n="menu">MENU</button>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-level">LEVEL 1</span>
+      <span id="hud-tries">TRIES 0/10</span>
+    </div>
+    <div class="controls">
+      <button id="btn-clear" class="ctrl">CLEAR</button>
+      <button id="btn-submit" class="ctrl">SUBMIT</button>
+      <button id="btn-game-menu" class="ctrl ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+
+  <!-- Win -->
+  <div id="overlay-win" class="overlay hidden">
+    <h2 id="win-title" data-i18n="win">CODE CRACKED!</h2>
+    <div id="win-stars" class="stars">★★★</div>
+    <p id="win-line"></p>
+    <div class="row">
+      <button id="btn-next" data-i18n="next">NEXT</button>
+      <button id="btn-retry" class="ghost" data-i18n="retry">RETRY</button>
+      <button id="btn-win-levels" class="ghost" data-i18n="levelSelect">LEVELS</button>
+    </div>
+  </div>
+
+  <!-- Lose -->
+  <div id="overlay-lose" class="overlay hidden">
+    <h2 data-i18n="lose">OUT OF TRIES</h2>
+    <p id="lose-line"></p>
+    <div class="row">
+      <button id="btn-lose-retry" data-i18n="retry">RETRY</button>
+      <button id="btn-lose-levels" class="ghost" data-i18n="levelSelect">LEVELS</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
