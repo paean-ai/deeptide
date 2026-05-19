@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Vector</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="btn-lang">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 id="title-h">VECTOR</h1>
+    <p id="title-tag">Drift, rotate, fire — clear the asteroid field</p>
+    <p id="title-howto"></p>
+    <button id="btn-play">PLAY</button>
+  </div>
+
+  <!-- Levels -->
+  <div id="screen-levels" class="screen hidden">
+    <h1 id="levels-h">SELECT A SECTOR</h1>
+    <div id="level-grid"></div>
+    <button id="btn-levels-back" class="ghost">MENU</button>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-level">SECTOR 1</span>
+      <span id="hud-score">SCORE 0</span>
+      <span id="hud-lives">⏳⏳⏳</span>
+    </div>
+    <div class="controls">
+      <button id="btn-restart" class="ghost">RESTART</button>
+      <button id="btn-game-menu" class="ghost">MENU</button>
+    </div>
+  </div>
+
+  <!-- Result -->
+  <div id="overlay-res" class="overlay hidden">
+    <h2 id="res-title">FIELD CLEARED!</h2>
+    <p id="res-line"></p>
+    <div class="row">
+      <button id="btn-res-next">NEXT</button>
+      <button id="btn-res-menu" class="ghost">MENU</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
