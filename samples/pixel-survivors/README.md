@@ -5,9 +5,9 @@ weapons fire automatically.
 
 ## Features
 
-- 10 weapons (dagger / holy aura / orbit blade / chain bolt / frost nova /
-  fireball / shard burst / boomerang / arc coil / skyfall), each with 6 levels
-  and an evolved final form.
+- 11 weapons (dagger / holy aura / orbit blade / chain bolt / frost nova /
+  fireball / shard burst / boomerang / arc coil / skyfall / holy lance), each
+  with 6 levels and an evolved final form.
 - 6 stackable passive items (might / swift / haste / armor / magnet / vitality).
 - Level-up draft: choose 1 of 3 upgrades each level.
 - 6 enemy types with time-scaled hordes plus 3 escalating bosses, ending in a

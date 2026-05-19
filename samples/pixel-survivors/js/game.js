@@ -210,7 +210,8 @@ function fireWeapon(w, dt) {
   w.cd -= dt;
   if (w.cd > 0) return;
 
-  if (w.id === 'dagger') {
+  if (w.id === 'dagger' || w.id === 'lance') {
+    // dagger sprays light blades; lance fires a few high-pierce spears
     const tgt = nearestEnemy(p.x, p.y);
     if (!tgt) { w.cd = 0.15; return; }
     const base = Math.atan2(tgt.y - p.y, tgt.x - p.x);
@@ -220,7 +221,7 @@ function fireWeapon(w, dt) {
         type: 'dagger', x: p.x, y: p.y,
         vx: Math.cos(a) * s.speed, vy: Math.sin(a) * s.speed,
         dmg: s.dmg * dmgMul(), pierce: s.pierce, life: 1.6, hit: new Set(),
-        angle: a, color: WEAPONS.dagger.color,
+        angle: a, color: WEAPONS[w.id].color,
       });
     }
     w.cd = s.cd * cdMul();

@@ -114,6 +114,17 @@ const WEAPONS = {
       { dmg: 116, count: 6, splash: 88, cd: 1.05, speed: 390 },
     ],
   },
+  lance: {
+    icon: '➹', color: '#ffe6a0',
+    tiers: [
+      { dmg: 24, count: 1, cd: 0.90, pierce: 4,  speed: 520 },
+      { dmg: 31, count: 1, cd: 0.85, pierce: 5,  speed: 540 },
+      { dmg: 40, count: 1, cd: 0.78, pierce: 6,  speed: 560 },
+      { dmg: 52, count: 2, cd: 0.72, pierce: 7,  speed: 580 },
+      { dmg: 67, count: 2, cd: 0.64, pierce: 9,  speed: 610 },
+      { dmg: 94, count: 3, cd: 0.52, pierce: 14, speed: 660 },
+    ],
+  },
 };
 const WEAPON_IDS = Object.keys(WEAPONS);
 

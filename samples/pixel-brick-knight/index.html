@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Brick Knight</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="lang-toggle">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 data-i18n="title">BRICK KNIGHT</h1>
+    <p data-i18n="subtitle">Smash the dungeon floors. Grow stronger each one.</p>
+    <p data-i18n="howto">Drag to steer the paddle. Clear every brick on a floor, then pick a power to carry deeper.</p>
+    <button id="btn-play" data-i18n="play">DESCEND</button>
+    <p id="title-best"></p>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-floor">FLOOR 1</span>
+      <span id="hud-gold">◎ 0</span>
+      <span id="hud-lives">♥♥♥</span>
+    </div>
+  </div>
+
+  <!-- Upgrade -->
+  <div id="overlay-upgrade" class="overlay hidden">
+    <h2 id="up-title" data-i18n="floorClear">FLOOR CLEARED</h2>
+    <p data-i18n="pickPower">Choose a power</p>
+    <div id="upgrade-cards"></div>
+  </div>
+
+  <!-- Game over -->
+  <div id="overlay-over" class="overlay hidden">
+    <h2 data-i18n="gameOver">KNIGHT FALLEN</h2>
+    <p id="final-line"></p>
+    <p id="final-best"></p>
+    <div class="row">
+      <button id="btn-again" data-i18n="again">DESCEND AGAIN</button>
+      <button id="btn-menu" class="ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
