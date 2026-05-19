@@ -9,7 +9,7 @@ A dependency-free HTML Canvas tower defense sample in a unified pixel-art style.
 - 7 enemy types with armor, magic resist, flying, healing, and bosses —
   physical vs. magic damage actually matters.
 - Status effects: slow, freeze, splash, armor shred, chain lightning.
-- 8 hand-built maps (grass / snow / lava themes) with 14–28 waves of rising
+- 9 hand-built maps (grass / snow / lava themes) with 14–30 waves of rising
   difficulty, plus an endless mode on every map.
 - Per-tower targeting modes (first / last / strongest / closest), sell & refund.
 - Game speed 1x/2x/3x, pause, early-wave-call gold bonus.
