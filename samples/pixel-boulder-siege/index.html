@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Boulder Siege</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="lang-toggle">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 data-i18n="title">BOULDER SIEGE</h1>
+    <p data-i18n="subtitle">Smash the fortress. Squash every goblin.</p>
+    <p data-i18n="howto">Drag toward the fortress to aim — pull farther for more power — and release to fling a boulder.</p>
+    <p data-i18n="keys">Glass shatters, wood splinters, stone holds. Topple towers to reach goblins.</p>
+    <button id="btn-play" data-i18n="play">SIEGE</button>
+    <p id="title-best"></p>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-score">SCORE 0</span>
+      <span id="hud-round">ROUND 1</span>
+      <span id="hud-shots">●●●</span>
+    </div>
+    <div class="controls">
+      <button id="btn-menu" class="ctrl ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+
+  <!-- Game over -->
+  <div id="screen-over" class="screen hidden">
+    <h2 data-i18n="gameOver">SIEGE FAILED</h2>
+    <p id="final-score"></p>
+    <p id="final-best"></p>
+    <div class="row">
+      <button id="btn-again" data-i18n="again">RETRY</button>
+      <button id="btn-back" class="ghost" data-i18n="menu">MENU</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
