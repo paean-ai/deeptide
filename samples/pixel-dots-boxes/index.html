@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pixel Dots &amp; Boxes</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="shell">
+  <canvas id="game"></canvas>
+  <button id="btn-lang">中文</button>
+
+  <!-- Title -->
+  <div id="screen-title" class="screen">
+    <h1 id="title-h">DOTS &amp; BOXES</h1>
+    <p id="title-tag">Close a box, take another turn</p>
+    <p id="title-pick">DIFFICULTY</p>
+    <div id="diff-row" class="row"></div>
+    <p id="title-record"></p>
+  </div>
+
+  <!-- Game -->
+  <div id="screen-game" class="screen hidden">
+    <div class="hud">
+      <span id="hud-diff">EASY</span>
+      <span id="hud-score">● 0  ◆ 0</span>
+      <span id="hud-turn">YOUR TURN</span>
+    </div>
+    <div class="controls">
+      <button id="btn-menu" class="ghost">MENU</button>
+    </div>
+  </div>
+
+  <!-- Game over -->
+  <div id="overlay-over" class="overlay hidden">
+    <h2 id="over-title">RESULT</h2>
+    <p id="over-line"></p>
+    <div class="row">
+      <button id="btn-again">PLAY AGAIN</button>
+      <button id="btn-over-menu" class="ghost">MENU</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/i18n.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
