@@ -14,6 +14,8 @@ const LEVELS = [
   { name: ['Grove', '林地'],    seed: 207, maxPip: 4 },
   { name: ['Thicket', '密林'],  seed: 326, maxPip: 4 },
   { name: ['Wildwood', '荒野'], seed: 472, maxPip: 5 },
+  { name: ['Wilderness', '旷野'], seed: 613, maxPip: 6 },
+  { name: ['Frontier', '边境'],   seed: 759, maxPip: 6 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
