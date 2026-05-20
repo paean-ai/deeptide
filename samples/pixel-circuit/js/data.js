@@ -9,12 +9,14 @@ const VW = 360, VH = 480;
 const DIRS = [[-1, 0, 1, 4], [0, 1, 2, 8], [1, 0, 4, 1], [0, -1, 8, 2]];
 
 const LEVELS = [
-  { name: ['Spark', '火花'],   seed: 17,  n: 4 },
-  { name: ['Relay', '中继'],   seed: 58,  n: 5 },
-  { name: ['Array', '阵列'],   seed: 124, n: 5 },
-  { name: ['Lattice', '网格'], seed: 211, n: 6 },
+  { name: ['Spark', '火花'],     seed: 17,  n: 4 },
+  { name: ['Relay', '中继'],     seed: 58,  n: 5 },
+  { name: ['Array', '阵列'],     seed: 124, n: 5 },
+  { name: ['Lattice', '网格'],   seed: 211, n: 6 },
   { name: ['Mainframe', '主机'], seed: 333, n: 6 },
   { name: ['Reactor', '反应堆'], seed: 470, n: 7 },
+  { name: ['Datacenter', '数据中心'], seed: 611, n: 7 },
+  { name: ['Megagrid',  '巨网'],     seed: 768, n: 8 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

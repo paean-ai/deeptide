@@ -7,7 +7,8 @@ node with no loose ends. A fresh routing-puzzle genre alongside the other
 
 ## Features
 
-- 6-board campaign on growing grids (4×4 up to 7×7).
+- 8-board campaign on growing grids (4×4 up to 8×8) — Datacenter
+  (7×7) and Megagrid (8×8) cap the run.
 - Each board is grown as a random **spanning tree** of the grid, so a fully-
   connected, leak-free solution is always reachable — no solver needed, just
   rotate the wires back into place.
