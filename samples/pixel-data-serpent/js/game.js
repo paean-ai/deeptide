@@ -24,7 +24,7 @@ function newGame() {
     firewalls: new Set(), portals: null,
     food: null, grow: 0, trim: 0,
     sector: 1, progress: 0, score: 0,
-    stepAcc: 0, slow: 0, t: 0, banner: null, over: false,
+    stepAcc: 0, slow: 0, shields: 0, t: 0, banner: null, over: false,
   };
   spawnFood();
 }
@@ -81,16 +81,33 @@ function step() {
     else if (g.portals[1].x === nx && g.portals[1].y === ny) { nx = g.portals[0].x; ny = g.portals[0].y; }
   }
 
-  // fatal: walls and firewalls
-  if (nx < 0 || nx >= GRID || ny < 0 || ny >= GRID || g.firewalls.has(key(nx, ny))) { die(); return; }
+  // fatal: walls and firewalls — but a stacked shield absorbs the hit
+  // and clears the offending firewall cell (walls are still fatal).
+  if (nx < 0 || nx >= GRID || ny < 0 || ny >= GRID) { die(); return; }
+  if (g.firewalls.has(key(nx, ny))) {
+    if (g.shields > 0) {
+      g.shields--;
+      g.firewalls.delete(key(nx, ny));
+      setBanner(t('shield'), '#ff8fd0');
+    } else { die(); return; }
+  }
 
   const ate = g.food && g.food.x === nx && g.food.y === ny;
   const keepTail = g.grow > 0 || (ate && foodGrow(g.food.kind) > 0);
 
-  // fatal: self-collision (the tail cell vacates unless growing)
+  // fatal: self-collision (the tail cell vacates unless growing). A
+  // shield absorbs and trims four segments behind the head so the player
+  // doesn't immediately re-collide.
   const checkLen = keepTail ? g.snake.length : g.snake.length - 1;
   for (let i = 0; i < checkLen; i++) {
-    if (g.snake[i].x === nx && g.snake[i].y === ny) { die(); return; }
+    if (g.snake[i].x === nx && g.snake[i].y === ny) {
+      if (g.shields > 0) {
+        g.shields--;
+        g.trim = 4;
+        setBanner(t('shield'), '#ff8fd0');
+        break;
+      } else { die(); return; }
+    }
   }
 
   g.snake.unshift({ x: nx, y: ny });
@@ -108,6 +125,7 @@ function eatFood() {
   if (kind === 'golden') setBanner(t('golden'), '#f4c85a');
   else if (kind === 'shrink') { g.trim = 3; setBanner(t('shrink'), '#7aa0ff'); }
   else if (kind === 'slow') { g.slow = 4; setBanner(t('slow'), '#b87ae0'); }
+  else if (kind === 'shield') { g.shields = Math.min(2, g.shields + 1); setBanner(t('shieldUp'), '#ff8fd0'); }
   spawnFood();
   if (g.progress >= GOAL_PER_SECTOR) advanceSector();
 }

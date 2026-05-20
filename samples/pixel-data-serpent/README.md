@@ -9,8 +9,10 @@ firewalls close in. A fresh arcade genre alongside the other `samples/` games.
 - Classic grid-snake movement with crisp, gradient-shaded pixel segments.
 - Sector progression: collect 6 nodes to advance — each sector speeds you up
   and drops two more lethal firewall blocks onto the grid.
-- 4 node types: standard, **golden** (big score), **shrink** (trims your tail —
-  a lifesaver), and **slow-mo** (a breather).
+- 5 node types: standard, **golden** (big score), **shrink** (trims your tail —
+  a lifesaver), **slow-mo** (a breather), and **shield** (a pink stack of up
+  to two free pardons — a firewall hit dissolves that wall, a self-bite
+  trims four segments behind the head).
 - Portal pairs appear from sector 3 — dive in one, emerge from the other.
 - Solid walls and firewalls are fatal; so is biting your own tail.
 - `localStorage` best-score record.

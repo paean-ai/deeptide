@@ -13,6 +13,7 @@ const TEXT = {
     reachedSector: s => `Reached sector ${s}`, bestScore: s => `Best: ${s}`,
     again: 'RECONNECT', sectorUp: s => `SECTOR ${s}`,
     golden: 'BONUS!', shrink: 'TRIMMED', slow: 'SLOW-MO',
+    shield: 'SHIELD SAVED', shieldUp: 'SHIELD +1',
   },
   zh: {
     title: '数据之蛇',
@@ -24,6 +25,7 @@ const TEXT = {
     reachedSector: s => `到达第 ${s} 区`, bestScore: s => `最高：${s}`,
     again: '重新连接', sectorUp: s => `第 ${s} 区`,
     golden: '奖励！', shrink: '缩短', slow: '慢动作',
+    shield: '护盾抵消', shieldUp: '护盾 +1',
   },
 };
 

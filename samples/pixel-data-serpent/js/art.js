@@ -74,6 +74,13 @@ function drawFood(ctx, x, y, kind, t) {
   if (kind === 'golden') { ctx.fillRect(px - 1, py - 4, 2, 8); ctx.fillRect(px - 4, py - 1, 8, 2); }
   else if (kind === 'shrink') { ctx.fillRect(px - 4, py - 1, 8, 2); }
   else if (kind === 'slow') { ctx.fillRect(px - 1, py - 4, 2, 5); ctx.fillRect(px - 1, py - 1, 4, 2); }
+  else if (kind === 'shield') {
+    // A pixel shield glyph: a small upside-down U + a centre stud.
+    ctx.fillRect(px - 4, py - 4, 8, 2);
+    ctx.fillRect(px - 4, py - 2, 2, 4);
+    ctx.fillRect(px + 2, py - 2, 2, 4);
+    ctx.fillRect(px - 1, py + 1, 2, 2);
+  }
 }
 
 function drawFirewall(ctx, x, y, t) {

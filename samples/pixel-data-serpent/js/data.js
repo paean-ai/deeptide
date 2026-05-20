@@ -16,11 +16,15 @@ function firewallCount(sector) {
 }
 
 // Food kinds. `normal` always; specials roll in from sector 3.
+// `shield` grants one fatal-collision pardon; it accumulates so a player
+// can stack two shields before risking a kamikaze run through a tight
+// firewall corridor.
 const FOOD = {
   normal: { color: '#5fd9c0', score: 10, grow: 1 },
   golden: { color: '#f4c85a', score: 60, grow: 2 },
   shrink: { color: '#7aa0ff', score: 10, grow: -3 },
   slow:   { color: '#b87ae0', score: 10, grow: 1 },
+  shield: { color: '#ff8fd0', score: 20, grow: 1 },
 };
 
 function rollFoodKind(sector) {
@@ -29,5 +33,6 @@ function rollFoodKind(sector) {
   if (r < 0.10) return 'golden';
   if (r < 0.17) return 'shrink';
   if (r < 0.24) return 'slow';
+  if (r < 0.30) return 'shield';
   return 'normal';
 }
