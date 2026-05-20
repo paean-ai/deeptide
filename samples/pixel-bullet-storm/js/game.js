@@ -81,6 +81,17 @@ function enemyFire(e) {
   if (e.def.pattern === 'aimed') emitAimed(e.x, e.y, 3, 0.42, spd, col);
   else if (e.def.pattern === 'ring') emitRing(e.x, e.y, 14, e.t, spd, col);
   else if (e.def.pattern === 'fan') emitAimed(e.x, e.y, 5, 1.0, spd * 0.95, col);
+  else if (e.def.pattern === 'wall') {
+    // A horizontal row of 7 bullets dropping straight down — a moving
+    // wall the player must side-step. Bullets sit symmetrically around
+    // the emitter so the gap to dodge through is roughly where the
+    // emitter sits laterally.
+    const spread = 110, n = 7;
+    for (let i = 0; i < n; i++) {
+      const fx = e.x - spread / 2 + (i / (n - 1)) * spread;
+      pushBullet(fx, e.y, Math.PI / 2, spd * 0.95, col);
+    }
+  }
   else { // spiral
     e.spin += 0.4;
     pushBullet(e.x, e.y, e.spin, spd, col);

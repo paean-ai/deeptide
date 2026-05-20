@@ -10,8 +10,9 @@ be hit. A fresh danmaku genre alongside the other `samples/` pixel games.
   far smaller than the ship sprite around it.
 - Mobile-first control — drag anywhere and the ship rides above your finger so
   it's never hidden; arrow keys / WASD also work on desktop.
-- Four enemy archetypes with distinct emitters — aimed bursts, even rings,
-  spreading fans and rotating spirals.
+- Five enemy archetypes with distinct emitters — aimed bursts, even rings,
+  spreading fans, rotating spirals, and a stationary lattice that drops a
+  full horizontal wall of seven bullets at a time.
 - A multi-phase boss every 5th wave: its patterns escalate as its health drops,
   from spinning rings to a four-armed spiral barrage.
 - Grazing — skimming a bullet without being hit scores bonus points.
