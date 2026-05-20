@@ -7,7 +7,7 @@ alongside the other `samples/` pixel games.
 
 ## Features
 
-- 34-puzzle campaign on an escalating curve — growing grids (5×5 → 10×10), each
+- 38-puzzle campaign on an escalating curve — growing grids (5×5 → 10×10), each
   hiding its own coloured pixel illustration (heart, cat, ghost, rocket, fox,
   volcano, dolphin, lighthouse…). Every 10×10 picture has been verified to
   have exactly one solution from the derived row/column clues.
