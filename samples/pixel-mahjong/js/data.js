@@ -22,6 +22,8 @@ const LAYOUTS = [
   { name: ['Aurora', '极光'],  w: 15, h: 10, layers: 3 },
   { name: ['Cosmos', '苍穹'],  w: 16, h: 10, layers: 3 },
   { name: ['Olympus', '神山'], w: 15, h: 10, layers: 4 },
+  { name: ['Celestia', '天阙'], w: 16, h: 10, layers: 4 },
+  { name: ['Eternity', '永恒'], w: 16, h: 11, layers: 4 },
 ];
 const LAYOUT_COUNT = LAYOUTS.length;
 

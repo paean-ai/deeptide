@@ -6,8 +6,8 @@ the other `samples/` pixel games.
 
 ## Features
 
-- 14-layout campaign of stacked pyramids — growing bases and extra layers
-  (32 tiles up to a 218-tile empire).
+- 16-layout campaign of stacked pyramids — growing bases and extra layers
+  (32 tiles up to a 436-tile eternity).
 - Every layout is generated to be solvable: tile faces are dealt by simulating
   a full solve, so a clean path always exists from the start.
 - True Mahjong free-tile rule — a tile can be taken only when nothing rests on
