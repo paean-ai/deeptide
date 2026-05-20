@@ -7,8 +7,8 @@ pixel games.
 
 ## Features
 
-- 8-puzzle campaign on growing fields (a double-2 set up to a double-6 set,
-  the largest being a 7×8 board with all 28 dominoes from 0-0 through 6-6).
+- 12-puzzle campaign on growing fields (a double-2 set up to a double-7 set,
+  the largest being an 8×9 board with all 36 dominoes from 0-0 through 7-7).
 - Each level lays a random complete domino set, writes the pips, then a
   backtracking solver **verifies the pip grid has exactly one partition** — so
   every level is a genuine, uniquely-solvable Dominosa.
