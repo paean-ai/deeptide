@@ -321,6 +321,23 @@ function fireWeapon(w, dt) {
       cur = best;
     }
     w.cd = s.cd * cdMul();
+  } else if (w.id === 'mine') {
+    // drop a ring of mines around the player; each arms in 0.4s, then
+    // detonates on enemy contact or after `life` seconds.
+    const base = Math.random() * 6.28;
+    for (let i = 0; i < s.count; i++) {
+      const a = base + (i / Math.max(1, s.count)) * 6.283;
+      const off = s.count > 1 ? 22 : 0;
+      G.projectiles.push({
+        type: 'mine',
+        x: p.x + Math.cos(a) * off,
+        y: p.y + Math.sin(a) * off,
+        dmg: s.dmg * dmgMul(), splash: s.splash, life: s.life,
+        max: s.life, trigger: s.trigger, arm: 0.4,
+        spin: 0, color: WEAPONS.mine.color,
+      });
+    }
+    w.cd = s.cd * cdMul();
   } else if (w.id === 'skyfall') {
     // meteors plunge from above onto random enemies, exploding on impact
     for (let i = 0; i < s.count; i++) {
@@ -615,6 +632,23 @@ function update(dt) {
             hurtEnemy(e, pr.dmg, 30, e.x - pr.x, e.y - pr.y);
         }
       }
+    } else if (pr.type === 'mine') {
+      // arming delay, then detonates on contact or end-of-life
+      pr.spin += dt * 4;
+      if (pr.arm > 0) { pr.arm -= dt; continue; }
+      let boom = pr.life <= 0;
+      for (const e of G.enemies) {
+        if (Math.hypot(e.x - pr.x, e.y - pr.y) < pr.trigger + e.size * 0.5) { boom = true; break; }
+      }
+      if (boom) {
+        pr.life = 0;
+        G.effects.push({ type: 'boom', x: pr.x, y: pr.y, r: pr.splash, life: 0.34, max: 0.34 });
+        burst(pr.x, pr.y, 14, pr.color);
+        for (const e of G.enemies) {
+          if (Math.hypot(e.x - pr.x, e.y - pr.y) < pr.splash + e.size * 0.5)
+            hurtEnemy(e, pr.dmg, 24, e.x - pr.x, e.y - pr.y);
+        }
+      }
     }
   }
   G.projectiles = G.projectiles.filter(pr => pr.life > 0);
@@ -764,6 +798,27 @@ function render() {
       ctx.fillRect(-3, -9, 5, 18);
       ctx.fillStyle = '#fff'; ctx.fillRect(-2, -2, 4, 4);
       ctx.restore();
+    } else if (pr.type === 'mine') {
+      // armed mine: red cap with a pulsing centre. Arm phase blinks slower.
+      const armPhase = pr.arm > 0;
+      const px = pr.x + ox, py = pr.y + oy;
+      ctx.fillStyle = '#3a1818';
+      ctx.fillRect(px - 7, py - 4, 14, 8);
+      ctx.fillStyle = pr.color;
+      ctx.fillRect(px - 6, py - 6, 12, 6);
+      ctx.fillStyle = '#ffd0c0';
+      ctx.fillRect(px - 4, py - 6, 8, 2);
+      // four prongs
+      ctx.fillStyle = '#7a3535';
+      ctx.fillRect(px - 9, py - 2, 2, 4);
+      ctx.fillRect(px + 7, py - 2, 2, 4);
+      ctx.fillRect(px - 2, py - 8, 4, 2);
+      ctx.fillRect(px - 2, py + 4, 4, 2);
+      // blinker
+      const blink = armPhase
+        ? Math.floor(pr.arm * 6) % 2 === 0
+        : Math.floor((pr.max - pr.life) * 10) % 2 === 0;
+      if (blink) { ctx.fillStyle = '#fff'; ctx.fillRect(px - 1, py - 1, 2, 2); }
     } else {
       ctx.save(); ctx.translate(pr.x + ox, pr.y + oy); ctx.rotate(pr.spin);
       ctx.fillStyle = pr.color;

@@ -137,6 +137,19 @@ const WEAPONS = {
       { dmg: 70, count: 5, cd: 0.62, pierce: 8, speed: 660 },
     ],
   },
+  mine: {
+    icon: '⊙', color: '#ff7a7a',
+    tiers: [
+      // a passive trap dropped at the player's feet; arms briefly, then
+      // detonates on enemy contact or after `life` seconds. splash hurts.
+      { dmg: 16, count: 1, cd: 1.5,  splash: 50, life: 6.0, trigger: 22 },
+      { dmg: 21, count: 1, cd: 1.35, splash: 54, life: 6.0, trigger: 22 },
+      { dmg: 28, count: 2, cd: 1.20, splash: 58, life: 6.5, trigger: 24 },
+      { dmg: 36, count: 2, cd: 1.05, splash: 64, life: 7.0, trigger: 26 },
+      { dmg: 47, count: 3, cd: 0.90, splash: 72, life: 7.5, trigger: 28 },
+      { dmg: 66, count: 5, cd: 0.70, splash: 90, life: 8.0, trigger: 32 },
+    ],
+  },
 };
 const WEAPON_IDS = Object.keys(WEAPONS);
 
