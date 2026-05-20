@@ -60,6 +60,33 @@ function drawSling(ctx, s, flash) {
   ctx.beginPath(); ctx.arc(s.x, s.y, s.r * 0.4, 0, Math.PI * 2); ctx.fill();
 }
 
+function drawSpinner(ctx, sp) {
+  // Two posts framing a thin rotating bar between them.
+  const cx = sp.x + sp.w / 2, cy = sp.y + sp.h / 2;
+  ctx.fillStyle = '#10193a';
+  ctx.fillRect(sp.x - 2, sp.y - 2, sp.w + 4, sp.h + 4);
+  ctx.fillStyle = '#1c2750';
+  ctx.fillRect(sp.x, sp.y, sp.w, sp.h);
+  // Posts on the left and right.
+  ctx.fillStyle = '#9a92d8';
+  ctx.fillRect(sp.x - 1, sp.y - 4, 2, sp.h + 8);
+  ctx.fillRect(sp.x + sp.w - 1, sp.y - 4, 2, sp.h + 8);
+  // Spinning bar — rotates around (cx, cy). Hot colour while still spinning.
+  const t = (Date.now() / 1000 * (sp.dir < 0 ? -8 : 8));
+  const angle = sp.spinT > 0 ? t : t * 0.25;
+  const len = sp.w * 0.7;
+  const dx = Math.cos(angle) * len / 2, dy = Math.sin(angle) * len / 2;
+  ctx.strokeStyle = sp.spinT > 0 ? '#c8b3ff' : '#5a567c';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx - dx, cy - dy);
+  ctx.lineTo(cx + dx, cy + dy);
+  ctx.stroke();
+  // Centre pivot pixel.
+  ctx.fillStyle = '#fff7ed';
+  ctx.fillRect(cx, cy, 1, 1);
+}
+
 function drawTarget(ctx, rect, up) {
   const [x, y, w, h] = rect;
   if (up) {

@@ -34,6 +34,14 @@ const SLINGS = [
   { x: 246, y: 320, r: 15 },
 ];
 
+// Pass-through spinner gates above each lower outlane guard post — the
+// ball passes through, doesn't bounce, scores a small chip per pass.
+// `dir` is the spin sign for rendering (CW or CCW).
+const SPINNERS = [
+  { x: 28, y: 260, w: 18, h: 8, dir: -1 },
+  { x: 274, y: 260, w: 18, h: 8, dir:  1 },
+];
+
 // Drop targets [x, y, w, h] - clear all for a bonus.
 const TARGETS = [
   [66, 210, 30, 13],

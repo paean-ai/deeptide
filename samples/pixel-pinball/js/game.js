@@ -2,7 +2,7 @@
 
 const BEST_KEY = 'pixel-pinball-best';
 const FLIP_REST = 0.55;        // ball restitution off flippers
-const SCORE_BUMP = 150, SCORE_SLING = 75, SCORE_TARGET = 400;
+const SCORE_BUMP = 150, SCORE_SLING = 75, SCORE_TARGET = 400, SCORE_SPIN = 80;
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -23,6 +23,7 @@ function newGame() {
     flippers: FLIPPERS.map(f => ({ ...f, angle: f.rest, omega: 0, held: false })),
     bumpers: BUMPERS.map(b => ({ ...b, flash: 0 })),
     slings: SLINGS.map(s => ({ ...s, flash: 0 })),
+    spinners: SPINNERS.map(s => ({ ...s, spinT: 0, cd: 0, was: false })),
     targets: TARGETS.map(r => ({ rect: r, up: true })),
     sparks: [], banner: null, t: 0, over: false,
   };
@@ -153,6 +154,7 @@ function update(dt) {
   // visuals
   for (const bm of g.bumpers) bm.flash = Math.max(0, bm.flash - dt * 4);
   for (const s of g.slings) s.flash = Math.max(0, s.flash - dt * 4);
+  for (const sp of g.spinners) sp.spinT = Math.max(0, sp.spinT - dt);
   for (const sp of g.sparks) {
     sp.x += sp.vx * dt; sp.y += sp.vy * dt; sp.vy += 300 * dt; sp.life -= dt * 1.8;
   }
@@ -193,6 +195,19 @@ function update(dt) {
       }
     }
     for (const fl of g.flippers) collideFlipper(b, fl);
+    for (const sp of g.spinners) {
+      if (sp.cd > 0) { sp.cd -= sdt; continue; }
+      const inside = b.x > sp.x && b.x < sp.x + sp.w && b.y > sp.y - BALL_R && b.y < sp.y + sp.h + BALL_R;
+      if (inside && !sp.was) {
+        // Pass-through: don't bounce, just score + spin the gate.
+        sp.spinT = 0.6;
+        sp.cd = 0.18;
+        g.score += SCORE_SPIN;
+        addSparks(sp.x + sp.w / 2, sp.y + sp.h / 2, '#c8b3ff');
+        updateHud();
+      }
+      sp.was = inside;
+    }
     // speed cap
     const sp = Math.hypot(b.vx, b.vy);
     if (sp > MAX_SPEED) { b.vx *= MAX_SPEED / sp; b.vy *= MAX_SPEED / sp; }
@@ -212,6 +227,7 @@ function render() {
   drawWalls(ctx, WALLS);
   for (const bm of g.bumpers) drawBumper(ctx, bm, bm.flash);
   for (const sl of g.slings) drawSling(ctx, sl, sl.flash);
+  for (const sp of g.spinners) drawSpinner(ctx, sp);
   for (const fl of g.flippers) drawFlipper(ctx, fl, fl.angle);
   drawSparks(ctx, g.sparks);
   if (g.ballState !== 'dead') drawBall(ctx, g.ball.x, g.ball.y);

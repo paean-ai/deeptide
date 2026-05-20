@@ -10,8 +10,10 @@ targets for as long a run as you can.
   speed cap with sub-stepping so the ball never tunnels through walls.
 - Two pivoting flippers modelled as rotating segments — their angular velocity
   transfers into the ball, so a well-timed flip launches it hard.
-- 3 pop bumpers, 2 slingshots and a 4-piece drop-target bank; clearing every
-  drop target pays a big bonus and resets the bank.
+- 3 pop bumpers, 2 slingshots, a 4-piece drop-target bank and a pair of
+  pass-through spinner gates above each lower outlane; clearing every drop
+  target pays a big bonus and resets the bank, and each ball pass through
+  a spinner pays a small chip + spins the bar visual.
 - Hold-to-charge launcher with a power meter.
 - 3 balls per game, drain detection, score and `localStorage` best-score.
 - English / 中文 toggle.
