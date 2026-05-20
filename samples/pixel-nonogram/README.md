@@ -7,8 +7,10 @@ alongside the other `samples/` pixel games.
 
 ## Features
 
-- 30-puzzle campaign on an escalating curve — growing grids (5×5 → 10×10), each
-  hiding its own coloured pixel illustration (heart, cat, ghost, rocket…).
+- 34-puzzle campaign on an escalating curve — growing grids (5×5 → 10×10), each
+  hiding its own coloured pixel illustration (heart, cat, ghost, rocket, fox,
+  volcano, dolphin, lighthouse…). Every 10×10 picture has been verified to
+  have exactly one solution from the derived row/column clues.
 - Row and column clues derived automatically from each picture: every number is
   a run of consecutive filled cells in that line.
 - Forgiving Nintendo-style scoring — a wrong cell is auto-crossed and counted as
@@ -49,7 +51,7 @@ Then visit `http://127.0.0.1:4225/index.html`.
 
 - `index.html` - shell, title / level-select / game screens, win overlay.
 - `css/style.css` - responsive 360:480 shell, HUD, control bar, level grid.
-- `js/data.js` - the 30 puzzle bitmaps and clue derivation.
+- `js/data.js` - the 34 puzzle bitmaps and clue derivation.
 - `js/i18n.js` - English / Chinese strings.
 - `js/art.js` - palette, pixel-font clue digits, cell rendering.
 - `js/game.js` - clue logic, grid input, win detection, scoring, save.
