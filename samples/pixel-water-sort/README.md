@@ -6,7 +6,7 @@ tube holds just one colour. A fresh sorting-puzzle genre alongside the other
 
 ## Features
 
-- 24-level campaign with a rising colour count (3 → 10 colours, plus two
+- 28-level campaign with a rising colour count (3 → 10 colours, plus two
   spare tubes).
 - Every puzzle is reverse-scrambled from a solved board **and** confirmed by a
   built-in solver, so each level is guaranteed winnable; seeds make levels
