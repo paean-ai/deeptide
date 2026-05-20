@@ -22,6 +22,9 @@ const RESOURCES = {
   herb:  { icon: '🍃', color: '#7fc06a', tier: 0 },
   tonic: { icon: '🧪', color: '#b0e07f', tier: 1, sell: 17 },
   elixir:{ icon: '🔮', color: '#c87fe0', tier: 2, sell: 62 },
+  grape: { icon: '🍇', color: '#9966b0', tier: 0 },
+  juice: { icon: '🥤', color: '#c98a4a', tier: 1, sell: 16 },
+  wine:  { icon: '🍷', color: '#8a2a3a', tier: 2, sell: 64 },
 };
 const RES_IDS = Object.keys(RESOURCES);
 
@@ -47,6 +50,9 @@ const BUILDINGS = {
   herbGarden:{ kind: 'producer', cost: 100, out: 'herb', rate: 2.0, adj: 'well', color: '#86c060', icon: '🍃', rank: 1, workers: 1 },
   apothecary:{ kind: 'processor', cost: 210, in: { herb: 3 }, out: 'tonic', rate: 1.8, adj: 'herbGarden', color: '#9ad07a', icon: '🏺', rank: 2, workers: 1 },
   alchemistLab:{ kind: 'processor', cost: 340, in: { tonic: 2, water: 1 }, out: 'elixir', rate: 1.3, adj: 'apothecary', color: '#b07fd0', icon: '⚗', rank: 3, workers: 2 },
+  vineyard: { kind: 'producer', cost: 110, out: 'grape', rate: 1.9, adj: 'well', color: '#9966b0', icon: '🍇', rank: 1, workers: 1 },
+  press:    { kind: 'processor', cost: 215, in: { grape: 3 }, out: 'juice', rate: 1.8, adj: 'vineyard', color: '#c98a4a', icon: '🥤', rank: 2, workers: 1 },
+  winery:   { kind: 'processor', cost: 360, in: { juice: 2, water: 1 }, out: 'wine', rate: 1.2, adj: 'press', color: '#8a2a3a', icon: '🍷', rank: 3, workers: 2 },
 };
 const BUILDING_IDS = Object.keys(BUILDINGS);
 
@@ -108,6 +114,12 @@ const QUESTS = [
     text: ['Brew 45 Tonic', '累计调制 45 单位药剂'] },
   { type: 'build', target: 'alchemistLab', n: 1, reward: 900,
     text: ['Build an Alchemist Lab to refine elixir', '建造炼金工坊精炼灵药'] },
+  { type: 'build', target: 'vineyard', n: 1, reward: 260,
+    text: ['Plant a Vineyard for grapes', '建造一座葡萄园'] },
+  { type: 'produced', target: 'juice', n: 50, reward: 520,
+    text: ['Press 50 Juice', '累计压榨 50 单位果汁'] },
+  { type: 'build', target: 'winery', n: 1, reward: 980,
+    text: ['Build a Winery to age wine', '建造酒庄酿造美酒'] },
   { type: 'earned', n: 9000, reward: 1100,
     text: ['Earn 9000 coins total', '累计赚取 9000 金币'] },
   { type: 'earned', n: 24000, reward: 2600,
