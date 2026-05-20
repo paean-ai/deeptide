@@ -74,14 +74,29 @@ function drawHills(ctx, camX, camY, light) {
   ctx.stroke();
 }
 
-function drawOrb(ctx, sx, sy, time) {
+function drawOrb(ctx, sx, sy, time, kind) {
   const r = 7 + Math.sin(time * 6 + sx) * 1.6;
-  ctx.fillStyle = 'rgba(255,236,140,0.28)';
-  ctx.beginPath(); ctx.arc(sx, sy, r + 6, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#ffe14d';
-  ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#fff7c8';
+  const isGold = kind === 'gold';
+  // Golden orbs render slightly larger with a warmer, brighter halo so the
+  // player can tell them apart at a glance.
+  const haloR = isGold ? r + 9 : r + 6;
+  ctx.fillStyle = isGold ? 'rgba(255,180,80,0.36)' : 'rgba(255,236,140,0.28)';
+  ctx.beginPath(); ctx.arc(sx, sy, haloR, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = isGold ? '#ff8f1f' : '#ffe14d';
+  ctx.beginPath(); ctx.arc(sx, sy, r + (isGold ? 1 : 0), 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = isGold ? '#ffe8a8' : '#fff7c8';
   ctx.beginPath(); ctx.arc(sx - 1.5, sy - 1.5, r * 0.45, 0, Math.PI * 2); ctx.fill();
+  if (isGold) {
+    // Four pixel sparkles around a golden orb on alternating frames.
+    ctx.fillStyle = '#fff7ed';
+    const blink = Math.floor(time * 6) % 2 === 0 ? 1 : 0;
+    if (blink) {
+      ctx.fillRect((sx + r + 3) | 0, sy | 0, 1, 1);
+      ctx.fillRect((sx - r - 3) | 0, sy | 0, 1, 1);
+      ctx.fillRect(sx | 0, (sy + r + 3) | 0, 1, 1);
+      ctx.fillRect(sx | 0, (sy - r - 3) | 0, 1, 1);
+    }
+  }
 }
 
 function drawBird(ctx, sx, sy, angle, diving, flap) {

@@ -11,7 +11,9 @@ as you can — and catch light orbs before dusk falls.
   misaligned landing bleeds your speed.
 - One-button control — hold to tuck and dive, release to glide.
 - Light orbs arc above the hills; collecting them refuels your daylight and
-  builds a 5-level fever multiplier for bigger scores.
+  builds a 5-level fever multiplier for bigger scores. Every seventh orb in
+  the chain is a **golden orb** — a 3× refuel and a 5× score chip, marked
+  by a brighter halo and four pixel sparkles.
 - A draining light meter ends the run at dusk — keep catching orbs to glide on.
 - Parallax hills, a sinking sun and a sky that warms from day to dusk as your
   light fades.

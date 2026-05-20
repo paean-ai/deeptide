@@ -16,6 +16,8 @@ const MAX_SPEED = 560;
 // run economy
 const LIGHT_DRAIN = 0.082;     // light lost per second
 const ORB_LIGHT  = 0.15;       // light regained per orb
+const ORB_LIGHT_GOLD = 0.45;   // light regained per golden orb (3 x regular)
+const ORB_SCORE_GOLD = 5;      // golden orb scores 5 x a regular orb
 
 // terrain: a sum of sine octaves; amplitude grows slowly with distance.
 function terrainY(wx) {
@@ -37,3 +39,7 @@ function orbPos(i) {
   const x = i * ORB_GAP + 300;
   return { x, y: terrainY(x) - 66 - 32 * Math.sin(i * 1.7) };
 }
+// Every seventh orb in the chain is golden — a bigger refuel + a hefty
+// score chip. The cadence is deterministic so the player can plan ahead
+// once they recognise the rhythm.
+function orbKind(i) { return (i > 0 && i % 7 === 0) ? 'gold' : 'normal'; }

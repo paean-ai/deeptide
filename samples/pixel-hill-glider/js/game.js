@@ -48,7 +48,7 @@ function manageOrbs() {
   const r = run;
   while (true) {
     const p = orbPos(r.nextOrb);
-    if (p.x < r.camX + VW + 280) { r.orbs.push({ x: p.x, y: p.y, taken: false }); r.nextOrb++; }
+    if (p.x < r.camX + VW + 280) { r.orbs.push({ x: p.x, y: p.y, kind: orbKind(r.nextOrb), taken: false }); r.nextOrb++; }
     else break;
   }
   r.orbs = r.orbs.filter(o => o.x > r.camX - 70);
@@ -141,11 +141,14 @@ function update(dt) {
     if (Math.hypot(o.x - r.worldX, o.y - r.worldY) < 22) {
       o.taken = true;
       r.orbsTaken++;
-      r.light = Math.min(1, r.light + ORB_LIGHT);
+      const isGold = o.kind === 'gold';
+      r.light = Math.min(1, r.light + (isGold ? ORB_LIGHT_GOLD : ORB_LIGHT));
       r.combo++;
       r.fever = Math.min(5, Math.floor(r.combo / 3));
-      r.orbScore += 14 * (1 + r.fever * 0.3);
+      const baseScore = 14 * (1 + r.fever * 0.3);
+      r.orbScore += isGold ? baseScore * ORB_SCORE_GOLD : baseScore;
       spawnSpark(o.x, o.y);
+      if (isGold) spawnSpark(o.x, o.y);  // an extra burst for the golden pickup
     }
   }
 
@@ -161,7 +164,7 @@ function render() {
 
   for (const o of r.orbs) {
     if (o.taken) continue;
-    drawOrb(ctx, o.x - r.camX, o.y - r.camY, r.t);
+    drawOrb(ctx, o.x - r.camX, o.y - r.camY, r.t, o.kind);
   }
   for (const p of r.particles) {
     ctx.globalAlpha = Math.max(0, p.life / p.max);
