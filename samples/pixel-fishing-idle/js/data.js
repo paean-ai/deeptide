@@ -3,10 +3,11 @@
 const W = 900, H = 620;
 
 const ZONES = [
-  { id: 'cove',   unlock: 1, sky: ['#17304f', '#295b79'], sea: ['#14506e', '#082b47'], accent: '#65d9ff' },
-  { id: 'kelp',   unlock: 2, sky: ['#203d47', '#407566'], sea: ['#0f604f', '#07392e'], accent: '#68da86' },
-  { id: 'reef',   unlock: 4, sky: ['#241f4d', '#544587'], sea: ['#29315e', '#111936'], accent: '#b7a7ff' },
-  { id: 'crown',  unlock: 7, sky: ['#40294d', '#7d4f62'], sea: ['#263253', '#121827'], accent: '#f4c85a' },
+  { id: 'cove',   unlock: 1,  sky: ['#17304f', '#295b79'], sea: ['#14506e', '#082b47'], accent: '#65d9ff' },
+  { id: 'kelp',   unlock: 2,  sky: ['#203d47', '#407566'], sea: ['#0f604f', '#07392e'], accent: '#68da86' },
+  { id: 'reef',   unlock: 4,  sky: ['#241f4d', '#544587'], sea: ['#29315e', '#111936'], accent: '#b7a7ff' },
+  { id: 'crown',  unlock: 7,  sky: ['#40294d', '#7d4f62'], sea: ['#263253', '#121827'], accent: '#f4c85a' },
+  { id: 'frost',  unlock: 11, sky: ['#1a3650', '#5a86b0'], sea: ['#0e2a44', '#04101e'], accent: '#a8e8ff' },
 ];
 
 const RARITY = {
@@ -39,6 +40,12 @@ const FISH = [
   { id: 'bass',   name: 'Gilded Bass',  zone: 3, rarity: 'rare',     value: 320, weight: 16, color: '#e8c878', shape: 'round' },
   { id: 'lurker', name: 'Abyss Lurker', zone: 3, rarity: 'epic',     value: 560, weight: 7,  color: '#6a5fa8', shape: 'long' },
   { id: 'levi',   name: 'Crown Levi',   zone: 3, rarity: 'mythic',   value: 1200,weight: 2,  color: '#fff7c4', shape: 'serpent' },
+  // Frost Tides
+  { id: 'frostfin', name: 'Frostfin',    zone: 4, rarity: 'common',   value: 280, weight: 38, color: '#a8e8ff', shape: 'small' },
+  { id: 'crystal',  name: 'Crystal Cod', zone: 4, rarity: 'uncommon', value: 540, weight: 22, color: '#cfe8ff', shape: 'long' },
+  { id: 'icejaw',   name: 'Icejaw',      zone: 4, rarity: 'rare',     value: 1100,weight: 9,  color: '#8acdff', shape: 'round' },
+  { id: 'aurora',   name: 'Aurora Ray',  zone: 4, rarity: 'epic',     value: 2100,weight: 4,  color: '#bbf0e8', shape: 'flat' },
+  { id: 'titan',    name: 'Glacier Titan', zone: 4, rarity: 'mythic', value: 4800,weight: 1,  color: '#f0fbff', shape: 'serpent' },
 ];
 
 const UPGRADE = {

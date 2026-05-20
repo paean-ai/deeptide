@@ -8,7 +8,8 @@ hauls fish while you're away.
 
 - Delta-timed catch minigame: a marker sweeps a bar — stop it in the green band
   for a catch, dead-centre for a **perfect** (x1.6) haul.
-- 15 fish across 4 zones, each drawn as a distinct pixel species (small, round,
+- 20 fish across 5 zones (Cove → Kelp Bay → Moon Reef → Sunken Crown →
+  Frost Tides), each drawn as a distinct pixel species (small, round,
   long, flat, jelly, crab, serpent silhouettes) with 5 rarity tiers.
 - Ambient fish swimming below the waterline, splash particles, weather (Calm /
   Storm / Lucky Tide) that shifts the odds.
