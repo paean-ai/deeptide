@@ -30,11 +30,12 @@ function spawnObject() {
   const time = state.time;
   const x = 44 + Math.random() * (VW - 88);
   const isBomb = Math.random() < bombChance(time);
+  const isGold = !isBomb && Math.random() < goldChance(time);
   const vy = -(580 + Math.random() * 140);
   const vx = (VW / 2 - x) * (0.4 + Math.random() * 0.5) + (Math.random() - 0.5) * 70;
-  const def = isBomb ? BOMB : FRUITS[(Math.random() * FRUITS.length) | 0];
+  const def = isBomb ? BOMB : isGold ? GOLD : FRUITS[(Math.random() * FRUITS.length) | 0];
   state.objects.push({
-    kind: isBomb ? 'bomb' : 'fruit', def, x, y: VH + def.r + 8,
+    kind: isBomb ? 'bomb' : isGold ? 'gold' : 'fruit', def, x, y: VH + def.r + 8,
     vx, vy, r: def.r, rot: 0, vrot: (Math.random() - 0.5) * 5, t: 0, sliced: false,
   });
 }
@@ -67,8 +68,12 @@ function sliceObject(o, sdx, sdy) {
     return;
   }
   blade.sliced++;
-  state.score += 10 + Math.floor(state.time / 15) * 2;
-  burst(o.x, o.y, 11, o.def.inner);
+  const base = 10 + Math.floor(state.time / 15) * 2;
+  const points = o.kind === 'gold' ? base * GOLD_MULT : base;
+  state.score += points;
+  // Extra particle splash for a gold slice.
+  burst(o.x, o.y, o.kind === 'gold' ? 20 : 11, o.def.inner);
+  if (o.kind === 'gold') burst(o.x, o.y, 14, '#fff0c8');
   const sl = Math.hypot(sdx, sdy) || 1;
   const nx = sdx / sl, ny = sdy / sl;
   for (const side of ['L', 'R']) {

@@ -9,8 +9,10 @@ pixel games.
 
 - Swipe slicing with real geometry — every blade stroke is tested as a line
   segment against each fruit, so fast flicks cut clean.
-- Five fruit types that split into two spinning, juice-dripping halves when
-  cut, plus a glowing tapered blade trail.
+- Six fruit types (apple / lemon / melon / berry / orange / dragonfruit)
+  that split into two spinning, juice-dripping halves when cut, plus a
+  rare golden fruit that pulses with a halo and pays 3× points on a clean
+  slice, plus a glowing tapered blade trail.
 - Combo scoring — slice three or more fruit in a single swipe for an escalating
   bonus.
 - Bombs mixed into the spawns: slice one and the run ends instantly.

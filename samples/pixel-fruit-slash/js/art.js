@@ -19,6 +19,14 @@ function drawBackground(ctx) {
 // A whole fruit: body circle, shine, leaf nub.
 function drawFruit(ctx, o) {
   const f = o.def;
+  // Rare golden fruit gets a pulsing halo so the player notices it.
+  if (o.kind === 'gold') {
+    const pulse = 0.5 + 0.5 * Math.sin((o.t || 0) * 9);
+    ctx.fillStyle = 'rgba(255, 224, 120, ' + (0.22 + pulse * 0.2).toFixed(3) + ')';
+    ctx.beginPath();
+    ctx.arc(o.x, o.y, f.r + 6 + pulse * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.fillStyle = f.color;
   ctx.beginPath();
   ctx.arc(o.x, o.y, f.r, 0, Math.PI * 2);

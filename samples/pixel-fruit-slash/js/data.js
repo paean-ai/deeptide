@@ -10,8 +10,13 @@ const FRUITS = [
   { id: 'melon',  color: '#5fc06e', inner: '#b6f0a8', r: 26 },
   { id: 'berry',  color: '#9a6cd8', inner: '#cdaef0', r: 18 },
   { id: 'orange', color: '#ef9b3e', inner: '#ffd28a', r: 21 },
+  { id: 'dragon', color: '#ff7fb8', inner: '#fff7ed', r: 22 },
 ];
 const BOMB = { color: '#23232c', spark: '#ff8f4a', r: 21 };
+// A rare golden fruit pays 3 x the regular score on a clean slice. Visually
+// it pulses with a halo so the player can spot it amid the spawn wave.
+const GOLD = { id: 'gold', color: '#f4d27b', inner: '#fff0c8', r: 19 };
+const GOLD_MULT = 3;
 
 // Seconds between spawn waves — tightens as the run goes on.
 function spawnInterval(time) {
@@ -24,4 +29,8 @@ function waveSize(time) {
 // Chance any single spawned object is a bomb.
 function bombChance(time) {
   return Math.min(0.24, 0.05 + time * 0.0045);
+}
+// Chance any single non-bomb spawn is the rare golden fruit (3-7%).
+function goldChance(time) {
+  return Math.min(0.07, 0.03 + time * 0.0005);
 }
