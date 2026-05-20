@@ -29,6 +29,9 @@ const LEVELS = [
   { len: 6, colors: 7, attempts: 8,  seed: 23842 },
   { len: 6, colors: 7, attempts: 7,  seed: 25390 },
   { len: 6, colors: 7, attempts: 6,  seed: 26937 },
+  { len: 6, colors: 7, attempts: 7,  seed: 28453 },
+  { len: 6, colors: 7, attempts: 7,  seed: 29984 },
+  { len: 6, colors: 7, attempts: 6,  seed: 31520 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
