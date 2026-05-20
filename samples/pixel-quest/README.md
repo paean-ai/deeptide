@@ -7,7 +7,7 @@ action turn by turn. A fresh classic-RPG-combat genre alongside the other
 
 ## Features
 
-- An 8-stage campaign from a slime hollow to a dragon's lair.
+- A 10-stage campaign from a slime hollow to the Twilight Throne — the final two stages add a Lich + Skeleton encounter and a Demon Lord + Black Dragon dual-boss finale.
 - Three heroes, each with a distinct skill: the Knight's **Cleave** strikes
   every foe, the Mage's **Firestorm** burns them all with magic, the Cleric's
   **Mend** restores an ally's HP.
@@ -15,7 +15,7 @@ action turn by turn. A fresh classic-RPG-combat genre alongside the other
   MP), or Defend to halve the next hit.
 - Heroes grow stronger every stage, and the party is fully restored at the
   start of each battle — so every stage is a fair, self-contained fight.
-- All eight stages are verified winnable by an automated playthrough.
+- All ten stages are verified winnable by an automated playthrough.
 - Level select with progressive unlocks and per-stage completion marks, saved
   to `localStorage`.
 - English / 中文 toggle.

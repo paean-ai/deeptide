@@ -53,6 +53,13 @@ const LEVELS = [
   { name: ['Dragon Lair', '巨龙巢穴'], enemies: [
     e('Dragon', '巨龙', 180, 23, 9, 7, 'focus'),
     e('Wolf', '野狼', 44, 18, 6, 11, 'random') ] },
+  { name: ['Cursed Ruins', '诅咒废墟'], enemies: [
+    e('Lich', '巫妖', 200, 22, 10, 6, 'focus'),
+    e('Skeleton', '骷髅', 48, 16, 6, 9, 'random'),
+    e('Skeleton', '骷髅', 48, 16, 6, 9, 'random') ] },
+  { name: ['Twilight Throne', '暮光王座'], enemies: [
+    e('Demon Lord', '魔王', 240, 26, 11, 8, 'focus'),
+    e('Dragon', '黑龙', 140, 21, 8, 7, 'focus') ] },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
