@@ -7,15 +7,16 @@ tactics genre alongside the other `samples/` pixel games.
 
 ## Features
 
-- A 6-mission campaign on a 6×6 grid, rising in enemy count and battlefield
-  clutter.
+- An 8-mission campaign on a 6×6 grid, rising in enemy count and battlefield
+  clutter — the final two add a four-wall Crucible and a six-enemy Rampart
+  finale with a 14-HP core.
 - Enemies show a red danger tile each turn — exactly where they will strike.
   Read it, then act before it lands.
 - Every mech attack **pushes** its target back one tile: shove an enemy off a
   building, into a wall for collision damage, or into another enemy.
 - A shared core powers your buildings; lose it and the grid goes down. Clear
   every enemy to secure the area.
-- All six missions are verified winnable by an automated look-ahead bot.
+- All eight missions are verified winnable by an automated look-ahead bot.
 - Level select with progressive unlocks and per-mission completion marks, saved
   to `localStorage`.
 - English / 中文 toggle.
