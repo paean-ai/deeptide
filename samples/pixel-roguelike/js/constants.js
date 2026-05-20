@@ -138,6 +138,18 @@ const ENEMY_TYPES = {
     hp: 240, attack: 34, speed: 0.65, size: 20,
     exp: 80, score: 12,
   },
+  cryptkeeper: {
+    name: '墓魔',
+    color: '#7b8490',
+    hp: 130, attack: 24, speed: 1.2, size: 14,
+    exp: 32, score: 5,
+  },
+  lich: {
+    name: '巫妖',
+    color: '#b66cff',
+    hp: 280, attack: 38, speed: 1.0, size: 18,
+    exp: 95, score: 14,
+  },
   boss: {
     name: 'Boss',
     color: '#e74c3c',
@@ -162,6 +174,8 @@ function waveConfig(wave) {
   if (wave >= 7) canSpawn.push('wraith');
   if (wave >= 6) canSpawn.push('cultist');
   if (wave >= 11) canSpawn.push('behemoth');
+  if (wave >= 8) canSpawn.push('cryptkeeper');
+  if (wave >= 12) canSpawn.push('lich');
   if (wave % 5 === 0) {
     const bossHp = 300 + wave * 80;
     return { count: count + 3, types: canSpawn, hasBoss: true, bossHp };
