@@ -7,7 +7,7 @@ pixel games.
 
 ## Features
 
-- 6-puzzle campaign on hand-built rooms, 7×7 and 8×8.
+- 8-puzzle campaign on hand-built rooms, 7×7 and 8×8.
 - Each puzzle takes a candidate light arrangement, numbers every wall from it,
   and a constrained backtracking solver **confirms the numbered puzzle has
   exactly one solution** — so every level is a genuine, fair Akari.
