@@ -6,7 +6,9 @@ of them. A fresh bomb-and-grid genre alongside the other `samples/` pixel games.
 
 ## Features
 
-- 6-floor campaign that grows the maze and adds tougher waves of enemies.
+- 8-floor campaign that grows the maze and adds tougher waves of enemies —
+  Abyss (32 bricks, 5 enemies) and Hellmaw (36 bricks, 6 enemies, range 4)
+  cap the run.
 - Real-time grid play on an 11×11 floor with the classic Bomberman pillar
   layout, scattered destructible bricks, and a hidden staircase under one of
   them.

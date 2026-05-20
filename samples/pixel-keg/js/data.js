@@ -17,12 +17,14 @@ const ENEMY_STEP = 0.55;
 const RESPAWN_DELAY = 0.6;
 
 const LEVELS = [
-  { name: ['Crypt', '地穴'],     seed: 13,  bricks: 8,  enemies: 1, range: 2 },
+  { name: ['Crypt', '地穴'],     seed: 13,  bricks:  8, enemies: 1, range: 2 },
   { name: ['Cellar', '酒窖'],    seed: 41,  bricks: 12, enemies: 2, range: 2 },
   { name: ['Catacomb', '墓道'],  seed: 86,  bricks: 16, enemies: 2, range: 2 },
   { name: ['Vault', '密室'],     seed: 152, bricks: 20, enemies: 3, range: 3 },
   { name: ['Citadel', '城堡'],   seed: 235, bricks: 24, enemies: 3, range: 3 },
   { name: ['Inferno', '炼狱'],   seed: 337, bricks: 28, enemies: 4, range: 3 },
+  { name: ['Abyss',   '深渊'],   seed: 458, bricks: 32, enemies: 5, range: 3 },
+  { name: ['Hellmaw', '魔咽'],   seed: 591, bricks: 36, enemies: 6, range: 4 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
