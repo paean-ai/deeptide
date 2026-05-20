@@ -210,7 +210,7 @@ function fireWeapon(w, dt) {
   w.cd -= dt;
   if (w.cd > 0) return;
 
-  if (w.id === 'dagger' || w.id === 'lance') {
+  if (w.id === 'dagger' || w.id === 'lance' || w.id === 'trident') {
     // dagger sprays light blades; lance fires a few high-pierce spears
     const tgt = nearestEnemy(p.x, p.y);
     if (!tgt) { w.cd = 0.15; return; }

@@ -35,13 +35,13 @@ const TEXT = {
       dagger: 'Dagger', aura: 'Holy Aura', orbit: 'Orbit Blade', bolt: 'Chain Bolt',
       nova: 'Frost Nova', fireball: 'Fireball', shards: 'Shard Burst',
       boomerang: 'Boomerang', coil: 'Arc Coil', skyfall: 'Skyfall',
-      lance: 'Holy Lance',
+      lance: 'Holy Lance', trident: 'Trident',
     },
     wEvo: {
       dagger: 'Thousand Knives', aura: 'Sanctuary', orbit: 'Halo',
       bolt: 'Tempest', nova: 'Blizzard', fireball: 'Meteor Storm',
       shards: 'Shard Nova', boomerang: 'Eternal Return', coil: 'Tesla Storm',
-      skyfall: 'Armageddon', lance: 'Spear of Dawn',
+      skyfall: 'Armageddon', lance: 'Spear of Dawn', trident: 'Triumvirate',
     },
     wDesc: {
       dagger: 'Throws blades at the nearest foe.',
@@ -55,6 +55,7 @@ const TEXT = {
       coil: 'Sparks chain through clustered foes.',
       skyfall: 'Meteors crash down from the sky.',
       lance: 'A piercing spear that skewers a whole line.',
+      trident: 'Hurls a tight piercing fan of three spears.',
     },
     pName: {
       might: 'Might', swift: 'Swift Boots', haste: 'Haste', armor: 'Plate Armor',
@@ -98,13 +99,13 @@ const TEXT = {
       dagger: '飞刀', aura: '圣光环', orbit: '环刃', bolt: '连锁闪电',
       nova: '寒霜新星', fireball: '火球', shards: '碎刃',
       boomerang: '回旋镖', coil: '电弧线圈', skyfall: '天陨',
-      lance: '圣枪',
+      lance: '圣枪', trident: '三叉戟',
     },
     wEvo: {
       dagger: '千刃乱舞', aura: '圣域', orbit: '星环',
       bolt: '暴风', nova: '暴雪', fireball: '陨石风暴',
       shards: '碎刃风暴', boomerang: '永恒回归', coil: '特斯拉风暴',
-      skyfall: '末日审判', lance: '黎明之枪',
+      skyfall: '末日审判', lance: '黎明之枪', trident: '三联灭',
     },
     wDesc: {
       dagger: '向最近的敌人投掷利刃。',
@@ -118,6 +119,7 @@ const TEXT = {
       coil: '电流在密集的敌群中连锁跳跃。',
       skyfall: '陨石从天而降砸向敌群。',
       lance: '贯穿一整条直线的长枪。',
+      trident: '三支贯穿尖锥呈窄扇散射。',
     },
     pName: {
       might: '蛮力', swift: '疾行靴', haste: '急速', armor: '板甲',

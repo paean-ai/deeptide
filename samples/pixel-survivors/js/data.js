@@ -125,6 +125,18 @@ const WEAPONS = {
       { dmg: 94, count: 3, cd: 0.52, pierce: 14, speed: 660 },
     ],
   },
+  trident: {
+    icon: '⚝', color: '#a8d84a',
+    tiers: [
+      // tight-spread piercing triad — reuses the dagger/lance fan-fire branch
+      { dmg: 18, count: 3, cd: 1.10, pierce: 2, speed: 540 },
+      { dmg: 23, count: 3, cd: 1.00, pierce: 3, speed: 555 },
+      { dmg: 30, count: 3, cd: 0.90, pierce: 3, speed: 570 },
+      { dmg: 39, count: 4, cd: 0.82, pierce: 4, speed: 590 },
+      { dmg: 50, count: 4, cd: 0.74, pierce: 5, speed: 615 },
+      { dmg: 70, count: 5, cd: 0.62, pierce: 8, speed: 660 },
+    ],
+  },
 };
 const WEAPON_IDS = Object.keys(WEAPONS);
 
