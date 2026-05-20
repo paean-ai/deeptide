@@ -7,7 +7,7 @@ games.
 
 ## Features
 
-- 6-puzzle campaign on growing seas (7×7 → 9×9), 8 to 15 islands.
+- 8-puzzle campaign on growing seas (7×7 → 10×10), 8 to 17 islands.
 - Each puzzle grows a connected island network from a seed, then a backtracking
   solver **verifies it has exactly one solution** — so every level is a
   genuine, uniquely-solvable bridges puzzle.

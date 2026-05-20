@@ -14,6 +14,8 @@ const PUZZLES = [
   { name: ['Archipelago', '群岛'], seed: 168, w: 8, h: 8, count: 12 },
   { name: ['Expanse', '汪洋'],  seed: 264, w: 9, h: 9, count: 13 },
   { name: ['Maelstrom', '漩涡'], seed: 390, w: 9, h: 9, count: 15 },
+  { name: ['Tempest', '风暴'],   seed: 512, w: 9, h: 9, count: 16 },
+  { name: ['Leviathan', '巨灵'], seed: 644, w: 10, h: 10, count: 17 },
 ];
 const PUZZLE_COUNT = PUZZLES.length;
 
