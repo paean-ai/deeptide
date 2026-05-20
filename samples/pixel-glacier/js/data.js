@@ -23,6 +23,8 @@ const LEVELS = [
   { name: ['Aurora', '极光'],   seed: 758, n: 9 },
   { name: ['Pack Ice', '浮冰群'], seed: 921, n: 9 },
   { name: ['Frostfall', '冻陨'],  seed: 1097, n: 9 },
+  { name: ['Iceshelf', '冰架'],   seed: 1283, n: 9 },
+  { name: ['Whiteout', '雪盲'],   seed: 1469, n: 9 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
