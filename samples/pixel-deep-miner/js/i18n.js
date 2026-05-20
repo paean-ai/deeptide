@@ -18,7 +18,7 @@ const TEXT = {
     nothingToSell: 'Cargo hold is empty.', cargoFull: 'Cargo hold is full!',
     bought: n => `Upgraded ${n}.`, refuel: 'Refuelled and repaired at the surface.',
     maxed: 'MAX', owned: 'Owned', buy: 'Buy', need: 'Need ◆',
-    oreNames: { copper: 'Copper', iron: 'Iron', silver: 'Silver', gold: 'Gold', gem: 'Gem' },
+    oreNames: { copper: 'Copper', iron: 'Iron', silver: 'Silver', cobalt: 'Cobalt', gold: 'Gold', gem: 'Gem', mythril: 'Mythril' },
     upNames: { drill: 'Drill', fuel: 'Fuel Tank', cargo: 'Cargo Hold', hull: 'Hull', thruster: 'Thruster' },
     upDesc: {
       drill: 'Drill harder rock, faster.', fuel: 'Carry more fuel underground.',
@@ -42,7 +42,7 @@ const TEXT = {
     nothingToSell: '货舱是空的。', cargoFull: '货舱已满！',
     bought: n => `升级了${n}。`, refuel: '在地面免费补充燃料并修复。',
     maxed: '满级', owned: '已拥有', buy: '购买', need: '需要 ◆',
-    oreNames: { copper: '铜矿', iron: '铁矿', silver: '银矿', gold: '金矿', gem: '宝石' },
+    oreNames: { copper: '铜矿', iron: '铁矿', silver: '银矿', cobalt: '钴矿', gold: '金矿', gem: '宝石', mythril: '秘银' },
     upNames: { drill: '钻头', fuel: '燃料箱', cargo: '货舱', hull: '船体', thruster: '推进器' },
     upDesc: {
       drill: '更快钻穿更硬的岩石。', fuel: '在地下携带更多燃料。',

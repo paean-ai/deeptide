@@ -8,7 +8,7 @@ upgrade your rig. A fresh genre alongside the other `samples/` pixel games.
 
 - Procedurally generated 220-tile-deep world: dirt, stone, hard rock, lava
   pockets and bedrock, with depth-gated ore veins (copper → iron → silver →
-  gold → gem).
+  cobalt → gold → gem → mythril).
 - Smooth grid physics: walk, drill, gravity-driven falls with fall damage, and
   thruster flight back up.
 - Resource loop: fuel drains underground, cargo fills as you mine — surface to

@@ -6,7 +6,7 @@ const BEST_KEY = 'pixel-deep-miner-best';
 
 const VIEW_H = 13;
 const LAVA_DPS = 26;
-const ORE_BLOCK = { copper: B_COPPER, iron: B_IRON, silver: B_SILVER, gold: B_GOLD, gem: B_GEM };
+const ORE_BLOCK = { copper: B_COPPER, iron: B_IRON, silver: B_SILVER, cobalt: B_COBALT, gold: B_GOLD, gem: B_GEM, mythril: B_MYTHRIL };
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -23,9 +23,9 @@ let pendingSwipe = null;
 // ---- world generation --------------------------------------------------
 function pickOre(depth) {
   const pool = [];
-  const weights = { copper: 5, iron: 4, silver: 3, gold: 2, gem: 1 };
+  const weights = { copper: 5, iron: 4, silver: 3, cobalt: 3, gold: 2, gem: 1, mythril: 1 };
   for (const id in ORES) if (ORES[id].minDepth <= depth) {
-    for (let i = 0; i < weights[id]; i++) pool.push(id);
+    for (let i = 0; i < (weights[id] || 1); i++) pool.push(id);
   }
   return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
 }

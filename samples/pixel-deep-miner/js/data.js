@@ -10,7 +10,8 @@ const BEDROCK_ROW = ROWS - 2;
 // Block ids. 0 = empty/air.
 const B_EMPTY = 0, B_GRASS = 1, B_DIRT = 2, B_STONE = 3, B_HARD = 4,
       B_LAVA = 5, B_BEDROCK = 6,
-      B_COPPER = 7, B_IRON = 8, B_SILVER = 9, B_GOLD = 10, B_GEM = 11;
+      B_COPPER = 7, B_IRON = 8, B_SILVER = 9, B_GOLD = 10, B_GEM = 11,
+      B_COBALT = 12, B_MYTHRIL = 13;
 
 const BLOCKS = {
   [B_GRASS]:   { solid: 1, hardness: 1.0,      color: '#5a8f3c', top: '#7dc05a' },
@@ -24,14 +25,18 @@ const BLOCKS = {
   [B_SILVER]:  { solid: 1, hardness: 3.6, color: '#41434f', ore: 'silver' },
   [B_GOLD]:    { solid: 1, hardness: 4.4, color: '#41434f', ore: 'gold' },
   [B_GEM]:     { solid: 1, hardness: 5.6, color: '#41434f', ore: 'gem' },
+  [B_COBALT]:  { solid: 1, hardness: 4.0, color: '#41434f', ore: 'cobalt' },
+  [B_MYTHRIL]: { solid: 1, hardness: 6.6, color: '#41434f', ore: 'mythril' },
 };
 
 const ORES = {
   copper: { value: 16,  weight: 1, color: '#e08a4a', glow: '#ffb27a', minDepth: 2 },
   iron:   { value: 44,  weight: 1, color: '#d9dde6', glow: '#ffffff', minDepth: 14 },
   silver: { value: 120, weight: 1, color: '#b6e3f0', glow: '#e6ffff', minDepth: 38 },
+  cobalt: { value: 200, weight: 1, color: '#4a8cff', glow: '#a8c8ff', minDepth: 55 },
   gold:   { value: 320, weight: 2, color: '#f4c85a', glow: '#ffe9a0', minDepth: 70 },
   gem:    { value: 950, weight: 2, color: '#ff7ad0', glow: '#ffc4ec', minDepth: 110 },
+  mythril:{ value: 2400,weight: 3, color: '#9affe8', glow: '#d8fff5', minDepth: 160 },
 };
 
 // Upgrade tracks. index 0 = starting level (already owned).
