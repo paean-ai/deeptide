@@ -22,12 +22,14 @@ const A_RADIUS = [0, 8, 14, 22];
 const A_SCORE = [0, 40, 20, 10];
 
 const LEVELS = [
-  { name: ['Drift', '漂流'],     seed: 17,  big: 3, med: 0 },
-  { name: ['Belt', '小行星带'],  seed: 53,  big: 4, med: 0 },
-  { name: ['Stream', '陨流'],    seed: 109, big: 5, med: 0 },
-  { name: ['Storm', '陨石风暴'], seed: 184, big: 4, med: 2 },
-  { name: ['Cluster', '簇群'],   seed: 268, big: 6, med: 0 },
-  { name: ['Maelstrom', '漩涡'], seed: 362, big: 5, med: 3 },
+  { name: ['Drift',      '漂流'],     seed: 17,  big: 3, med: 0, small: 0 },
+  { name: ['Belt',       '小行星带'], seed: 53,  big: 4, med: 0, small: 0 },
+  { name: ['Stream',     '陨流'],     seed: 109, big: 5, med: 0, small: 0 },
+  { name: ['Storm',      '陨石风暴'], seed: 184, big: 4, med: 2, small: 0 },
+  { name: ['Cluster',    '簇群'],     seed: 268, big: 6, med: 0, small: 0 },
+  { name: ['Maelstrom',  '漩涡'],     seed: 362, big: 5, med: 3, small: 0 },
+  { name: ['Tempest',    '风暴眼'],   seed: 491, big: 6, med: 3, small: 4 },
+  { name: ['Singularity','奇点'],     seed: 633, big: 4, med: 5, small: 8 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
@@ -93,8 +95,9 @@ function buildGame(levelIndex) {
     fireCd: 0, invuln: 0, respawnT: 0,
   };
   s.ship = { x: FIELD_W / 2, y: FIELD_TOP + FIELD_H / 2, vx: 0, vy: 0, angle: -Math.PI / 2, alive: true };
-  for (let i = 0; i < cfg.big; i++) s.asteroids.push(spawnEdgeAsteroid(s, 3));
-  for (let i = 0; i < (cfg.med || 0); i++) s.asteroids.push(spawnEdgeAsteroid(s, 2));
+  for (let i = 0; i < cfg.big; i++)           s.asteroids.push(spawnEdgeAsteroid(s, 3));
+  for (let i = 0; i < (cfg.med   || 0); i++)  s.asteroids.push(spawnEdgeAsteroid(s, 2));
+  for (let i = 0; i < (cfg.small || 0); i++)  s.asteroids.push(spawnEdgeAsteroid(s, 1));
   s.invuln = RESPAWN_INVULN;
   return s;
 }
