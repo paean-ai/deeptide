@@ -30,6 +30,10 @@ const LEVELS = [
   { n: 16, k: 6, seed: 19618 },
   { n: 17, k: 6, seed: 20729 },
   { n: 17, k: 6, seed: 21840 },
+  { n: 17, k: 6, seed: 22951 },
+  { n: 18, k: 6, seed: 24063 },
+  { n: 18, k: 6, seed: 25174 },
+  { n: 18, k: 6, seed: 26285 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
