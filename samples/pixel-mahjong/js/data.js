@@ -20,6 +20,8 @@ const LAYOUTS = [
   { name: ['Pinnacle', '绝顶'], w: 14, h: 9, layers: 3 },
   { name: ['Skyholm', '云宫'], w: 14, h: 10, layers: 3 },
   { name: ['Aurora', '极光'],  w: 15, h: 10, layers: 3 },
+  { name: ['Cosmos', '苍穹'],  w: 16, h: 10, layers: 3 },
+  { name: ['Olympus', '神山'], w: 15, h: 10, layers: 4 },
 ];
 const LAYOUT_COUNT = LAYOUTS.length;
 

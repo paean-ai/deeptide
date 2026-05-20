@@ -6,7 +6,7 @@ the other `samples/` pixel games.
 
 ## Features
 
-- 12-layout campaign of stacked pyramids — growing bases and extra layers
+- 14-layout campaign of stacked pyramids — growing bases and extra layers
   (32 tiles up to a 218-tile empire).
 - Every layout is generated to be solvable: tile faces are dealt by simulating
   a full solve, so a clean path always exists from the start.
