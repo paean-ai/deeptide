@@ -435,6 +435,70 @@ const LEVELS = [
       'x.IiiI.x',
     ],
   },
+  { // 43 - frozen citadel
+    moves: 26, objective: { type: 'ice' },
+    stars: [9000, 16000, 23000],
+    layout: [
+      'IIIIIIII',
+      'IiIIIIiI',
+      'IIiIIiII',
+      'IIIiIIII',
+      'IIIIiIII',
+      'IIiIIiII',
+      'IiIIIIiI',
+      'IIIIIIII',
+    ],
+  },
+  { // 44 - color flood
+    moves: 28, objective: { type: 'color', color: 3, n: 52 },
+    stars: [10000, 18000, 26000],
+  },
+  { // 45 - crate bastion II
+    moves: 30, objective: { type: 'crate' },
+    stars: [11000, 19000, 28000],
+    layout: [
+      'xx.xx.xx',
+      'x......x',
+      '.x.xx.x.',
+      '.x.xx.x.',
+      '.x.xx.x.',
+      '.x.xx.x.',
+      'x......x',
+      'xx.xx.xx',
+    ],
+  },
+  { // 46 - ingredient avalanche
+    moves: 36, objective: { type: 'drop', n: 16 },
+    stars: [17000, 28000, 42000],
+    layout: [
+      'C.C..C.C',
+      '........',
+      '.C....C.',
+      'C......C',
+      'C......C',
+      '.C....C.',
+      '........',
+      'C.C..C.C',
+    ],
+  },
+  { // 47 - score apex
+    moves: 30, objective: { type: 'score', n: 80000 },
+    stars: [80000, 105000, 138000],
+  },
+  { // 48 - the final crucible
+    moves: 36, objective: { type: 'score', n: 96000 },
+    stars: [96000, 124000, 162000],
+    layout: [
+      'IixIIxiI',
+      'iIIxxIIi',
+      'xIiIIiIx',
+      'IIxIIxII',
+      'IIxIIxII',
+      'xIiIIiIx',
+      'iIIxxIIi',
+      'IixIIxiI',
+    ],
+  },
 ];
 
 // boosters
