@@ -7,7 +7,7 @@ alongside the other `samples/` pixel games.
 
 ## Features
 
-- 8-level campaign on growing ice fields (6×6 up to 9×9).
+- 10-level campaign on growing ice fields (6×6 up to 9×9).
 - Each floe scatters its rocks from a seed, then a BFS over the slide graph
   **verifies the exit is reachable** and measures the optimal slide count —
   that count is the par you race against.
