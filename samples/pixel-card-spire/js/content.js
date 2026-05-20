@@ -160,13 +160,30 @@ const CARD_DEFS = {
   aegis:    { name: ['Aegis','神盾'], type: 'skill', rarity: 'rare', cost: 2,
               effects: [{ op: 'block', v: 20 }, { op: 'str', v: 1 }],
               u: { effects: [{ op: 'block', v: 28 }, { op: 'str', v: 2 }] } },
+  // --- expansion 5: common ---
+  jab:      { name: ['Jab','点刺'], type: 'attack', rarity: 'common', cost: 0, hits: 2,
+              effects: [{ op: 'dmg', v: 3 }], u: { hits: 3, effects: [{ op: 'dmg', v: 3 }] } },
+  shield:   { name: ['Shield Up','举盾'], type: 'skill', rarity: 'common', cost: 0,
+              effects: [{ op: 'block', v: 3 }], u: { effects: [{ op: 'block', v: 5 }] } },
+  // --- expansion 5: uncommon ---
+  flurry:   { name: ['Flurry','疾风'], type: 'attack', rarity: 'uncommon', cost: 1, hits: 3,
+              effects: [{ op: 'dmg', v: 3 }], u: { hits: 4, effects: [{ op: 'dmg', v: 3 }] } },
+  cauldron: { name: ['Cauldron','坩埚'], type: 'skill', rarity: 'uncommon', cost: 1, aoe: true,
+              effects: [{ op: 'poison', v: 3 }, { op: 'weak', v: 1 }],
+              u: { effects: [{ op: 'poison', v: 4 }, { op: 'weak', v: 2 }] } },
+  // --- expansion 5: rare ---
+  apocalypse:{ name: ['Apocalypse','末日'], type: 'attack', rarity: 'rare', cost: 3, aoe: true,
+              effects: [{ op: 'dmg', v: 12 }, { op: 'vuln', v: 2 }],
+              u: { effects: [{ op: 'dmg', v: 16 }, { op: 'vuln', v: 3 }] } },
+  ironclad: { name: ['Ironclad','重铠'], type: 'power', rarity: 'rare', cost: 2,
+              effects: [], power: 'metal', powerV: 5, u: { powerV: 7, power: 'metal' } },
 };
 
 const STARTER_DECK = ['strike','strike','strike','strike','strike','guard','guard','guard','guard','bash'];
 
-const COMMON_POOL = ['cleave','quickJab','ironWall','pommel','twinSlice','sidestep','hack','heavyGuard','gash','slash','parry','chop','brace'];
-const UNCOMMON_POOL = ['rampage','bloodlet','riposte','inflame','shrugOff','whirl','poisonBl','secWind','trance','intimid','metal','frenzy','toxicCloud','fortify','reckless','warcry','siphon','crescent','bloodrage','barricade','cinder','focus'];
-const RARE_POOL = ['offering','reaper','impervious','limitBrk','demonForm','berserk','juggern','execute','bulwark','venomBurst','adrenaline','cataclysm','rupture','bloodfeast','onslaught','aegis'];
+const COMMON_POOL = ['cleave','quickJab','ironWall','pommel','twinSlice','sidestep','hack','heavyGuard','gash','slash','parry','chop','brace','jab','shield'];
+const UNCOMMON_POOL = ['rampage','bloodlet','riposte','inflame','shrugOff','whirl','poisonBl','secWind','trance','intimid','metal','frenzy','toxicCloud','fortify','reckless','warcry','siphon','crescent','bloodrage','barricade','cinder','focus','flurry','cauldron'];
+const RARE_POOL = ['offering','reaper','impervious','limitBrk','demonForm','berserk','juggern','execute','bulwark','venomBurst','adrenaline','cataclysm','rupture','bloodfeast','onslaught','aegis','apocalypse','ironclad'];
 
 function rollCardReward(rng, count) {
   const out = [];
