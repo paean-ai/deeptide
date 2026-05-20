@@ -11,7 +11,7 @@ canvas.width = W; canvas.height = H;
 ctx.imageSmoothingEnabled = false;
 
 const GROUND = H - 70;
-const GAME_IDS = ['flap', 'catch', 'reflex', 'stack', 'dash', 'squash'];
+const GAME_IDS = ['flap', 'catch', 'reflex', 'stack', 'dash', 'squash', 'memory'];
 const MEDALS = {
   flap:   [6, 15, 28],
   catch:  [14, 32, 55],
@@ -19,6 +19,7 @@ const MEDALS = {
   stack:  [7, 15, 26],
   dash:   [260, 620, 1150],
   squash: [10, 22, 40],
+  memory: [4, 9, 14],
 };
 
 // ---- save --------------------------------------------------------------
@@ -438,6 +439,115 @@ GAMES.squash = {
         ctx.fillRect(h.cx - 4, ey - 32, 8, 8);
       }
       ctx.restore();
+    }
+  },
+};
+
+// ========================================================================
+// GAME 7: MEMORY (Simon Says — color-sequence recall)
+// ========================================================================
+GAMES.memory = {
+  _pads(G) {
+    // Pre-computed once per init; positions stay stable through the run.
+    const px = 70, py = 200, gap = 24, sz = 150;
+    return [
+      { id: 0, x: px,             y: py,            sz, col: '#e85a3a', hi: '#ff8a6a' },
+      { id: 1, x: px + sz + gap,  y: py,            sz, col: '#5fc06e', hi: '#86df9d' },
+      { id: 2, x: px,             y: py + sz + gap, sz, col: '#5fc0ff', hi: '#82c0ff' },
+      { id: 3, x: px + sz + gap,  y: py + sz + gap, sz, col: '#f4d27b', hi: '#fff0c8' },
+    ];
+  },
+  init(G) {
+    G.s = {
+      pads: this._pads(G),
+      seq: [],
+      step: 0,           // index of next sequence entry the player must tap
+      mode: 'show',      // 'show' or 'input'
+      showIdx: 0,        // index of the pad currently being shown
+      showT: 0,
+      gapT: 0.6,
+      flash: -1,         // currently-lit pad id (any mode)
+      flashT: 0,
+      inputT: 0,         // seconds since last tap (timeout safety)
+    };
+    this._grow(G.s);
+  },
+  _grow(s) {
+    // First round starts at length 3 for accessibility, then +1 per round.
+    const add = s.seq.length === 0 ? 3 : 1;
+    for (let i = 0; i < add; i++) s.seq.push((Math.random() * 4) | 0);
+  },
+  down(G, x, y) {
+    const s = G.s;
+    if (s.mode !== 'input' || G.over) return;
+    for (const p of s.pads) {
+      if (x >= p.x && x <= p.x + p.sz && y >= p.y && y <= p.y + p.sz) {
+        s.flash = p.id; s.flashT = 0.22; s.inputT = 0;
+        if (p.id === s.seq[s.step]) {
+          s.step++;
+          if (s.step >= s.seq.length) {
+            G.score++;
+            burst(p.x + p.sz / 2, p.y + p.sz / 2, 14, '#bda6ff');
+            s.mode = 'show'; s.showIdx = 0; s.gapT = 0.55;
+            this._grow(s);
+          }
+        } else {
+          G.shake = 0.35;
+          endGame();
+        }
+        return;
+      }
+    }
+  },
+  update(G, dt) {
+    const s = G.s;
+    if (s.flashT > 0) { s.flashT -= dt; if (s.flashT <= 0) s.flash = -1; }
+    if (s.mode === 'show') {
+      if (s.gapT > 0) { s.gapT -= dt; return; }
+      if (s.flash < 0) {
+        if (s.showIdx >= s.seq.length) {
+          s.mode = 'input'; s.step = 0; s.inputT = 0;
+          return;
+        }
+        s.flash = s.seq[s.showIdx];
+        s.flashT = Math.max(0.22, 0.55 - G.score * 0.025);
+      } else if (s.flashT <= 0) {
+        s.gapT = 0.12;
+        s.showIdx++;
+      }
+    } else {
+      s.inputT += dt;
+      // 8-second per-round soft timeout.
+      if (s.inputT > 8) { G.shake = 0.3; endGame(); }
+    }
+  },
+  render(G, ctx) {
+    skyGradient(ctx, W, H, '#1a1230', '#0d0918');
+    const s = G.s;
+    // Header
+    ctx.fillStyle = '#bda6ff';
+    ctx.font = 'bold 20px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(s.mode === 'show' ? '◉ WATCH ◉' : '✓ YOUR TURN ✓', W / 2, 140);
+    ctx.fillStyle = '#a8a0c4';
+    ctx.font = '13px monospace';
+    ctx.fillText('Length ' + s.seq.length + '   Step ' + (s.mode === 'input' ? s.step + 1 : s.showIdx + 1) + '/' + s.seq.length,
+      W / 2, 168);
+    // Pads
+    for (const p of s.pads) {
+      const lit = s.flash === p.id;
+      ctx.fillStyle = '#070315';
+      ctx.fillRect(p.x - 3, p.y - 3, p.sz + 6, p.sz + 6);
+      ctx.fillStyle = lit ? p.hi : p.col;
+      ctx.fillRect(p.x, p.y, p.sz, p.sz);
+      if (lit) {
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.fillRect(p.x, p.y, p.sz, p.sz);
+      }
+      // Inner border for pixel-art look.
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fillRect(p.x, p.y + p.sz - 6, p.sz, 6);
+      ctx.fillRect(p.x + p.sz - 6, p.y, 6, p.sz);
     }
   },
 };

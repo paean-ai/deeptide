@@ -5,7 +5,7 @@ let currentLang = localStorage.getItem(LANG_KEY) || 'en';
 const TEXT = {
   en: {
     title: 'PIXEL ARCADE',
-    subtitle: 'Six quick games. One pixel cabinet.',
+    subtitle: 'Seven quick games. One pixel cabinet.',
     pick: 'Pick a game',
     howto: 'Each game is a 60-second skill test. Beat your best and chase gold medals.',
     play: 'PLAY', back: 'Back', retry: 'Retry', hub: 'Arcade',
@@ -20,6 +20,7 @@ const TEXT = {
       stack:  ['Tower Stack', '叠叠高'],
       dash:   ['Pixel Dash', '像素冲刺'],
       squash: ['Bug Squash', '拍虫子'],
+      memory: ['Color Echo', '颜色回声'],
     },
     instr: {
       flap:   'Tap to flap. Fly through the gaps.',
@@ -28,14 +29,15 @@ const TEXT = {
       stack:  'Tap to drop each block. Stack them high.',
       dash:   'Tap to jump. Leap over every obstacle.',
       squash: 'Tap the bugs before they burrow away. Never hit a bomb.',
+      memory: 'Watch the flashes — tap the pads back in the same order.',
     },
     unit: {
-      flap: 'gaps', catch: 'fruit', reflex: 'hits', stack: 'blocks', dash: 'm', squash: 'bugs',
+      flap: 'gaps', catch: 'fruit', reflex: 'hits', stack: 'blocks', dash: 'm', squash: 'bugs', memory: 'rounds',
     },
   },
   zh: {
     title: '像素街机',
-    subtitle: '六个小游戏，一台像素机厅。',
+    subtitle: '七个小游戏，一台像素机厅。',
     pick: '选择一个游戏',
     howto: '每个游戏都是技巧考验，刷新纪录，争夺金牌。',
     play: '开始', back: '返回', retry: '重试', hub: '街机厅',
@@ -50,6 +52,7 @@ const TEXT = {
       stack:  ['Tower Stack', '叠叠高'],
       dash:   ['Pixel Dash', '像素冲刺'],
       squash: ['Bug Squash', '拍虫子'],
+      memory: ['Color Echo', '颜色回声'],
     },
     instr: {
       flap:   '点击让小鸟扇翅，穿过缝隙。',
@@ -58,9 +61,10 @@ const TEXT = {
       stack:  '点击放下方块，把塔叠得更高。',
       dash:   '点击跳跃，越过所有障碍。',
       squash: '在虫子钻回洞前拍中它们，千万别拍到炸弹。',
+      memory: '观察闪烁顺序，再按相同顺序点击。',
     },
     unit: {
-      flap: '个', catch: '个', reflex: '次', stack: '层', dash: '米', squash: '只',
+      flap: '个', catch: '个', reflex: '次', stack: '层', dash: '米', squash: '只', memory: '轮',
     },
   },
 };
