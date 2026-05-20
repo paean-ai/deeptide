@@ -7,8 +7,9 @@ reaction-arcade genre alongside the other `samples/` pixel games.
 ## Features
 
 - An 8-field campaign that speeds up and turns nastier as it goes.
-- Three critter types: gophers score, rare golden gophers score big, and bombs
-  cost a life if you bonk them.
+- Four critter types: gophers score, rare golden gophers score big, bombs
+  cost a life if you bonk them, and the new purple **owl** scores 15 ×
+  combo AND adds **+5 seconds** to the timer so a fading run can recover.
 - A combo multiplier (up to 5×) builds as you land bonks and breaks if you let
   a critter slip away or hit a bomb.
 - Beat the score goal before the timer runs out; three lives, three bombs and

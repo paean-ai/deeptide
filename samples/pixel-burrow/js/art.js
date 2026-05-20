@@ -4,6 +4,7 @@ const COL = {
   dirt: '#7a5230', dirtDark: '#5c3d22', hole: '#241608', holeRim: '#3e2a14',
   gopher: '#c98a4a', gopherDark: '#9a6634', golden: '#ffd23e', goldenDark: '#c89a17',
   bomb: '#3a3f4c', bombDark: '#22252e', fuse: '#ff7a3a',
+  owl: '#8a7fc4', owlDark: '#5a527a',
   belly: '#f0dcc0', eye: '#1a1208',
 };
 
@@ -94,8 +95,10 @@ function drawCritter(ctx, cx, cy, rw, rh, c) {
     ctx.arc(cx + 7, topY - bodyH * 0.16, 3.5, 0, Math.PI * 2);
     ctx.fill();
   } else {
-    const dark = c.type === 'golden' ? COL.goldenDark : COL.gopherDark;
-    const main = c.type === 'golden' ? COL.golden : COL.gopher;
+    const dark = c.type === 'golden' ? COL.goldenDark :
+                 c.type === 'owl'    ? COL.owlDark    : COL.gopherDark;
+    const main = c.type === 'golden' ? COL.golden :
+                 c.type === 'owl'    ? COL.owl    : COL.gopher;
     ctx.fillStyle = dark;
     ctx.fillRect(cx - bodyW / 2 - 3, topY + 2, bodyW + 6, bodyH);
     ctx.fillStyle = main;

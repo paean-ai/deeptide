@@ -4,20 +4,22 @@
 const VW = 360, VH = 480;
 const BURROWS = 9;   // 3x3
 
-// type: gopher (common), golden (rare bonus), bomb (never tap)
+// type: gopher (common), golden (rare bonus), bomb (never tap), owl
+// (rare; +5 seconds of timer on a clean bonk so a fading run can recover).
 const LEVELS = [
-  { name: ['Sprout Field', '新芽田'], seed: 11, target: 800,  duration: 40, spawn: 1.00, up: 1.5,  bomb: 0.06, gold: 0.10 },
-  { name: ['Clover Lawn', '苜蓿坪'],  seed: 27, target: 950,  duration: 40, spawn: 0.90, up: 1.4,  bomb: 0.08, gold: 0.10 },
-  { name: ['Turnip Patch', '萝卜地'], seed: 44, target: 1150,  duration: 42, spawn: 0.80, up: 1.3,  bomb: 0.10, gold: 0.11 },
-  { name: ['Pumpkin Plot', '南瓜园'], seed: 63, target: 1350,  duration: 42, spawn: 0.74, up: 1.2,  bomb: 0.12, gold: 0.12 },
-  { name: ['Berry Thicket', '莓丛'],  seed: 88, target: 1300,  duration: 44, spawn: 0.66, up: 1.1,  bomb: 0.14, gold: 0.12 },
-  { name: ['Orchard Row', '果园畦'],  seed: 115, target: 1600, duration: 44, spawn: 0.60, up: 1.05, bomb: 0.16, gold: 0.12 },
-  { name: ['Meadow Maze', '草甸阵'],  seed: 147, target: 1900, duration: 45, spawn: 0.55, up: 0.95, bomb: 0.18, gold: 0.13 },
-  { name: ['Harvest Moon', '丰收月'], seed: 182, target: 2200, duration: 48, spawn: 0.50, up: 0.90, bomb: 0.20, gold: 0.13 },
+  { name: ['Sprout Field', '新芽田'], seed: 11, target: 800,  duration: 40, spawn: 1.00, up: 1.5,  bomb: 0.06, gold: 0.10, owl: 0.04 },
+  { name: ['Clover Lawn', '苜蓿坪'],  seed: 27, target: 950,  duration: 40, spawn: 0.90, up: 1.4,  bomb: 0.08, gold: 0.10, owl: 0.05 },
+  { name: ['Turnip Patch', '萝卜地'], seed: 44, target: 1150,  duration: 42, spawn: 0.80, up: 1.3,  bomb: 0.10, gold: 0.11, owl: 0.05 },
+  { name: ['Pumpkin Plot', '南瓜园'], seed: 63, target: 1350,  duration: 42, spawn: 0.74, up: 1.2,  bomb: 0.12, gold: 0.12, owl: 0.06 },
+  { name: ['Berry Thicket', '莓丛'],  seed: 88, target: 1300,  duration: 44, spawn: 0.66, up: 1.1,  bomb: 0.14, gold: 0.12, owl: 0.06 },
+  { name: ['Orchard Row', '果园畦'],  seed: 115, target: 1600, duration: 44, spawn: 0.60, up: 1.05, bomb: 0.16, gold: 0.12, owl: 0.07 },
+  { name: ['Meadow Maze', '草甸阵'],  seed: 147, target: 1900, duration: 45, spawn: 0.55, up: 0.95, bomb: 0.18, gold: 0.13, owl: 0.07 },
+  { name: ['Harvest Moon', '丰收月'], seed: 182, target: 2200, duration: 48, spawn: 0.50, up: 0.90, bomb: 0.20, gold: 0.13, owl: 0.08 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
-const SCORE = { gopher: 10, golden: 50 };
+const SCORE = { gopher: 10, golden: 50, owl: 15 };
+const OWL_TIME_BONUS = 5;
 const COMBO_MAX = 5;
 const START_LIVES = 3;
 
@@ -50,11 +52,16 @@ function spawnCritter(s) {
   if (!free.length) return;
   const i = free[(s.rng() * free.length) | 0];
   const roll = s.rng();
+  const owlChance = s.cfg.owl || 0;
   let type;
   if (roll < s.cfg.bomb) type = 'bomb';
   else if (roll < s.cfg.bomb + s.cfg.gold) type = 'golden';
+  else if (roll < s.cfg.bomb + s.cfg.gold + owlChance) type = 'owl';
   else type = 'gopher';
-  const life = type === 'golden' ? s.cfg.up * 0.72 : type === 'bomb' ? s.cfg.up * 1.15 : s.cfg.up;
+  // Owls stay up a touch longer than gophers; goldens are quick; bombs linger.
+  const life = type === 'golden' ? s.cfg.up * 0.72 :
+               type === 'bomb'   ? s.cfg.up * 1.15 :
+               type === 'owl'    ? s.cfg.up * 1.0  : s.cfg.up;
   s.burrows[i] = { type, age: 0, life, maxlife: life };
   s.popped++;
 }
@@ -104,6 +111,8 @@ function bonk(s, i) {
   s.combo = Math.min(COMBO_MAX, s.combo + 1);
   s.hits++;
   s.bonked += SCORE[c.type];
+  // Owls additionally extend the timer.
+  if (c.type === 'owl') s.timeLeft += OWL_TIME_BONUS;
   return gain;
 }
 
