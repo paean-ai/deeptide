@@ -17,6 +17,9 @@ const LEVELS = [
   { name: ['Galaxy',  '星系'],  n: 6, k: 1, seed: 813  },
   { name: ['Cluster', '星团'],  n: 7, k: 1, seed: 1413 },
   { name: ['Quasar',  '类星'],  n: 8, k: 1, seed: 1714 },
+  { name: ['Pulsar',  '脉冲星'], n: 8,  k: 2, seed: 201 },
+  { name: ['Supernova', '超新星'], n: 9, k: 2, seed: 401 },
+  { name: ['Singularity', '奇点'], n: 10, k: 2, seed: 622 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

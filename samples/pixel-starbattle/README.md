@@ -8,8 +8,9 @@ A fresh placement-logic puzzle alongside the other `samples/` pixel games.
 
 ## Features
 
-- 6-puzzle campaign across 5×5 → 8×8 grids (Sky → Quasar), all with K=1
-  stars per row/col/region. Every puzzle is procedurally generated and
+- 9-puzzle campaign across 5×5 → 10×10 grids (Sky → Singularity) — the
+  first six K=1, then a K=2 tier (two stars per row/col/region) up to a
+  10×10. Every puzzle is procedurally generated and
   **verified** to have exactly one solution by a row-by-row backtracking
   solver (per-row star quota + per-col / per-region cap + no-diagonal
   rule + a `c+2` next-column lower bound that prunes adjacent placements
