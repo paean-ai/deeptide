@@ -16,6 +16,9 @@ const LEVELS = [
   { name: ['Vault', '秘库'],   seed: 540, n: 6 },
   { name: ['Nexus', '枢印'],   seed: 680, n: 6 },
   { name: ['Labyrinth', '迷阵'], seed: 812, n: 7 },
+  { name: ['Bastion', '壁垒'], seed: 1105, n: 8 },
+  { name: ['Citadel', '城塞'], seed: 1028, n: 8 },
+  { name: ['Sanctum', '圣所'], seed: 1000, n: 9 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

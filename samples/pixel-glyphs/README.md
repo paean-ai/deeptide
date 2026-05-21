@@ -6,8 +6,8 @@ toggle-logic genre alongside the other `samples/` pixel games.
 
 ## Features
 
-- 8-level campaign on growing grids (3×3 up to 7×7) — Nexus (6×6) and
-  Labyrinth (7×7) cap the run.
+- 11-level campaign on growing grids (3×3 up to 9×9) — the 8×8
+  Bastion and Citadel and the 9×9 Sanctum cap the run.
 - Each lock is scrambled by pressing a random set of glyphs from the solved
   board, so it is **always solvable by construction**.
 - A GF(2) linear-algebra solver computes the true minimum-press solution for
