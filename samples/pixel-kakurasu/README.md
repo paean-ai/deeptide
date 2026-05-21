@@ -9,7 +9,7 @@ arithmetic puzzles in `samples/` (kenken, kakuro).
 
 ## Features
 
-- 6-puzzle campaign on 4×4 → 6×6 grids (**Brook → Ocean**).
+- 9-puzzle campaign on 4×4 → 8×8 grids (**Brook → Abyss**).
 - Every puzzle is procedurally generated and **verified** to have
   exactly one solution by a row-by-row subset solver that enumerates
   every subset of each row whose column-index sum equals the row

@@ -21,6 +21,9 @@ const LEVELS = [
   { name: ['Lake',    '湖泊'], n: 5, seed: 531 },
   { name: ['Sea',     '大海'], n: 6, seed: 631 },
   { name: ['Ocean',   '汪洋'], n: 6, seed: 733 },
+  { name: ['Gulf',    '海湾'], n: 7, seed: 801 },
+  { name: ['Expanse', '浩瀚'], n: 7, seed: 907 },
+  { name: ['Abyss',   '深渊'], n: 8, seed: 1013 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
