@@ -120,7 +120,11 @@ class PlatformGame {
       x += gap;
       this.platforms.push({ x, y, w, h: 24 });
       if (rand() < 0.45) this.hazards.push({ x: x + w * 0.35, y: y - 8, w: Math.min(70, w * 0.35), h: 10 });
-      if (rand() < 0.64) this.spawnEnemy(x + w * (0.35 + rand() * 0.35), y, rand() < 0.38 ? 'drone' : 'crawler');
+      if (rand() < 0.64) {
+        const r = rand();
+        const kind = r < 0.30 ? 'drone' : r < 0.78 ? 'crawler' : 'turret';
+        this.spawnEnemy(x + w * (0.35 + rand() * 0.35), y, kind);
+      }
       for (let i = 0; i < 2 + Math.floor(rand() * 3); i++) {
         this.pickups.push({ x: x + 24 + rand() * (w - 48), y: y - 42 - rand() * 35, r: 7, kind: 'coin', taken: false });
       }
@@ -149,11 +153,15 @@ class PlatformGame {
 
   spawnEnemy(x, floorY, kind) {
     const power = 1 + this.stage * 0.16;
+    // Turret: stationary heavy emplacement — twice the HP of a crawler,
+    // same contact damage, no horizontal movement.
+    const vx  = kind === 'drone' ? 0.8 : kind === 'turret' ? 0 : 0.55;
+    const w   = kind === 'drone' ? 26 : kind === 'turret' ? 32 : 30;
+    const h   = kind === 'drone' ? 28 : kind === 'turret' ? 30 : 32;
+    const hp  = Math.floor((kind === 'drone' ? 28 : kind === 'turret' ? 84 : 42) * power);
+    const dmg = Math.floor((kind === 'drone' ? 10 : kind === 'turret' ? 14 : 14) * power);
     this.enemies.push({
-      x, y: floorY, vx: kind === 'drone' ? 0.8 : 0.55, w: kind === 'drone' ? 26 : 30, h: kind === 'drone' ? 28 : 32,
-      hp: Math.floor((kind === 'drone' ? 28 : 42) * power),
-      maxHp: Math.floor((kind === 'drone' ? 28 : 42) * power),
-      dmg: Math.floor((kind === 'drone' ? 10 : 14) * power),
+      x, y: floorY, vx, w, h, hp, maxHp: hp, dmg,
       kind, alive: true, hitCd: 0,
     });
   }
@@ -252,6 +260,8 @@ class PlatformGame {
       if (e.kind === 'drone') {
         e.x += Math.sin((performance.now() / 600) + e.maxHp) * 0.45 * dt;
         e.y += Math.cos((performance.now() / 480) + e.maxHp) * 0.25 * dt;
+      } else if (e.kind === 'turret') {
+        // Stationary emplacement — no movement, just a brick wall to chew through.
       } else {
         e.x += e.vx * dt;
         const onPlat = this.platforms.find(pl => e.x > pl.x + 16 && e.x < pl.x + pl.w - 16 && Math.abs(e.y - pl.y) < 4);

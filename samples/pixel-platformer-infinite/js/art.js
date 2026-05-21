@@ -99,6 +99,26 @@ function drawEnemy(ctx, enemy, camX) {
     R(x - 14, cy + 9, 3, 6 + bob, '#7ad0ff');
     R(x + 11, cy + 9, 3, 6 + bob, '#7ad0ff');
     ctx.globalAlpha = 1;
+  } else if (enemy.kind === 'turret') {
+    // Stationary heavy turret — a brass pillar with a rotating cannon eye.
+    const top = y - enemy.h;
+    // Base.
+    R(x - 14, y - 8, 28, 8, '#3a2a14');
+    R(x - 14, y - 8, 28, 2, '#7a5a2a');
+    // Pillar.
+    R(x - 10, top + 6, 20, enemy.h - 14, '#7a6048');
+    R(x - 10, top + 6, 20, 3, '#a08060');
+    R(x - 10, y - 11, 20, 2, '#2a1c10');
+    // Dome.
+    R(x - 8, top, 16, 8, '#a08060');
+    R(x - 7, top + 1, 14, 2, '#d4b486');
+    // Cannon eye — rotates to face the player.
+    const eyeFlash = (Math.floor(t * 2) % 2) ? '#ff7a3a' : '#ffd23e';
+    R(x - 3, top + 4, 6, 4, '#1c1014');
+    R(x - 2, top + 5, 4, 2, eyeFlash);
+    // Side bolts.
+    R(x - 12, top + 12, 3, 3, '#3a2a14');
+    R(x + 9,  top + 12, 3, 3, '#3a2a14');
   } else {
     const step = Math.floor(t * 11 + enemy.x * 0.1) % 2;
     const top = y - enemy.h;

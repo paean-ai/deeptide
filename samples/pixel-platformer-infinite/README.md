@@ -7,7 +7,7 @@ Dependency-free HTML Canvas pixel platformer sample.
 - Infinite procedurally generated side-scrolling stages.
 - Infinite repeatable skill upgrades with three-card level-up choices.
 - Keyboard and mobile touch controls.
-- Pixel-art characters, enemies, platforms, parallax city layers, particles, and damage numbers.
+- Pixel-art characters, three enemy archetypes (sky-drone, ground-crawler, and a brass turret that does not move but takes twice the hits), platforms, parallax city layers, particles, and damage numbers.
 - Responsive 16:9 desktop layout and full-screen mobile layout with safe-area support.
 
 ## Run
