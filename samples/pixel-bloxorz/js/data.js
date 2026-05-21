@@ -80,14 +80,44 @@ const LEVELS = [
       '....',
     ],
   },
-  // 6. Vault — finale: a 4x3 with a weak tile that turns this into a
-  // ten-move brain-twister.
+  // 6. Vault — a 4x3 with a weak tile that turns this into a ten-move
+  // brain-twister.
   {
     name: ['Vault', '秘室'], par: 10,
     rows: [
       '....',
       '.S..',
       '.w.G',
+    ],
+  },
+  // 7. Switchback — a bare 4x3 with one corner clipped; the goal sits a
+  // tile away yet the only standing approach winds thirteen rolls.
+  {
+    name: ['Switchback', '回折'], par: 13,
+    rows: [
+      '....',
+      '..S.',
+      ' .G.',
+    ],
+  },
+  // 8. Catacomb — a 5x4 vault: a weak tile and a void box the route in.
+  {
+    name: ['Catacomb', '地窟'], par: 16,
+    rows: [
+      '  w..',
+      '..G..',
+      '.....',
+      '.S ..',
+    ],
+  },
+  // 9. Keystone — finale: a long 6x3 gauntlet of weak tiles down the far
+  // wall; nineteen rolls to set the block upright on the goal.
+  {
+    name: ['Keystone', '拱心石'], par: 19,
+    rows: [
+      '...w.G',
+      '.....w',
+      'S. ..w',
     ],
   },
 ];
