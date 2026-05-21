@@ -31,7 +31,7 @@ const PALETTE = {
 // Geometry: grid centred + 1-row edge strip on all sides for probe buttons.
 // Total layout = (n+2) x (n+2) cells. Cell size adapts to n.
 function gridGeometry(n) {
-  const cell = n === 6 ? 36 : n === 7 ? 32 : 28;   // 6 -> 36, 7 -> 32, 8 -> 28
+  const cell = n === 6 ? 36 : n === 7 ? 32 : n === 8 ? 28 : 25;  // 6/7/8/9
   const total = (n + 2) * cell;
   const ox = ((VW - total) / 2) | 0;
   const oy = 70;

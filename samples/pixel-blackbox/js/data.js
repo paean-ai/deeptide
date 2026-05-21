@@ -17,7 +17,7 @@
 const VW = 360, VH = 480;
 
 // ---- levels ------------------------------------------------------------
-// 6 boards: 6x6 / 7x7 / 8x8 with 3 / 4 / 5 atoms.
+// 9 boards: 6x6 / 7x7 / 8x8 / 9x9 with 3 .. 7 atoms.
 const LEVELS = [
   { name: ['Atom',     '微粒'], n: 6, atoms: 3, seed: 6103 },
   { name: ['Cluster',  '团簇'], n: 6, atoms: 4, seed: 6204 },
@@ -25,6 +25,9 @@ const LEVELS = [
   { name: ['Quasar',   '类星体'], n: 7, atoms: 5, seed: 7406 },
   { name: ['Galaxy',   '星系'], n: 8, atoms: 5, seed: 8507 },
   { name: ['Singularity','奇点'], n: 8, atoms: 6, seed: 8608 },
+  { name: ['Cosmos',   '寰宇'], n: 9, atoms: 5, seed: 9709 },
+  { name: ['Void',     '虚空'], n: 9, atoms: 6, seed: 9810 },
+  { name: ['Event Horizon', '视界'], n: 9, atoms: 7, seed: 9911 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

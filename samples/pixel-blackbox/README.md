@@ -9,9 +9,10 @@ genre alongside the other `samples/` pixel games.
 
 ## Features
 
-- 6-puzzle campaign **Atom → Singularity** scaling grid size 6 → 8 and
-  atom count 3 → 6, all stored as a seeded layout so each level is
-  reproducible.
+- 9-puzzle campaign **Atom → Event Horizon** scaling grid size 6 → 9
+  and atom count 3 → 7, all stored as a seeded layout so each level is
+  reproducible. The 9×9 **Cosmos, Void and Event Horizon** boards
+  give the most probe routes to reason over.
 - Faithful Black Box ray simulation: HIT when the next cell holds an
   atom; **edge-reflect** when the entry cell already has an atom in
   the perpendicular-side cell; **deflect 90°** away from a single
@@ -26,12 +27,12 @@ genre alongside the other `samples/` pixel games.
   to `localStorage`.
 - English / 中文 toggle.
 - 360 × 480 responsive frame, `image-rendering: pixelated`, mobile-first.
-- Verified: 52 mechanics checks — every edge-index maps to the right
-  entry cell and direction; empty grid passes through; direct atom
-  HIT; edge-reflect; deflect; double-side bounce-back; pass-through
-  entry + exit share a label; reveal scoring formula; correct /
-  incorrect / probe-count tallies; every level keeps its atoms on
-  interior cells (so probes can't trivially edge-reflect every shot).
+- Verified: 75 checks — all 9 levels place the right number of
+  distinct atoms, all on interior cells (so probes can't trivially
+  edge-reflect every shot); every grid (including the new 9×9 boards)
+  fits the 360×480 frame; the generator is deterministic; every edge
+  probe resolves to a result; plus a load check that all four scripts
+  run cleanly.
 
 ## Run
 
