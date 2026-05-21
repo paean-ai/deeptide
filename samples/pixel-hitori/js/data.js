@@ -17,6 +17,9 @@ const LEVELS = [
   { name: ['Plaza', '广场'],   seed: 161, n: 6 },
   { name: ['Citadel', '城堡'], seed: 248, n: 7 },
   { name: ['Capital', '都城'], seed: 351, n: 7 },
+  { name: ['Province', '行省'], seed: 801, n: 7 },
+  { name: ['Realm', '王畿'],   seed: 911, n: 7 },
+  { name: ['Empire', '帝京'],  seed: 1021, n: 8 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

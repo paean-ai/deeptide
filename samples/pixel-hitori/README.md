@@ -7,7 +7,7 @@ the other `samples/` pixel games.
 
 ## Features
 
-- 6-puzzle campaign on growing grids (5×5 up to 7×7).
+- 9-puzzle campaign on growing grids (5×5 up to 8×8).
 - Each level seeds a Latin square, sprinkles a sparse pattern of duplicates,
   then a backtracking solver **verifies the puzzle has exactly one valid
   shading**.

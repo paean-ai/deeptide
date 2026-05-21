@@ -1,0 +1,8 @@
+/* Pixel Stargaze - responsive 360:480 portrait shell. */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; background: #06060f; color: #f3f1e6; font-family: monospace; overflow: hidden; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; overscroll-behavior: none; touch-action: none; }
+#stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 8px; }
+.frame { position: relative; width: min(100vw - 16px, calc((100vh - 16px) * 0.75)); aspect-ratio: 360 / 480; border: 2px solid #39334c; box-shadow: 0 0 0 2px #07060c, 0 8px 24px rgba(0,0,0,0.5); background: #0a0b1f; }
+canvas#view { width: 100%; height: 100%; display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+@media (orientation: landscape) { .frame { width: calc((100vh - 16px) * 0.75); } }
+@media (min-width: 900px) { .frame { width: 480px; } }
