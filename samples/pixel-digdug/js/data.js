@@ -28,6 +28,9 @@ const LEVELS = [
   { name: ['Cavern',    '洞窟'], enemies: 4, rocks: 3, enemySpeed: 2.7 },
   { name: ['Abyss',     '深渊'], enemies: 5, rocks: 4, enemySpeed: 3.0 },
   { name: ['Mantle',    '地幔'], enemies: 6, rocks: 5, enemySpeed: 3.3 },
+  { name: ['Magma',     '岩浆'], enemies: 6, rocks: 5, enemySpeed: 3.6 },
+  { name: ['Core',      '地核'], enemies: 7, rocks: 6, enemySpeed: 3.9 },
+  { name: ['Inferno',   '炼狱'], enemies: 7, rocks: 6, enemySpeed: 4.2 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

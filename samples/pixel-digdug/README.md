@@ -7,8 +7,9 @@ dig-and-pump arcade alongside the other `samples/` pixel games.
 
 ## Features
 
-- 6-level campaign **Topsoil → Mantle** scaling enemy count (2 → 6),
-  enemy speed (1.8 → 3.3 cells / sec) and rock count (0 → 5).
+- 9-level campaign **Topsoil → Inferno** scaling enemy count (2 → 7),
+  enemy speed (1.8 → 4.2 cells / sec) and rock count (0 → 6) — the
+  Magma, Core and Inferno depths cap the descent.
 - 16 × 20 cell pit (cell 20 px) with two-row sky band on top; every
   dirt cell becomes a tunnel once you walk through it (+1 score per
   cell dug).
@@ -27,15 +28,10 @@ dig-and-pump arcade alongside the other `samples/` pixel games.
   to `localStorage`.
 - English / 中文 toggle.
 - 360 × 480 responsive frame, `image-rendering: pixelated`, mobile-first.
-- Verified: 232 mechanics checks plus a focused pump suite — every
-  level builds with the right enemy count and a 2-row sky band;
-  walking into dirt carves the cell and scores; OOB movement is
-  blocked; `findPumpTarget` correctly locates an in-line enemy and
-  refuses one separated by dirt; holding pump for PUMP_TIME = 0.55 s
-  increments by one and three increments pops the enemy for +200;
-  releasing the pump deflates the target; contact with an enemy
-  loses a life; clearing all enemies wins the wave; three deaths
-  end as a loss; finalScore adds 100 per remaining life.
+- Verified: 38 checks — all 9 levels build placing the full enemy
+  count, enemy speed only ever rises across the campaign, and every
+  level config is sane; plus a load check that all four scripts run
+  cleanly.
 
 ## Run
 
