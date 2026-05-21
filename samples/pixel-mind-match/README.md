@@ -7,8 +7,8 @@ puzzle genre alongside the other `samples/` pixel games.
 ## Features
 
 - Classic flip-and-match memory play with crisp horizontal card-flip animation.
-- 18 distinct pixel creatures (6 shapes x 3 colour variants).
-- 7 levels with growing grids (3x4 up to 6x6) and a level-select screen.
+- 24 distinct pixel creatures (6 shapes x 4 colour variants) so even the largest 6 x 8 board never repeats a sprite.
+- 9 levels with growing grids (3x4 up to 6x8) and a level-select screen.
 - A short **memorise** preview shows the board face-up at the start of a level.
 - Move counter, consecutive-match combo, per-level best moves and a 1-3 star
   rating.
