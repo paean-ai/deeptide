@@ -22,6 +22,9 @@ const LEVELS = [
   { name: ['Solenoid', '螺线'], W: 6, H: 4, seed: 531 },
   { name: ['Reactor',  '反应堆'], W: 6, H: 6, seed: 631 },
   { name: ['Tokamak',  '托卡马克'], W: 6, H: 6, seed: 733 },
+  { name: ['Dynamo',   '发电机'], W: 6, H: 8, seed: 805 },
+  { name: ['Pulsar',   '脉冲星'], W: 8, H: 6, seed: 913 },
+  { name: ['Magnetar', '磁星'],   W: 8, H: 8, seed: 1029 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

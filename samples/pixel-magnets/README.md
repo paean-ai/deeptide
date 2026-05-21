@@ -9,8 +9,8 @@ entry alongside the other `samples/` pixel games.
 
 ## Features
 
-- 6-puzzle campaign across 4×4 → 6×6 boards with one rectangle
-  (4×6, 6×4) in between (must be even cells — a domino tiling
+- 9-puzzle campaign across 4×4 → 8×8 boards with rectangles
+  (4×6, 6×4, 6×8, 8×6) in between (must be even cells — a domino tiling
   requires `W × H` to be even, so odd-square `n²` like 5×5 is
   impossible by construction).
 - Every puzzle is procedurally generated and **verified** to have
