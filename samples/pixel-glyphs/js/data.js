@@ -14,6 +14,8 @@ const LEVELS = [
   { name: ['Cipher', '密印'],  seed: 255, n: 5 },
   { name: ['Lattice', '阵图'], seed: 392, n: 5 },
   { name: ['Vault', '秘库'],   seed: 540, n: 6 },
+  { name: ['Nexus', '枢印'],   seed: 680, n: 6 },
+  { name: ['Labyrinth', '迷阵'], seed: 812, n: 7 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
