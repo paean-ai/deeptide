@@ -1,13 +1,14 @@
 # Pixel Rally
 
-A pixel-art **Pong**. Six bouts against a CPU opponent that gets faster and
+A pixel-art **Pong**. Nine bouts against a CPU opponent that gets faster and
 sharper each match. A fresh paddle-and-ball arcade genre alongside the other
 `samples/` pixel games.
 
 ## Features
 
-- 6 opponents on a difficulty curve from Rookie to Master — each tougher CPU
-  is faster and predicts the ball's bounce path further ahead.
+- 9 opponents on a difficulty curve from Rookie to Legend — each tougher CPU
+  is faster and predicts the ball's bounce path further ahead; the Ace,
+  Phenom and Legend rivals barely miss.
 - First to 5 wins the match. The ball speeds up slightly with every paddle
   hit and a hit off-centre angles the return — go for the edge to defeat the
   predictive CPUs.
@@ -15,9 +16,9 @@ sharper each match. A fresh paddle-and-ball arcade genre alongside the other
   desktop.
 - Per-bout completion marks and progressive unlocks, English/中文 toggle,
   saved to `localStorage`.
-- Verified: 10 mechanics checks (serve launch, wall and paddle bounces,
-  scoring, match end, CPU tracking) + a bot test that wins L1 with an
-  alternating edge-angle strategy + 2 UI/input checks.
+- Verified: 38 checks — all 9 bouts build, CPU speed and ball speed only
+  ever rise across the campaign, and every opponent's predict factor stays
+  in range; plus a load check that all four scripts run cleanly.
 
 ## Run
 

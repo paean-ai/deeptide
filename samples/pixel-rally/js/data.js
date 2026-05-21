@@ -18,6 +18,9 @@ const LEVELS = [
   { name: ['Pro', '职业'],      seed: 161, cpuSpeed: 235, predict: 0.65, ballSpeed: 305 },
   { name: ['Champion', '冠军'], seed: 248, cpuSpeed: 270, predict: 0.80, ballSpeed: 330 },
   { name: ['Master', '宗师'],   seed: 356, cpuSpeed: 305, predict: 0.92, ballSpeed: 360 },
+  { name: ['Ace', '王牌'],      seed: 471, cpuSpeed: 335, predict: 0.95, ballSpeed: 388 },
+  { name: ['Phenom', '奇才'],   seed: 588, cpuSpeed: 365, predict: 0.97, ballSpeed: 416 },
+  { name: ['Legend', '传奇'],   seed: 703, cpuSpeed: 395, predict: 0.99, ballSpeed: 444 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
