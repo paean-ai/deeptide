@@ -14,13 +14,18 @@ const EXPLOSION_LIFE = 0.85;
 const GROW_TIME = 0.28;
 const WAVE_END_PAUSE = 0.6;
 
+// `splitChance` is the chance a given incoming missile is a MIRV that
+// splits into two fresh warheads partway down - kill it before it does.
 const LEVELS = [
-  { name: ['First Wave', '首波'],   seed: 11,  count: 8,  speed: 50, spawn: 1.6 },
-  { name: ['Skywatch', '巡天'],     seed: 41,  count: 12, speed: 60, spawn: 1.4 },
-  { name: ['Crimson Storm', '红潮'], seed: 89,  count: 16, speed: 70, spawn: 1.2 },
-  { name: ['Sky Siege', '天围'],    seed: 156, count: 20, speed: 80, spawn: 1.05 },
-  { name: ['Inferno', '炼狱'],      seed: 244, count: 25, speed: 88, spawn: 0.9 },
-  { name: ['Last Stand', '死守'],   seed: 357, count: 26, speed: 90, spawn: 0.88 },
+  { name: ['First Wave', '首波'],   seed: 11,  count: 8,  speed: 50, spawn: 1.6,  splitChance: 0 },
+  { name: ['Skywatch', '巡天'],     seed: 41,  count: 12, speed: 60, spawn: 1.4,  splitChance: 0 },
+  { name: ['Crimson Storm', '红潮'], seed: 89,  count: 16, speed: 70, spawn: 1.2,  splitChance: 0 },
+  { name: ['Sky Siege', '天围'],    seed: 156, count: 20, speed: 80, spawn: 1.05, splitChance: 0 },
+  { name: ['Inferno', '炼狱'],      seed: 244, count: 25, speed: 88, spawn: 0.9,  splitChance: 0 },
+  { name: ['Last Stand', '死守'],   seed: 357, count: 26, speed: 90, spawn: 0.88, splitChance: 0 },
+  { name: ['MIRV Rain', '裂变雨'],  seed: 471, count: 24, speed: 84, spawn: 1.0,  splitChance: 0.28 },
+  { name: ['Hydra Sky', '九头空'],  seed: 588, count: 27, speed: 90, spawn: 0.92, splitChance: 0.42 },
+  { name: ['Armageddon', '末日'],   seed: 701, count: 30, speed: 95, spawn: 0.84, splitChance: 0.55 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
@@ -61,11 +66,29 @@ function spawnIncoming(s) {
   const dx = tx - sx, dy = GROUND_Y;
   const dist = Math.hypot(dx, dy);
   const v = s.cfg.speed * (0.85 + s.rng() * 0.3);
+  // Some missiles are MIRVs that split partway down.
+  const isMirv = s.rng() < (s.cfg.splitChance || 0);
   s.incoming.push({
     sx, sy: 0, x: sx, y: 0, tx, ty: GROUND_Y,
     vx: dx / dist * v, vy: dy / dist * v, alive: true,
+    split: isMirv ? 2 : 0,
+    splitY: isMirv ? 150 + s.rng() * 100 : 0,
   });
   s.spawned++;
+}
+
+// A MIRV warhead spawned mid-air when its parent splits. Aimed afresh at
+// a city; it never splits again.
+function spawnChild(s, x, y) {
+  const tx = CITY_X[(s.rng() * CITY_X.length) | 0] + (s.rng() - 0.5) * 16;
+  const dx = tx - x, dy = GROUND_Y - y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const v = s.cfg.speed * (0.9 + s.rng() * 0.3);
+  return {
+    sx: x, sy: y, x, y, tx, ty: GROUND_Y,
+    vx: dx / dist * v, vy: dy / dist * v, alive: true,
+    split: 0, splitY: 0,
+  };
 }
 
 // ---- player action ------------------------------------------------------
@@ -94,14 +117,22 @@ function tick(s, dt) {
     s.spawnTimer = s.cfg.spawn * (0.7 + s.rng() * 0.6);
   }
   // move incoming
+  const children = [];
   for (const m of s.incoming) {
     if (!m.alive) continue;
     m.x += m.vx * dt; m.y += m.vy * dt;
+    if (m.split > 0 && m.y >= m.splitY) {
+      // MIRV splits: the parent is consumed, two warheads take its place.
+      for (let k = 0; k < m.split; k++) children.push(spawnChild(s, m.x, m.y));
+      m.alive = false;
+      continue;
+    }
     if (m.y >= GROUND_Y) {
       m.alive = false;
       damageGround(s, m.x);
     }
   }
+  for (const c of children) s.incoming.push(c);
   // move counter-missiles
   for (const c of s.counters) {
     if (c.done) continue;

@@ -71,13 +71,23 @@ function drawWorld(ctx, s) {
   // incoming trails + heads
   for (const m of s.incoming) {
     if (!m.alive) continue;
-    ctx.strokeStyle = COL.incomingTrail;
+    const mirv = m.split > 0;
+    ctx.strokeStyle = mirv ? 'rgba(255,190,70,0.55)' : COL.incomingTrail;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(m.sx, m.sy); ctx.lineTo(m.x, m.y);
     ctx.stroke();
-    ctx.fillStyle = COL.incoming;
-    ctx.fillRect(m.x - 2, m.y - 2, 4, 4);
+    if (mirv) {
+      // MIRV warhead: a brighter, pulsing amber diamond - shoot it early.
+      const pulse = 2 + (Math.sin(m.y * 0.3) > 0 ? 1 : 0);
+      ctx.fillStyle = '#ffd24a';
+      ctx.fillRect(m.x - 3 - pulse / 2, m.y - 3 - pulse / 2, 6 + pulse, 6 + pulse);
+      ctx.fillStyle = '#ff8a3a';
+      ctx.fillRect(m.x - 1, m.y - 1, 2, 2);
+    } else {
+      ctx.fillStyle = COL.incoming;
+      ctx.fillRect(m.x - 2, m.y - 2, 4, 4);
+    }
   }
   // counter trails + heads
   for (const c of s.counters) {
