@@ -30,6 +30,9 @@ const LEVELS = [
   { name: ['Maelstrom',  '漩涡'],     seed: 362, big: 5, med: 3, small: 0 },
   { name: ['Tempest',    '风暴眼'],   seed: 491, big: 6, med: 3, small: 4 },
   { name: ['Singularity','奇点'],     seed: 633, big: 4, med: 5, small: 8 },
+  { name: ['Comet Trail', '彗尾'],    seed: 741, big: 5, med: 5, small: 8 },
+  { name: ['Debris Field','残骸场'],  seed: 859, big: 6, med: 6, small: 8 },
+  { name: ['Cosmic Wrath','寰宇之怒'], seed: 977, big: 6, med: 7, small: 10 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
