@@ -19,6 +19,9 @@ const LEVELS = [
   { name: ['Forest', '森林'], seed: 158, n: 7 },
   { name: ['Wildwood', '荒林'], seed: 241, n: 8 },
   { name: ['Old Wood', '老林'], seed: 348, n: 8 },
+  { name: ['Thicket', '密丛'], seed: 801, n: 8 },
+  { name: ['Deepwood', '深林'], seed: 911, n: 9 },
+  { name: ['Primeval', '原林'], seed: 1201, n: 9 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

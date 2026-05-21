@@ -7,7 +7,7 @@ column counts. A fresh place-and-pair logic genre alongside the other
 
 ## Features
 
-- 6-puzzle campaign on growing forests (6×6 up to 8×8).
+- 9-puzzle campaign on growing forests (6×6 up to 9×9).
 - Each level seeds a random pairing of trees and tents, then a most-
   constrained-first backtracking solver **verifies the row / column count
   clues have exactly one solution**.
