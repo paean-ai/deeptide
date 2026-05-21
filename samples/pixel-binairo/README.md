@@ -7,7 +7,7 @@ binary-logic puzzle alongside the other `samples/` pixel games.
 
 ## Features
 
-- 6-puzzle campaign **Spark → Inferno** on 6×6, 8×8 and 10×10 grids.
+- 9-puzzle campaign **Spark → Cataclysm** on 6×6, 8×8 and 10×10 grids.
 - Every puzzle is procedurally generated from a seed and **verified
   uniquely solvable**: a full valid grid is built by backtracking,
   then clues are carved away while a forced-move-propagation +

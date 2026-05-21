@@ -18,6 +18,9 @@ const LEVELS = [
   { name: ['Blaze',  '烈焰'], n: 8,  seed: 8404 },
   { name: ['Pyre',   '火堆'], n: 10, seed: 10505 },
   { name: ['Inferno','炼狱'], n: 10, seed: 10606 },
+  { name: ['Wildfire',  '野火'], n: 10, seed: 801 },
+  { name: ['Firestorm', '火暴'], n: 10, seed: 808 },
+  { name: ['Cataclysm', '浩劫'], n: 10, seed: 815 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
