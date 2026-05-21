@@ -19,6 +19,9 @@ const LEVELS = [
   { name: ['Mesa',      '方山'], n: 5, seed: 531 },
   { name: ['Ridge',     '山脊'], n: 6, seed: 631 },
   { name: ['Summit',    '巅峰'], n: 6, seed: 733 },
+  { name: ['Crag',      '峭壁'], n: 6, seed: 819 },
+  { name: ['Spire',     '尖峰'], n: 6, seed: 811 },
+  { name: ['Apex',      '绝顶'], n: 6, seed: 813 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
