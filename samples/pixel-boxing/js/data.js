@@ -21,6 +21,9 @@ const LEVELS = [
   { name: ['Don Flame',  '烈焰唐'], hp: 120, windup: 0.70, strike: 0.24, hit: 21, color: '#ff5fae' },
   { name: ['Tiger Sanda','虎三打'], hp: 145, windup: 0.60, strike: 0.21, hit: 24, color: '#bda6ff' },
   { name: ['Mr. Pixel',  '像素先生'], hp: 175, windup: 0.50, strike: 0.18, hit: 28, color: '#ffd34a' },
+  { name: ['Steel Vega',  '钢铁维加'], hp: 205, windup: 0.45, strike: 0.17, hit: 31, color: '#7fe0c4' },
+  { name: ['Crusher Cain','粉碎凯恩'], hp: 240, windup: 0.40, strike: 0.16, hit: 35, color: '#ff8a5f' },
+  { name: ['Grand Champ', '卫冕拳王'], hp: 280, windup: 0.36, strike: 0.15, hit: 40, color: '#f0e23a' },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

@@ -7,9 +7,11 @@ rhythm-combat genre alongside the beat-'em-up `pixel-street-brawl`.
 
 ## Features
 
-- 6-bout campaign **Glass Joe → Mr. Pixel** scaling foe HP
-  (60 → 175), hit power (12 → 28) and — critically — wind-up time
-  (1.10 s → 0.50 s), so later foes give far less reaction time.
+- 9-bout campaign **Glass Joe → Grand Champ** scaling foe HP
+  (60 → 280), hit power (12 → 40) and — critically — wind-up time
+  (1.10 s → 0.36 s), so later foes give far less reaction time. The
+  closing trio — Steel Vega, Crusher Cain, Grand Champ — barely
+  telegraph at all.
 - A clean opponent state machine: **idle → windup** (picks a side,
   a glowing arm shows the tell) **→ strike** (the punch lands now)
   **→ stagger** (if you dodged correctly — the counter window) or
@@ -25,13 +27,10 @@ rhythm-combat genre alongside the beat-'em-up `pixel-street-brawl`.
   bout. Per-bout best score saved to `localStorage`.
 - English / 中文 toggle.
 - 360 × 480 responsive frame, `image-rendering: pixelated`, mobile-first.
-- Verified: 36 mechanics checks — every bout builds with the right
-  HP; the foe state machine steps idle → windup → strike; an
-  undodged strike damages the player; a correct dodge staggers the
-  foe and a wrong one does not; a counter punch deals ≥ 26 and
-  builds combo; a jab on an idle foe deals exactly 6; punching into
-  a wind-up deals 0 and resets the combo; blocking cuts damage; KO
-  of the foe wins and player KO loses; you cannot act mid-pose.
+- Verified: 47 checks — all 9 bouts build with the declared foe HP,
+  HP only rises and wind-up time only shrinks across the campaign,
+  every bout starts in a fresh state; plus a load check that all
+  four scripts run cleanly.
 
 ## Run
 
@@ -57,7 +56,7 @@ Then visit `http://127.0.0.1:4337/index.html`.
 - `index.html` — shell + script tags.
 - `css/style.css` — 360:480 responsive frame, `image-rendering: pixelated`.
 - `js/data.js` — opponent state machine, dodge / counter / jab /
-  block resolution, 6 bout definitions, scoring.
+  block resolution, 9 bout definitions, scoring.
 - `js/i18n.js` — English / Chinese strings.
 - `js/art.js` — palette, ring backdrop, foe + player boxers with
   glove poses + wind-up tell glow, HP bars, callouts, control pad.
