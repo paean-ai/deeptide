@@ -9,9 +9,10 @@ games.
 
 ## Features
 
-- 6-match campaign **Rookie → Olympic** with shrinking AI aim sigma
-  (32 → 9 px Gaussian noise on the target landing point) — the
-  Olympic opponent lands almost every stone right on the button.
+- 9-match campaign **Rookie → Flawless** with shrinking AI aim sigma
+  (32 → 3 px Gaussian noise on the target landing point) — the
+  Legend, Grand Slam and Flawless opponents land almost every stone
+  right on the button.
 - Real ball physics — friction (`vel *= 0.32^dt`), gutter / sideline
   bounce (60 % retained), pairwise **elastic** ball-ball collisions
   with overlap correction, 240 Hz substepping inside the variable-dt
@@ -35,12 +36,9 @@ games.
   the next opponent).
 - English / 中文 toggle.
 - 360×480 responsive frame, `image-rendering: pixelated`, mobile-first.
-- Verified: 20 mechanics checks — fresh state shape, tiny / upward
-  drag rejected, valid slingshot launches a stone moving up, physics
-  resolves, turn swaps to AI after the player throw, AI throws +1
-  stone after timer, full match terminates with stones on the ice,
-  every level builds with sane sigma, Olympic AI lands tighter than
-  Rookie (sigma scaling holds).
+- Verified: 29 checks — all 9 matches build with their AI sigma, the
+  sigma only ever tightens across the campaign, and every sigma is
+  sane; plus a load check that all four scripts run cleanly.
 
 ## Run
 

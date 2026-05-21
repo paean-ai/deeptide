@@ -31,6 +31,9 @@ const LEVELS = [
   { name: ['Vice',       '副帅'], aiSigma: 16 },
   { name: ['Champion',   '冠军'], aiSigma: 12 },
   { name: ['Olympic',    '奥运'], aiSigma: 9  },
+  { name: ['Legend',     '传奇'], aiSigma: 7  },
+  { name: ['Grand Slam', '大满贯'], aiSigma: 5 },
+  { name: ['Flawless',   '无瑕'], aiSigma: 3  },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
