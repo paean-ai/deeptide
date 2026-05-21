@@ -20,6 +20,9 @@ const LEVELS = [
   { name: ['Sound',   '海峡'], n: 6, k: 7, seed: 531 },
   { name: ['Trench',  '海沟'], n: 7, k: 7, seed: 631 },
   { name: ['Abyss',   '深渊'], n: 7, k: 8, seed: 733 },
+  { name: ['Maw',     '巨口'], n: 7, k: 8, seed: 801 },
+  { name: ['Fathom',  '深寻'], n: 7, k: 9, seed: 911 },
+  { name: ['Nadir',   '渊底'], n: 8, k: 10, seed: 1009 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

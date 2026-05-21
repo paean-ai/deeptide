@@ -8,7 +8,7 @@ other `samples/` pixel games.
 
 ## Features
 
-- 6-puzzle campaign on growing grids (5×5 → 7×7) with 5–8 regions each.
+- 9-puzzle campaign on growing grids (5×5 → 8×8) with 5–10 regions each.
 - Every puzzle is procedurally generated and **verified** to have exactly
   one solution by a region-by-region backtracking solver that picks one
   domino per region and prunes by:
