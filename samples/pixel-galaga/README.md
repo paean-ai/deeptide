@@ -8,9 +8,11 @@ scroller `pixel-sky-raiders`.
 
 ## Features
 
-- 6-wave campaign **Recon → Galaxy** scaling formation size (5×3 →
-  8×4) and dive cadence (2.6 s → 1.0 s) plus the chance a diving
-  enemy fires a bullet on the way down (35 % → 60 %).
+- 9-wave campaign **Recon → Singularity** scaling formation size
+  (5×3 → 8×4) and dive cadence (2.6 s → 0.60 s) plus the chance a
+  diving enemy fires a bullet on the way down (35 % → 72 %). The
+  closing trio — Armada, Tempest, Singularity — dive almost without
+  pause.
 - Three enemy AI states wired into one update loop:
   **enter** — arc-with-sine from off-screen into the assigned grid
   slot (staggered start so the formation builds up rhythmically);
@@ -28,13 +30,10 @@ scroller `pixel-sky-raiders`.
 - Per-wave best score persisted to `localStorage`.
 - English / 中文 toggle.
 - 360 × 480 responsive frame, `image-rendering: pixelated`, mobile-first.
-- Verified: 31 mechanics checks — every wave spawns the configured
-  enemy count, auto-fire produces a bullet at the cooldown, inputX
-  clamps to play bounds, every enemy leaves 'enter' state after the
-  staggered durations, pickDiver promotes one formation enemy to
-  dive, bullet-vs-enemy kills + scores, enemy-bullet kills the
-  player, a diving enemy at the player kills, wave clears when all
-  down, three deaths trigger game-over, finalScore adds 100 per life.
+- Verified: 47 checks — all 9 waves build, dive cadence only
+  shortens while swarm and fire-chance only rise across the campaign
+  and stay in range; plus a load check that all four scripts run
+  cleanly.
 
 ## Run
 

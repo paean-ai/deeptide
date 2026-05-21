@@ -38,6 +38,9 @@ const LEVELS = [
   { name: ['Vanguard',  '前锋'], cols: 8, rows: 4, diveCd: 1.6, swarm: 1.2, fireChance: 0.50 },
   { name: ['Onslaught', '猛攻'], cols: 8, rows: 4, diveCd: 1.3, swarm: 1.4, fireChance: 0.55 },
   { name: ['Galaxy',    '银河'], cols: 8, rows: 4, diveCd: 1.0, swarm: 1.6, fireChance: 0.60 },
+  { name: ['Armada',    '舰队'], cols: 8, rows: 4, diveCd: 0.85, swarm: 1.8, fireChance: 0.64 },
+  { name: ['Tempest',   '风暴'], cols: 8, rows: 4, diveCd: 0.72, swarm: 2.0, fireChance: 0.68 },
+  { name: ['Singularity','奇点'], cols: 8, rows: 4, diveCd: 0.60, swarm: 2.3, fireChance: 0.72 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
