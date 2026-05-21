@@ -20,6 +20,9 @@ const LEVELS = [
   { name: ['Lagoon',  '潟湖'], n: 6, k: 7, seed: 531 },
   { name: ['Abyss',   '深渊'], n: 7, k: 7, seed: 631 },
   { name: ['Trench',  '海沟'], n: 7, k: 8, seed: 733 },
+  { name: ['Maelstrom', '漩涡'], n: 8, k: 9,  seed: 821 },
+  { name: ['Leviathan', '巨渊'], n: 8, k: 10, seed: 853 },
+  { name: ['Hadal',     '海斗渊'], n: 9, k: 10, seed: 911 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
