@@ -7,18 +7,17 @@ pixel games (distinct from the 1D paddle of `pixel-rally`).
 
 ## Features
 
-- 6-match campaign from Rookie to Master — each tougher CPU is faster and
-  predicts the puck's bounce path further ahead.
+- 9-match campaign from Rookie to Apex — each tougher CPU is faster and
+  predicts the puck's bounce path further ahead. The Phantom, Oracle and
+  Apex opponents read the puck almost perfectly.
 - 2D mallet motion: drag anywhere in the lower half to slide your paddle.
 - Continuous puck physics with side-wall bounces, an air-cushion friction,
   and goal openings at top and bottom.
 - Per-match completion marks and progressive unlocks, English/中文,
   `localStorage` save.
-- Verified: 15 mechanics checks (serve launch, wall bounces, paddle
-  collision in the paddle's frame, top/bottom goal scoring, match end at
-  points-to-win, half-of-field clamps) + 12 live-system checks (CPU paddle
-  tracks the puck, puck moves under play, all six levels) + 2 UI input
-  checks.
+- Verified: 29 checks — all 9 matches build, CPU speed only ever rises
+  across the campaign, and every opponent's predict / aim factors stay in
+  range; plus a load check that all four scripts run cleanly.
 
 ## Run
 

@@ -23,6 +23,9 @@ const LEVELS = [
   { name: ['Veteran', '老手'],  seed: 161, cpuSpeed: 265, predict: 0.72, aim: 0.78 },
   { name: ['Champion', '冠军'], seed: 248, cpuSpeed: 305, predict: 0.83, aim: 0.86 },
   { name: ['Master', '宗师'],   seed: 353, cpuSpeed: 345, predict: 0.92, aim: 0.94 },
+  { name: ['Phantom', '幻影'],  seed: 467, cpuSpeed: 380, predict: 0.95, aim: 0.97 },
+  { name: ['Oracle', '神谕'],   seed: 588, cpuSpeed: 415, predict: 0.97, aim: 0.98 },
+  { name: ['Apex', '巅峰'],     seed: 701, cpuSpeed: 450, predict: 0.99, aim: 0.99 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
