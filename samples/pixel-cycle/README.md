@@ -7,16 +7,20 @@ games.
 
 ## Features
 
-- 6 opponents on a difficulty curve from Rookie to General — CPU AI ranges
-  from death-only avoidance to a flood-fill space-maximiser.
+- 8 opponents on a difficulty curve from Rookie to Overlord — CPU AI ranges
+  from death-only avoidance, through a flood-fill space-maximiser, up to an
+  **elite Voronoi search** that lays its trail to maximise its own
+  reachable territory minus the player's.
 - Best of three rounds wins the match; a max round cap keeps stalemates from
   going on forever.
 - On-screen LEFT / RIGHT turn buttons work cleanly on mobile and desktop.
 - Per-duel completion marks and progressive unlocks, English/中文 toggle,
   saved to `localStorage`.
 - Verified: 13 mechanics checks (cycle movement, wall + trail collision,
-  round end, match end) + a winnability check (a flood-fill bot beats 4/6
-  opponents — every match terminates) + a UI input check.
+  round end, match end) + a winnability check (a flood-fill bot clears the
+  early opponents — every match terminates) + a UI input check; the two
+  elite opponents are additionally checked to pick a valid direction every
+  step and to out-survive an easy opponent in a self-run.
 
 ## Run
 

@@ -24,6 +24,8 @@ const LEVELS = [
   { name: ['Captain', '上尉'],  seed: 162, ai: 'medium' },
   { name: ['Colonel', '上校'],  seed: 245, ai: 'hard' },
   { name: ['General', '将军'],  seed: 348, ai: 'hard' },
+  { name: ['Marshal', '元帅'],  seed: 471, ai: 'elite' },
+  { name: ['Overlord', '霸主'], seed: 612, ai: 'elite' },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
@@ -109,11 +111,35 @@ function cpuChoose(s) {
     }
     return best;
   }
-  // hard: flood-fill space after the move, pick the option with the most room
-  let best = safe[0], bestScore = -1;
+  if (s.cfg.ai === 'hard') {
+    // hard: flood-fill space after the move, pick the option with the most room
+    let best = safe[0], bestScore = -1;
+    for (const d of safe) {
+      const nx = c.x + DIRS[d].dx, ny = c.y + DIRS[d].dy;
+      const score = floodArea(s.grid, nx, ny);
+      if (score > bestScore) { bestScore = score; best = d; }
+    }
+    return best;
+  }
+  // elite: a Voronoi-style space-advantage search. For each safe move,
+  // tentatively lay the CPU's trail, then compare the territory the CPU
+  // can still reach against the territory the PLAYER can still reach, and
+  // pick the move that maximises (cpuArea - playerArea) — it actively
+  // walls the player out rather than just hoarding open room.
+  const p = s.player;
+  let best = safe[0], bestScore = -Infinity;
   for (const d of safe) {
     const nx = c.x + DIRS[d].dx, ny = c.y + DIRS[d].dy;
-    const score = floodArea(s.grid, nx, ny);
+    const i = ix(nx, ny);
+    const saved = s.grid[i];
+    s.grid[i] = CPU_TRAIL;                       // tentatively occupy
+    const cpuArea = floodArea(s.grid, nx, ny);
+    // Player's likely next cell (straight ahead, else current cell).
+    let px = p.x + DIRS[p.d].dx, py = p.y + DIRS[p.d].dy;
+    if (!cellFree(s.grid, px, py)) { px = p.x; py = p.y; }
+    const playerArea = floodArea(s.grid, px, py);
+    s.grid[i] = saved;                           // restore
+    const score = cpuArea - playerArea + (d === c.d ? 0.5 : 0);
     if (score > bestScore) { bestScore = score; best = d; }
   }
   return best;
