@@ -54,11 +54,21 @@ function drawGround(ctx) {
 }
 
 function drawTarget(ctx, s) {
-  const { tx, ty, r } = s.cfg;
-  // Wooden stand.
-  ctx.fillStyle = PALETTE.targetStand;
-  ctx.fillRect((tx - 2) | 0, (ty + r) | 0, 4, 400 - (ty + r));
-  ctx.fillRect((tx - 8) | 0, 398, 16, 2);
+  const { r } = s.cfg;
+  const { tx, ty } = targetCenter(s);
+  if (s.cfg.bob) {
+    // Bobbing range: a fixed vertical rail the target slides along.
+    ctx.fillStyle = PALETTE.targetStand;
+    ctx.fillRect((tx - 1) | 0, 40, 2, 360);
+    ctx.fillRect((tx - 8) | 0, 398, 16, 2);
+    // A little carriage clamping the disc to the rail.
+    ctx.fillRect((tx - 3) | 0, (ty - 3) | 0, 6, 6);
+  } else {
+    // Wooden stand planted in the ground.
+    ctx.fillStyle = PALETTE.targetStand;
+    ctx.fillRect((tx - 2) | 0, (ty + r) | 0, 4, 400 - (ty + r));
+    ctx.fillRect((tx - 8) | 0, 398, 16, 2);
+  }
   // Rings.
   for (let i = 0; i < RINGS.length; i++) {
     const ring = RINGS[i];
@@ -79,14 +89,19 @@ function ringColor(i) {
 }
 
 function drawHits(ctx, s) {
+  const tc = targetCenter(s);
   for (const h of s.hits) {
     if (!h.ring) continue;        // miss - skip
+    // Ring hits are stored relative to the target centre, so a stuck
+    // arrow rides along when the target sways.
+    const hx = (h.ox !== undefined) ? tc.tx + h.ox : h.x;
+    const hy = (h.oy !== undefined) ? tc.ty + h.oy : h.y;
     ctx.fillStyle = PALETTE.arrowHead;
-    ctx.fillRect((h.x | 0) - 2, (h.y | 0) - 2, 4, 4);
+    ctx.fillRect((hx | 0) - 2, (hy | 0) - 2, 4, 4);
     ctx.fillStyle = PALETTE.arrow;
-    ctx.fillRect((h.x | 0) - 6, (h.y | 0) - 1, 4, 2);
+    ctx.fillRect((hx | 0) - 6, (hy | 0) - 1, 4, 2);
     ctx.fillStyle = PALETTE.fletch;
-    ctx.fillRect((h.x | 0) - 8, (h.y | 0) - 2, 2, 4);
+    ctx.fillRect((hx | 0) - 8, (hy | 0) - 2, 2, 4);
   }
 }
 

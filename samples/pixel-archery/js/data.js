@@ -20,15 +20,23 @@ const BOW_Y = 360;
 // Each level: target geometry (centre x, y) + target size (outer-ring radius)
 // + wind (horizontal acceleration on the arrow in flight) + a description.
 // Wind 'shift' means the wind value is re-rolled every arrow within [-cap, cap].
+// `bob` is the vertical amplitude (px) of a target that sways up and down;
+// 0 means the target is fixed in place.
 const LEVELS = [
-  { name: ['Calm Field', '靖野'],     tx: 300, ty: 200, r: 32, wind:  0,   pattern: 'steady' },
-  { name: ['Light Gust', '微风'],     tx: 300, ty: 200, r: 28, wind: 20,   pattern: 'steady' },
-  { name: ['Crosswind', '横风'],      tx: 310, ty: 180, r: 26, wind: 40,   pattern: 'steady' },
-  { name: ['Shifting Winds', '变风'], tx: 305, ty: 200, r: 26, wind: 60,   pattern: 'shift' },
-  { name: ['Far Range', '远靶'],      tx: 330, ty: 160, r: 24, wind: 25,   pattern: 'steady' },
-  { name: ['Storm Range', '暴风'],    tx: 325, ty: 180, r: 22, wind: 80,   pattern: 'shift' },
+  { name: ['Calm Field', '靖野'],     tx: 300, ty: 200, r: 32, wind:  0,   pattern: 'steady', bob:  0 },
+  { name: ['Light Gust', '微风'],     tx: 300, ty: 200, r: 28, wind: 20,   pattern: 'steady', bob:  0 },
+  { name: ['Crosswind', '横风'],      tx: 310, ty: 180, r: 26, wind: 40,   pattern: 'steady', bob:  0 },
+  { name: ['Shifting Winds', '变风'], tx: 305, ty: 200, r: 26, wind: 60,   pattern: 'shift',  bob:  0 },
+  { name: ['Far Range', '远靶'],      tx: 330, ty: 160, r: 24, wind: 25,   pattern: 'steady', bob:  0 },
+  { name: ['Storm Range', '暴风'],    tx: 325, ty: 180, r: 22, wind: 80,   pattern: 'shift',  bob:  0 },
+  { name: ['Swaying Mark', '晃靶'],   tx: 305, ty: 200, r: 26, wind: 30,   pattern: 'steady', bob: 26 },
+  { name: ['Pendulum', '摆靶'],       tx: 315, ty: 195, r: 24, wind: 45,   pattern: 'steady', bob: 40 },
+  { name: ['Wild Quarry', '风暴猎'],  tx: 325, ty: 200, r: 22, wind: 70,   pattern: 'shift',  bob: 48 },
 ];
 const LEVEL_COUNT = LEVELS.length;
+
+// Angular speed of a bobbing target's vertical sway.
+const BOB_SPEED = 2.4;
 
 // Concentric scoring rings, from inside out. radius is a fraction of the
 // target's outer radius.
@@ -60,8 +68,15 @@ function buildGame(levelIndex) {
     score: 0,
     hits: [],                     // per-arrow {ringName?, points, x, y}
     activeWind: cfg.wind,
+    clock: 0,                     // seconds elapsed - drives the target sway
     over: false,
   };
+}
+
+// Current target centre. Bobbing ranges sway the centre vertically.
+function targetCenter(s) {
+  const ty = s.cfg.bob ? s.cfg.ty + Math.sin(s.clock * BOB_SPEED) * s.cfg.bob : s.cfg.ty;
+  return { tx: s.cfg.tx, ty };
 }
 
 function startAim(s, x, y) {
@@ -100,7 +115,9 @@ function releaseAim(s) {
 }
 
 function tick(s, dt) {
-  if (s.over || !s.arrow) return;
+  if (s.over) return;
+  s.clock += dt;                  // the target keeps swaying while you aim
+  if (!s.arrow) return;
   // 240Hz substep to keep the trajectory smooth even at low frame rates.
   const sub = 1 / 240;
   let remaining = dt;
@@ -123,9 +140,10 @@ function substep(s, dt) {
     recordHit(s, null);
     return;
   }
-  // Hit-test against the target circle.
-  const dx = a.x - s.cfg.tx;
-  const dy = a.y - s.cfg.ty;
+  // Hit-test against the target circle (centre may be swaying).
+  const tc = targetCenter(s);
+  const dx = a.x - tc.tx;
+  const dy = a.y - tc.ty;
   const d  = Math.hypot(dx, dy);
   if (d <= s.cfg.r) {
     let ring = null;
@@ -139,6 +157,13 @@ function substep(s, dt) {
 function recordHit(s, ring) {
   const a = s.arrow;
   const hit = { x: a.x, y: a.y, points: ring ? ring.score : 0, ring: ring ? ring.name : null };
+  // Store ring hits as an offset from the target centre so a stuck arrow
+  // rides along with a swaying target.
+  if (ring) {
+    const tc = targetCenter(s);
+    hit.ox = a.x - tc.tx;
+    hit.oy = a.y - tc.ty;
+  }
   s.hits.push(hit);
   s.score += hit.points;
   s.arrow = null;

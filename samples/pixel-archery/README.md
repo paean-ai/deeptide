@@ -8,12 +8,17 @@ it lands on. A fresh projectile-trajectory arcade alongside the other
 
 ## Features
 
-- 6-range campaign — **Calm Field → Storm Range** — each range varies
+- 9-range campaign — **Calm Field → Wild Quarry** — each range varies
   target size (32 → 22 px outer radius), target distance (300 → 330 px
   out from the archer), and a horizontal **wind** acceleration on the
-  arrow in flight (0 → 80 px/s²). The last two ranges roll a *fresh
-  random wind every arrow* (`'shift'` pattern), so you can't just
-  memorise a single trajectory.
+  arrow in flight (0 → 80 px/s²). Three ranges roll a *fresh random
+  wind every arrow* (`'shift'` pattern), so you can't just memorise a
+  single trajectory.
+- The final three ranges — **Swaying Mark, Pendulum, Wild Quarry** —
+  add a **bobbing target** that slides up and down a fixed rail
+  (26 → 48 px amplitude). The centre keeps swaying while you aim, so a
+  hit now demands timing as well as a clean arc; a stuck arrow rides
+  the target as it moves.
 - Real ballistic arc — gravity `480 px/s²`, drag-away slingshot aim
   with a `MAX_POWER` clamp at 720 px/s, and 240 Hz physics substepping
   inside the variable-dt tick so fast shots don't tunnel through the
@@ -30,11 +35,15 @@ it lands on. A fresh projectile-trajectory arcade alongside the other
   round, so you can visually correct your aim.
 - English / 中文 toggle, `localStorage` save with per-range best score.
 - 360×480 responsive frame, `image-rendering: pixelated`, mobile-first.
-- Verified: 30 mechanics checks — tiny drag rejected, forward-drag
-  (vx ≤ 0) rejected, valid slingshot fires, gravity drops the arrow,
-  wind changes landing x, all 10 arrows consume the quiver and end
-  the round, *forced bullseye* scores 10 and *forced outer rim*
-  scores 3.
+- Verified: 20 checks — all 9 ranges present with the first six
+  static and the last three bobbing; tiny drag rejected, forward-drag
+  (vx ≤ 0) rejected, valid slingshot fires and decrements the quiver,
+  gravity drops the arrow, wind changes landing x, all 10 arrows end
+  the round; the clock advances while aiming, a static range's centre
+  stays fixed while a bobbing range sweeps its full amplitude and
+  stays on screen, a *forced bullseye* on a swaying target scores and
+  stores a centre-relative offset, a *forced outer rim* scores 3;
+  plus a UI smoke pass.
 
 ## Run
 
@@ -52,6 +61,8 @@ Then visit `http://127.0.0.1:4305/index.html`.
   power; brighter dotted line in the opposite direction previews where
   the arrow will fly. Release to loose.
 - The arrow arcs under gravity and is nudged sideways by the wind.
+- On the later ranges the target bobs along a rail — time the release
+  so the bullseye is where your arc lands.
 - Each ring scores a different value; chase the bullseye.
 
 ## Structure
@@ -59,10 +70,11 @@ Then visit `http://127.0.0.1:4305/index.html`.
 - `index.html` — shell + script tags.
 - `css/style.css` — 360:480 responsive frame, `image-rendering: pixelated`.
 - `js/data.js` — bow / arrow physics (gravity + wind + 240 Hz substep),
-  six ranges, ring math, per-arrow wind shifting, round-end detection.
+  nine ranges, ring math, per-arrow wind shifting, bobbing-target sway,
+  round-end detection.
 - `js/i18n.js` — English / Chinese strings.
-- `js/art.js` — palette, sky + grass + target rings on a wood stand,
-  pixel bow with a pull-back string, arrow sprite, slingshot aim guide,
-  wind icon, HUD.
+- `js/art.js` — palette, sky + grass + target rings on a wood stand or
+  bobbing rail, pixel bow with a pull-back string, arrow sprite,
+  slingshot aim guide, wind icon, HUD.
 - `js/game.js` — screen flow, drag input, requestAnimationFrame loop,
   save.
