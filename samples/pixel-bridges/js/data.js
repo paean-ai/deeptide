@@ -18,6 +18,9 @@ const PUZZLES = [
   { name: ['Leviathan', '巨灵'], seed: 644, w: 10, h: 10, count: 17 },
   { name: ['Behemoth', '巨兽'],  seed: 781, w: 10, h: 10, count: 18 },
   { name: ['Kraken', '海怪'],    seed: 912, w: 10, h: 10, count: 19 },
+  { name: ['Riptide', '激流'],   seed: 1043, w: 10, h: 10, count: 20 },
+  { name: ['Deluge', '洪流'],    seed: 1187, w: 10, h: 10, count: 21 },
+  { name: ['Abyss', '深渊'],     seed: 1374, w: 10, h: 10, count: 22 },
 ];
 const PUZZLE_COUNT = PUZZLES.length;
 
