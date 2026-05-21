@@ -9,7 +9,7 @@ games.
 
 ## Features
 
-- 6-level campaign **Chill → Boiling** on growing grids (5×5 → 7×7).
+- 9-level campaign **Chill → Inferno** on growing grids (5×5 → 8×8).
 - Every puzzle is procedurally generated and **verified unique**:
   1. A random-walk path-cover tiles the whole grid with thermometers
      (each a branch-free run of ≥ 2 cells, bulb at one end).

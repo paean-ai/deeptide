@@ -22,6 +22,9 @@ const LEVELS = [
   { name: ['Fever',   '发热'], n: 6, seed: 443 },
   { name: ['Searing', '灼热'], n: 7, seed: 557 },
   { name: ['Boiling', '沸腾'], n: 7, seed: 673 },
+  { name: ['Scorching', '炙烤'], n: 7, seed: 801 },
+  { name: ['Blazing',   '烈焰'], n: 7, seed: 911 },
+  { name: ['Inferno',   '熔炉'], n: 8, seed: 1009 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
