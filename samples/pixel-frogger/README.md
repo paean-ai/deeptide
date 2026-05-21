@@ -6,8 +6,9 @@ grid-arcade crossing genre alongside the other `samples/` pixel games.
 
 ## Features
 
-- 6-level campaign **Pond → Maelstrom** with rising traffic speed
-  (×1.00 → ×2.00) and tightening time limits (60 s → 36 s).
+- 9-level campaign **Pond → Deluge** with rising traffic speed
+  (×1.00 → ×2.80) and tightening time limits (60 s → 27 s) — the
+  Cataract, Whitewater and Deluge runs cap the climb.
 - A 9-column × 13-row board: start row at the bottom, five road lanes,
   a green median, four river lanes (logs + turtles), bank, and five
   goal pads at the top.
@@ -27,12 +28,10 @@ grid-arcade crossing genre alongside the other `samples/` pixel games.
   to `localStorage`.
 - English / 中文 toggle.
 - 360×480 responsive frame, `image-rendering: pixelated`, mobile-first.
-- Verified: 18 mechanics checks — every level builds with the right
-  road + river lane counts, hop bounds are clamped, hopping past the
-  best row scores forward bonus, road collision kills, water without
-  a carrier drowns, logs carry the frog horizontally, hopping onto a
-  goal pad fills it and resets the frog, the win triggers when all
-  five pads fill, lives deplete to game-over.
+- Verified: 47 checks — all 9 levels build with lanes and a timer set
+  from the level, traffic speed only ever rises while the time limit
+  only tightens and stays playable; plus a load check that all four
+  scripts run cleanly.
 
 ## Run
 

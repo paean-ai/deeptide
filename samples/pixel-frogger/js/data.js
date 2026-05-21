@@ -61,6 +61,9 @@ const LEVELS = [
   { name: ['Rapids',   '急流'], speedMul: 1.50, timeLimit: 45 },
   { name: ['Torrent',  '湍流'], speedMul: 1.75, timeLimit: 40 },
   { name: ['Maelstrom','漩涡'], speedMul: 2.00, timeLimit: 36 },
+  { name: ['Cataract', '飞瀑'], speedMul: 2.25, timeLimit: 33 },
+  { name: ['Whitewater','激浪'], speedMul: 2.50, timeLimit: 30 },
+  { name: ['Deluge',   '洪流'], speedMul: 2.80, timeLimit: 27 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 
