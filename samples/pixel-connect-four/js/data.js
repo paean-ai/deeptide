@@ -8,6 +8,7 @@ const DIFFICULTIES = [
   { name: ['Easy', '简单'],   depth: 2 },
   { name: ['Medium', '普通'], depth: 4 },
   { name: ['Hard', '困难'],   depth: 6 },
+  { name: ['Expert', '专家'], depth: 8 },
 ];
 
 // search columns centre-out so alpha-beta prunes hard

@@ -8,8 +8,9 @@ alongside the other `samples/` pixel games.
 
 - Classic 7×6 Connect Four — line up four discs across, down or diagonally.
 - A real opponent: an alpha-beta minimax AI with a positional heuristic.
-- Three difficulties set the AI's search depth — Easy (2), Medium (4) and
-  Hard (6 plies, with centre-first move ordering for fast pruning).
+- Four difficulties set the AI's search depth — Easy (2), Medium (4),
+  Hard (6) and Expert (8 plies), all with centre-first move ordering for
+  fast alpha-beta pruning.
 - A satisfying gravity drop animation for every disc, and the winning line is
   highlighted at the end.
 - Per-difficulty win / loss / draw records, saved to `localStorage`.
@@ -31,7 +32,7 @@ Then visit `http://127.0.0.1:4239/index.html`.
 - Pick a difficulty, then tap a column to drop your red disc.
 - The disc falls to the lowest free slot; the AI answers with a yellow disc.
 - First to connect four in any direction wins; a full board is a draw.
-- Beat the Hard AI for real bragging rights.
+- Beat the Expert AI for real bragging rights.
 
 ## Structure
 

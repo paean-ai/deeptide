@@ -8,11 +8,17 @@ ctx.imageSmoothingEnabled = false;
 
 const SAVE_KEY = 'pixel-connect-four-stats';
 function loadStats() {
+  const fresh = () => ({ w: 0, l: 0, d: 0 });
+  let d = null;
   try {
-    const d = JSON.parse(localStorage.getItem(SAVE_KEY));
-    if (d && d['0']) return d;
+    d = JSON.parse(localStorage.getItem(SAVE_KEY));
   } catch (e) { /* ignore */ }
-  return { 0: { w: 0, l: 0, d: 0 }, 1: { w: 0, l: 0, d: 0 }, 2: { w: 0, l: 0, d: 0 } };
+  if (!d || !d['0']) d = {};
+  // Ensure a record exists for every difficulty (migrates older 3-tier saves).
+  for (let i = 0; i < DIFFICULTIES.length; i++) {
+    if (!d[i]) d[i] = fresh();
+  }
+  return d;
 }
 function saveStats() {
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(stats)); } catch (e) { /* ignore */ }
@@ -149,7 +155,7 @@ function showScreen(id, isOverlay) {
 }
 function refreshTitle() {
   let w = 0, l = 0, d = 0;
-  for (const k of ['0', '1', '2']) { w += stats[k].w; l += stats[k].l; d += stats[k].d; }
+  for (let k = 0; k < DIFFICULTIES.length; k++) { w += stats[k].w; l += stats[k].l; d += stats[k].d; }
   document.getElementById('title-stats').textContent =
     (w + l + d) > 0 ? t('statsLine', w, l, d) : t('noStats');
 }
@@ -159,7 +165,7 @@ function buildDiffRow() {
   DIFFICULTIES.forEach((dd, i) => {
     const btn = document.createElement('button');
     btn.textContent = dd.name[currentLang === 'zh' ? 1 : 0];
-    if (i !== 2) btn.className = 'ghost';
+    if (i !== DIFFICULTIES.length - 1) btn.className = 'ghost';
     btn.onclick = () => { newGame(i); showScreen('screen-game'); };
     row.appendChild(btn);
   });
