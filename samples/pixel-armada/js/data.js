@@ -20,6 +20,9 @@ const LEVELS = [
   { name: ['Frigate',   '护卫'], n: 6, fleet: [4, 3, 2, 2, 1, 1, 1],             seed: 431 },
   { name: ['Cruiser',   '巡洋'], n: 7, fleet: [4, 3, 3, 2, 2, 1, 1],             seed: 531 },
   { name: ['Armada',    '舰队'], n: 7, fleet: [4, 3, 3, 2, 2, 2, 1, 1, 1, 1],    seed: 631 },
+  { name: ['Dreadnought', '无畏舰'], n: 8, fleet: [4, 4, 3, 3, 2, 2, 2, 1, 1],    seed: 900 },
+  { name: ['Flagship',  '旗舰'], n: 8, fleet: [5, 4, 4, 3, 3, 2, 2, 1, 1],       seed: 900 },
+  { name: ['Grand Fleet', '大舰队'], n: 8, fleet: [5, 4, 4, 3, 3, 2, 2, 1, 1, 1], seed: 857 },
 ];
 const LEVEL_COUNT = LEVELS.length;
 

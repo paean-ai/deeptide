@@ -7,8 +7,9 @@ the other `samples/` pixel games.
 
 ## Features
 
-- 6-puzzle campaign on growing grids (5×5 → 7×7) with progressively
-  larger fleets — from a five-ship skiff to a ten-ship armada.
+- 9-puzzle campaign on growing grids (5×5 → 8×8) with progressively
+  larger fleets — from a five-ship skiff to the 8×8 **Dreadnought**,
+  **Flagship** and **Grand Fleet** finales.
 - Every puzzle is procedurally generated and **verified** to have exactly
   one solution by a ship-by-ship backtracking solver. The solver:
   * tries each ship in descending size order at every valid position;
@@ -28,10 +29,10 @@ the other `samples/` pixel games.
   you always know what's left to place.
 - English / 中文, `localStorage` save with cleared puzzles and best scores.
 - 360×480 responsive frame, `image-rendering: pixelated`, mobile-first.
-- Verified: 51 data checks — every level builds with the correct ship
-  cell count, every solution wins `isSolved`, every clue set has
-  exactly one solution, every generator output is bit-for-bit
-  deterministic; plus diagonal-touch and row-overcount conflict cases.
+- Verified: 47 checks — all 9 levels build, each clue set has exactly
+  one solution, the ship-cell count matches the fleet sum, the row /
+  column clues match the solution, and the generator is bit-for-bit
+  deterministic; plus a load check that all four scripts run cleanly.
 
 ## Run
 
