@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Pixel Cooking Rush</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <section id="screen-title" class="screen">
+    <div class="title-box">
+      <h1 id="titleText">PIXEL COOKING RUSH</h1>
+      <p id="subtitleText" class="tagline">Prep stations, serve combos, survive the dinner rush.</p>
+      <button id="btn-play" class="big-btn">PLAY</button>
+      <button id="btn-continue" class="ghost-btn hidden">CONTINUE</button>
+      <p id="howtoText" class="howto">Queue work, upgrade facilities, and reach the goal.</p>
+      <button id="lang-toggle" class="lang-toggle">中文</button>
+    </div>
+  </section>
+  <section id="screen-game" class="screen hidden">
+    <header id="hud">
+      <div class="brand"><span class="brand-mark"></span><div><h1 id="hud-title">Pixel Cooking Rush</h1><p id="phase-label">Planning</p></div></div>
+      <div id="res-strip"></div>
+      <button id="btn-menu" class="icon-btn">||</button>
+    </header>
+    <main class="game-layout">
+      <section class="stage-panel">
+        <canvas id="game" width="960" height="600"></canvas>
+        <div id="goal-panel"><div><b id="goal-name">Goal</b><span id="goal-value">0/0</span></div><div class="meter"><i id="goal-fill"></i></div></div>
+      </section>
+      <aside class="side-panel">
+        <div class="panel-head"><h2 id="actions-title">Actions</h2><span id="day-label">Day 1</span></div>
+        <div id="action-grid"></div>
+      </aside>
+      <aside class="side-panel facilities">
+        <div class="panel-head"><h2 id="facilities-title">Facilities</h2><span id="level-label">Lv 1</span></div>
+        <div id="facility-grid"></div>
+        <div id="log"></div>
+      </aside>
+    </main>
+  </section>
+  <div id="overlay" class="overlay hidden"><div class="panel"><h2 id="overlay-title">Paused</h2><p id="overlay-body"></p><div id="overlay-stats"></div><button id="btn-resume" class="big-btn">Resume</button><button id="btn-restart" class="ghost-btn">Restart</button><button id="btn-home" class="ghost-btn">Menu</button></div></div>
+</div>
+<script src="js/i18n.js"></script>
+<script src="js/data.js"></script>
+<script src="js/art.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
