@@ -122,6 +122,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "deeptide-core",
+ "serde_json",
 ]
 
 [[package]]

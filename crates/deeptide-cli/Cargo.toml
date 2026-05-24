@@ -11,6 +11,7 @@ description = "Cross-platform Rust CLI port for Deeptide."
 [dependencies]
 clap.workspace = true
 deeptide-core = { path = "../deeptide-core" }
+serde_json.workspace = true
 
 [lints]
 workspace = true
