@@ -33,6 +33,11 @@ This repository is the **community front door for both** — docs, FAQ, issue
 tracking — and is the home of the npm `deeptide` package that ships the
 cross-platform CLI.
 
+An experimental Rust workspace now also lives under [`crates/`](./crates).
+That port is intended to replace the current Bun-based cross-platform CLI over
+time, with behavior matched against the Swift Deeptide implementation in small,
+reviewable increments.
+
 It also contains the open-source native local inference runtime under
 [`native/`](./native): a hard-forked `ds4` DeepSeek V4 Flash Metal engine plus
 `dsgo`, the local OpenAI/Anthropic-compatible gateway intended to pair with
