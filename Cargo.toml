@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "crates/deeptide-cli",
+    "crates/deeptide-core",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/paean-ai/deeptide"
+homepage = "https://github.com/paean-ai/deeptide"
+authors = ["Paean AI"]
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+

@@ -13,6 +13,8 @@ bun.lockb
 .clideignore
 .tide/
 .claude/
+target/
+**/*.rs.bk
 
 # Native runtime build outputs. Source under native/ is intentionally tracked.
 native/ds4/ds4
