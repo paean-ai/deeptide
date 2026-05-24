@@ -12,8 +12,14 @@ repository = "https://github.com/paean-ai/deeptide"
 homepage = "https://github.com/paean-ai/deeptide"
 authors = ["Paean AI"]
 
+[workspace.dependencies]
+clap = { version = "4.5.40", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tempfile = "3.20.0"
+thiserror = "2.0.12"
+
 [workspace.lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
-

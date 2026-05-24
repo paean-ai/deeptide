@@ -1,4 +1,5 @@
 use clap::Parser;
+use deeptide_core::permissions::PermissionMode;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -10,10 +11,21 @@ use clap::Parser;
 struct Cli {
     #[arg(long, value_name = "TEXT")]
     prompt: Option<String>,
+
+    #[arg(
+        long,
+        default_value = "default",
+        help = "Permission mode: default, accept-edits, plan, bypass."
+    )]
+    permission_mode: String,
 }
 
 fn main() {
     let cli = Cli::parse();
+    let Some(permission_mode) = PermissionMode::parse(&cli.permission_mode) else {
+        eprintln!("invalid permission mode: {}", cli.permission_mode);
+        std::process::exit(2);
+    };
 
     if cli.prompt.is_some() {
         eprintln!(
@@ -25,4 +37,5 @@ fn main() {
     println!(
         "deeptide-rs is under active development.\nCurrent parity slice: slash-command core plus /clear, /new, and /compact tests."
     );
+    println!("permission mode: {}", permission_mode.label());
 }
