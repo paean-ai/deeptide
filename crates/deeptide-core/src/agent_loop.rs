@@ -1,4 +1,4 @@
-use crate::{CostTracker, TurnUsage};
+use crate::{CostTracker, ToolContext, ToolRegistry, TurnUsage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRole {
@@ -67,6 +67,7 @@ impl AgentUsage {
 pub struct AgentResponse {
     pub content: String,
     pub usage: Option<AgentUsage>,
+    pub tool_calls: Vec<ToolCall>,
 }
 
 impl AgentResponse {
@@ -74,6 +75,24 @@ impl AgentResponse {
         Self {
             content: content.into(),
             usage: None,
+            tool_calls: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+impl ToolCall {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, input: serde_json::Value) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            input,
         }
     }
 }
@@ -82,6 +101,11 @@ impl AgentResponse {
 pub enum AgentLoopEvent {
     User(ConversationMessage),
     Assistant(ConversationMessage),
+    ToolResult {
+        tool_call: ToolCall,
+        content: String,
+        is_error: bool,
+    },
     Terminal(AgentTerminalEvent),
 }
 
@@ -103,6 +127,8 @@ pub struct AgentLoop {
     model: String,
     max_turns: usize,
     current_run_step: usize,
+    tool_registry: ToolRegistry,
+    tool_context: ToolContext,
 }
 
 impl AgentLoop {
@@ -114,6 +140,10 @@ impl AgentLoop {
             model: String::from("unconfigured"),
             max_turns: 25,
             current_run_step: 0,
+            tool_registry: ToolRegistry::with_builtin_tools(),
+            tool_context: ToolContext::new(
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            ),
         }
     }
 
@@ -127,54 +157,84 @@ impl AgentLoop {
         self
     }
 
+    pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
+        self.tool_context = ToolContext::new(cwd);
+        self
+    }
+
     pub fn run(&mut self, user_input: impl Into<String>) -> Vec<AgentLoopEvent> {
         let user_message = ConversationMessage::user(user_input);
         self.current_run_step = 0;
         self.messages.push(user_message.clone());
 
         let mut events = vec![AgentLoopEvent::User(user_message)];
-        if self.messages.len() / 2 >= self.max_turns {
-            events.push(AgentLoopEvent::Terminal(
-                AgentTerminalEvent::MaxTurnsReached,
-            ));
-            return events;
-        }
 
-        self.current_run_step += 1;
-        let request = AgentRequest {
-            messages: self.messages.clone(),
-            model: self.model.clone(),
-            step: self.current_run_step,
-            max_turns: self.max_turns,
-        };
+        loop {
+            if self.current_run_step >= self.max_turns {
+                events.push(AgentLoopEvent::Terminal(
+                    AgentTerminalEvent::MaxTurnsReached,
+                ));
+                return events;
+            }
 
-        match self.backend.respond(request) {
-            Ok(response) => {
-                if let Some(usage) = response.usage {
-                    self.cost_tracker.record(TurnUsage::new(
-                        self.current_run_step,
-                        self.model.clone(),
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        usage.cache_create,
-                        usage.cache_read,
-                        usage.duration_ms,
-                    ));
+            self.current_run_step += 1;
+            let request = AgentRequest {
+                messages: self.messages.clone(),
+                model: self.model.clone(),
+                step: self.current_run_step,
+                max_turns: self.max_turns,
+            };
+
+            match self.backend.respond(request) {
+                Ok(response) => {
+                    if let Some(usage) = response.usage {
+                        self.cost_tracker.record(TurnUsage::new(
+                            self.current_run_step,
+                            self.model.clone(),
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cache_create,
+                            usage.cache_read,
+                            usage.duration_ms,
+                        ));
+                    }
+
+                    let assistant_message = ConversationMessage::assistant(response.content);
+                    self.messages.push(assistant_message.clone());
+                    events.push(AgentLoopEvent::Assistant(assistant_message));
+
+                    if response.tool_calls.is_empty() {
+                        events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::Complete));
+                        return events;
+                    }
+
+                    for tool_call in response.tool_calls {
+                        let result = self.tool_registry.call(
+                            &tool_call.name,
+                            tool_call.input.clone(),
+                            &self.tool_context,
+                        );
+                        let content = result.content;
+                        let is_error = result.is_error;
+                        events.push(AgentLoopEvent::ToolResult {
+                            tool_call: tool_call.clone(),
+                            content: content.clone(),
+                            is_error,
+                        });
+                        self.messages.push(ConversationMessage::user(format!(
+                            "[tool_result id={} name={} is_error={}]\n{}",
+                            tool_call.id, tool_call.name, is_error, content
+                        )));
+                    }
                 }
-
-                let assistant_message = ConversationMessage::assistant(response.content);
-                self.messages.push(assistant_message.clone());
-                events.push(AgentLoopEvent::Assistant(assistant_message));
-                events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::Complete));
-            }
-            Err(error) => {
-                events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(
-                    error,
-                )));
+                Err(error) => {
+                    events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(
+                        error,
+                    )));
+                    return events;
+                }
             }
         }
-
-        events
     }
 
     pub fn reset(&mut self) {
@@ -230,6 +290,7 @@ impl AgentBackend for LocalEchoBackend {
                 0,
             )),
             content,
+            tool_calls: Vec::new(),
         })
     }
 }

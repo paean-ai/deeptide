@@ -1,6 +1,6 @@
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
-    AgentUsage, MessageRole,
+    AgentUsage, MessageRole, ToolCall,
 };
 
 #[test]
@@ -54,6 +54,38 @@ fn agent_loop_reports_backend_errors_without_adding_assistant_message() {
     assert_eq!(loop_.messages().len(), 1);
 }
 
+#[test]
+fn agent_loop_executes_tool_calls_and_continues() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\n").expect("write fixture");
+    let mut loop_ = AgentLoop::new(Box::new(ToolCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3);
+
+    let events = loop_.run("read notes");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "Read" && content.contains("1\talpha")
+        )
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::Assistant(message) if message.content == "done after tool"
+        )
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentLoopEvent::Terminal(AgentTerminalEvent::Complete))
+    );
+}
+
 struct StaticBackend {
     content: String,
     usage: Option<AgentUsage>,
@@ -78,6 +110,7 @@ impl AgentBackend for StaticBackend {
         Ok(AgentResponse {
             content: self.content.clone(),
             usage: self.usage.clone(),
+            tool_calls: Vec::new(),
         })
     }
 }
@@ -87,5 +120,29 @@ struct FailingBackend;
 impl AgentBackend for FailingBackend {
     fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
         Err(String::from("backend failed"))
+    }
+}
+
+#[derive(Default)]
+struct ToolCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for ToolCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will read the file."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_1",
+                    "Read",
+                    serde_json::json!({"file_path": "notes.txt", "limit": 1}),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after tool"))
+        }
     }
 }

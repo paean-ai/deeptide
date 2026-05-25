@@ -156,6 +156,17 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
         AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)) => {
             Some(ReplEvent::Output(format!("Model error: {error}")))
         }
+        AgentLoopEvent::ToolResult {
+            tool_call,
+            content,
+            is_error,
+        } => Some(ReplEvent::Output(format!(
+            "Tool {} ({}) {}\n{}",
+            tool_call.name,
+            tool_call.id,
+            if is_error { "failed:" } else { "completed:" },
+            content
+        ))),
         AgentLoopEvent::User(_) | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => None,
     }
 }

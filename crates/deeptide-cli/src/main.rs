@@ -274,7 +274,9 @@ fn run_prompt(cli: &Cli, prompt: &str) -> Result<String, String> {
             AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => {
                 return Err(String::from("maximum turns reached"));
             }
-            AgentLoopEvent::User(_) | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => {}
+            AgentLoopEvent::User(_)
+            | AgentLoopEvent::ToolResult { .. }
+            | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => {}
         }
     }
 

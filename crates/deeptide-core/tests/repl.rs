@@ -83,6 +83,7 @@ impl AgentBackend for StaticBackend {
         Ok(AgentResponse {
             content: String::from("assistant reply"),
             usage: Some(AgentUsage::new(4, 2, 0, 0, 10)),
+            tool_calls: Vec::new(),
         })
     }
 }

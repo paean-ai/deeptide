@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentBackend, AgentRequest, AgentResponse, AgentUsage, MessageRole};
+use crate::{AgentBackend, AgentRequest, AgentResponse, AgentUsage, MessageRole, ToolCall};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnthropicConfig {
@@ -89,6 +89,7 @@ struct MessagesRequest<'a> {
     model: &'a str,
     max_tokens: usize,
     messages: Vec<WireMessage<'a>>,
+    tools: Vec<WireTool>,
     stream: bool,
 }
 
@@ -103,6 +104,13 @@ struct WireContentBlock<'a> {
     #[serde(rename = "type")]
     kind: &'a str,
     text: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct WireTool {
+    name: &'static str,
+    description: &'static str,
+    input_schema: serde_json::Value,
 }
 
 impl<'a> WireContentBlock<'a> {
@@ -120,6 +128,28 @@ fn build_messages_request<'a>(
         model,
         max_tokens,
         messages: messages.into_iter().collect(),
+        tools: vec![WireTool {
+            name: "Read",
+            description: "Read a text file from the current workspace. Relative paths are resolved against the current working directory.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to read."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Line number to start reading from. Defaults to 1."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of lines to read."
+                    }
+                },
+                "required": ["file_path"]
+            }),
+        }],
         stream: false,
     }
 }
@@ -131,11 +161,16 @@ fn messages_url(base_url: &str) -> String {
 fn parse_messages_response(body: &str, elapsed: Duration) -> Result<AgentResponse, String> {
     let response: MessagesResponse =
         serde_json::from_str(body).map_err(|error| format!("invalid model response: {error}"))?;
+    let mut tool_calls = Vec::new();
     let content = response
         .content
         .into_iter()
         .filter_map(|block| match block {
             ResponseContentBlock::Text { text, .. } => Some(text),
+            ResponseContentBlock::ToolUse { id, name, input } => {
+                tool_calls.push(ToolCall::new(id, name, input));
+                None
+            }
             ResponseContentBlock::Other => None,
         })
         .collect::<Vec<_>>()
@@ -152,6 +187,7 @@ fn parse_messages_response(body: &str, elapsed: Duration) -> Result<AgentRespons
                 elapsed.as_millis().try_into().unwrap_or(usize::MAX),
             )
         }),
+        tool_calls,
     })
 }
 
@@ -166,6 +202,12 @@ struct MessagesResponse {
 enum ResponseContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
     #[serde(other)]
     Other,
 }
@@ -233,6 +275,7 @@ mod tests {
         .expect("response should parse");
 
         assert_eq!(response.content, "hello\nworld");
+        assert!(response.tool_calls.is_empty());
         let usage = response.usage.expect("usage should be present");
         assert_eq!(usage.input_tokens, 11);
         assert_eq!(usage.output_tokens, 7);
@@ -256,5 +299,26 @@ mod tests {
 
         assert_eq!(response.content, "visible");
         assert!(response.usage.is_none());
+    }
+
+    #[test]
+    fn parses_tool_use_blocks_from_messages_response() {
+        let response = parse_messages_response(
+            r#"{
+                "content": [
+                    {"type": "text", "text": "I will inspect the file."},
+                    {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "README.md", "limit": 5}}
+                ]
+            }"#,
+            Duration::from_millis(0),
+        )
+        .expect("response should parse");
+
+        assert_eq!(response.content, "I will inspect the file.");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "toolu_1");
+        assert_eq!(response.tool_calls[0].name, "Read");
+        assert_eq!(response.tool_calls[0].input["file_path"], "README.md");
+        assert_eq!(response.tool_calls[0].input["limit"], 5);
     }
 }

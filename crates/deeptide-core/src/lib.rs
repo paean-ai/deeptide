@@ -12,7 +12,7 @@ pub mod tools;
 
 pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
-    AgentUsage, ConversationMessage, LocalEchoBackend, MessageRole,
+    AgentUsage, ConversationMessage, LocalEchoBackend, MessageRole, ToolCall,
 };
 pub use api::{AnthropicBackend, AnthropicConfig};
 pub use commands::{
