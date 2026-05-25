@@ -478,6 +478,38 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "CronCreate",
+            description: "Schedule a prompt using a 5-field cron expression.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cron": {"type": "string", "description": "5-field cron expression: minute hour day-of-month month day-of-week."},
+                    "prompt": {"type": "string", "description": "Prompt to enqueue at each fire time."},
+                    "recurring": {"type": "boolean", "description": "true repeats on schedule; false is one-shot. Omit to infer repeating schedules."}
+                },
+                "required": ["cron", "prompt"]
+            }),
+        },
+        WireTool {
+            name: "CronList",
+            description: "List all scheduled cron jobs with IDs, schedules, and prompts.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        WireTool {
+            name: "CronDelete",
+            description: "Cancel a previously scheduled cron job by ID.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Job ID returned by CronCreate."}
+                },
+                "required": ["id"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -946,6 +978,9 @@ mod tests {
             "CrashLog",
             "MacLog",
             "MacDiagnose",
+            "CronCreate",
+            "CronList",
+            "CronDelete",
         ] {
             assert!(
                 request.tools.iter().any(|tool| tool.name == name),

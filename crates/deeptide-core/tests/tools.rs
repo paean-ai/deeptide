@@ -1,10 +1,10 @@
 use deeptide_core::{
-    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CtxInspectTool,
-    EditTool, EnterPlanModeTool, ExitPlanModeTool, FileMetadataTool, ImagePreprocessTool, LspTool,
-    MacDiagnoseTool, MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, ReadFilesTool,
-    SnipTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
-    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool,
-    WebSearchTool, WriteTool, memory::MemorySystem,
+    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
+    CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
+    FileMetadataTool, ImagePreprocessTool, LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool,
+    MemoryWriteTool, MonitorTool, ReadFilesTool, SnipTool, TaskCreateTool, TaskGetTool,
+    TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext,
+    ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -748,6 +748,56 @@ fn mac_diagnostic_tools_validate_inputs_and_render_guidance() {
     );
     assert!(diagnose.content.contains("1. CrashLog list app_name: Tide"));
     assert!(diagnose.content.contains("2. MacLog process: Tide"));
+}
+
+#[test]
+fn cron_tools_create_list_and_delete_jobs() {
+    let context = ToolContext::new(".");
+    let create = CronCreateTool.call(
+        serde_json::json!({"cron": "*/5 * * * *", "prompt": "collect news"}),
+        &context,
+    );
+    assert!(!create.is_error);
+    assert!(create.content.contains("Recurring task"));
+    assert!(create.content.contains("every 5 minutes"));
+    assert!(create.content.contains("Permission mode switched to YOLO"));
+    let id = create
+        .content
+        .split_whitespace()
+        .nth(2)
+        .expect("job id")
+        .to_owned();
+
+    let list = CronListTool.call(serde_json::json!({}), &context);
+    assert!(!list.is_error);
+    assert!(
+        list.content
+            .contains(&format!("[{id}] Recurring: every 5 minutes"))
+    );
+    assert!(list.content.contains("Prompt: collect news"));
+
+    let delete = CronDeleteTool.call(serde_json::json!({"id": id}), &context);
+    assert!(!delete.is_error);
+    assert!(delete.content.contains("deleted"));
+}
+
+#[test]
+fn cron_create_rejects_malformed_expressions_and_empty_prompts() {
+    let context = ToolContext::new(".");
+    let bad_cron = CronCreateTool.call(
+        serde_json::json!({"cron": "/5 * * *", "prompt": "collect news"}),
+        &context,
+    );
+    assert!(bad_cron.is_error);
+    assert!(bad_cron.content.contains("5-field"));
+    assert!(bad_cron.content.contains("*/5 * * * *"));
+
+    let missing_prompt = CronCreateTool.call(
+        serde_json::json!({"cron": "*/5 * * * *", "prompt": ""}),
+        &context,
+    );
+    assert!(missing_prompt.is_error);
+    assert_eq!(missing_prompt.content, "prompt is required");
 }
 
 #[test]
