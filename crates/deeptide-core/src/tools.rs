@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -75,6 +76,7 @@ impl ToolRegistry {
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
+        registry.register(Box::<TodoWriteTool>::default());
         registry
     }
 
@@ -356,6 +358,106 @@ impl Tool for BashTool {
         }
 
         execute_shell_command(command, context, Duration::from_millis(timeout_ms))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TodoWriteTool;
+
+impl Tool for TodoWriteTool {
+    fn name(&self) -> &'static str {
+        "TodoWrite"
+    }
+
+    fn description(&self) -> &'static str {
+        "Replace the in-memory todo list in one call."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(raw_items) = input.get("todos").and_then(serde_json::Value::as_array) else {
+            return ToolResult::error("Missing or invalid todos array");
+        };
+
+        let parsed = raw_items
+            .iter()
+            .filter_map(parse_todo_item)
+            .collect::<Vec<_>>();
+        let all_done = !parsed.is_empty()
+            && parsed
+                .iter()
+                .all(|item| item.status == TodoStatus::Completed);
+        replace_todos(parsed.clone());
+
+        if all_done {
+            return ToolResult::text(
+                "Todo list cleared (all tasks completed). Proceed with your summary.",
+            );
+        }
+
+        ToolResult::text(format!(
+            "Todo list updated ({} items). Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable.",
+            parsed.len()
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TodoItem {
+    content: String,
+    status: TodoStatus,
+    active_form: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Deleted,
+}
+
+fn parse_todo_item(value: &serde_json::Value) -> Option<TodoItem> {
+    let object = value.as_object()?;
+    let content = object.get("content")?.as_str()?.to_owned();
+    let status = object
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(TodoStatus::parse)
+        .unwrap_or(TodoStatus::Pending);
+    let active_form = object
+        .get("activeForm")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    Some(TodoItem {
+        content,
+        status,
+        active_form,
+    })
+}
+
+impl TodoStatus {
+    fn parse(value: &str) -> Self {
+        match value {
+            "in_progress" => Self::InProgress,
+            "completed" => Self::Completed,
+            "deleted" => Self::Deleted,
+            _ => Self::Pending,
+        }
+    }
+}
+
+fn todo_storage() -> &'static Mutex<Vec<TodoItem>> {
+    static STORAGE: OnceLock<Mutex<Vec<TodoItem>>> = OnceLock::new();
+    STORAGE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn replace_todos(items: Vec<TodoItem>) {
+    if let Ok(mut todos) = todo_storage().lock() {
+        *todos = items;
     }
 }
 

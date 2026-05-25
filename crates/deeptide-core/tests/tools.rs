@@ -1,5 +1,5 @@
 use deeptide_core::{
-    BashTool, EditTool, ReadFilesTool, Tool, ToolContext, ToolRegistry, WriteTool,
+    BashTool, EditTool, ReadFilesTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, WriteTool,
 };
 
 #[test]
@@ -168,6 +168,51 @@ fn bash_tool_rejects_multiline_commands() {
 
     assert!(result.is_error);
     assert!(result.content.contains("command must be a single line"));
+}
+
+#[test]
+fn todo_write_tool_updates_in_memory_list() {
+    let result = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Inspect Swift behavior", "status": "completed"},
+                {"content": "Port Rust behavior", "status": "in_progress", "activeForm": "Porting"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "Todo list updated (2 items). Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable."
+    );
+}
+
+#[test]
+fn todo_write_tool_clears_when_all_tasks_complete() {
+    let result = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Finish", "status": "completed"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "Todo list cleared (all tasks completed). Proceed with your summary."
+    );
+}
+
+#[test]
+fn todo_write_tool_rejects_missing_todos_array() {
+    let result = TodoWriteTool.call(serde_json::json!({}), &ToolContext::new("."));
+
+    assert!(result.is_error);
+    assert_eq!(result.content, "Missing or invalid todos array");
 }
 
 #[test]

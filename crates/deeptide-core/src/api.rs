@@ -231,6 +231,29 @@ fn tool_schemas() -> Vec<WireTool> {
                 "required": ["command"]
             }),
         },
+        WireTool {
+            name: "TodoWrite",
+            description: "Replace the complete todo list for the current task. Use this to track multi-step progress.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "The complete todo list to write. Replaces the previous list entirely.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string", "description": "Todo item content."},
+                                "status": {"type": "string", "description": "pending, in_progress, completed, or deleted."},
+                                "activeForm": {"type": "string", "description": "Optional active phrasing for the current work."}
+                            },
+                            "required": ["content"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }),
+        },
     ]
 }
 
@@ -451,6 +474,16 @@ mod tests {
         assert_eq!(
             read_files.input_schema["required"],
             serde_json::json!(["paths"])
+        );
+
+        let todo_write = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TodoWrite")
+            .expect("TodoWrite tool schema should be declared");
+        assert_eq!(
+            todo_write.input_schema["required"],
+            serde_json::json!(["todos"])
         );
     }
 }
