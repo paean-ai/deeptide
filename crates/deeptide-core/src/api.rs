@@ -204,6 +204,27 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "WebSearch",
+            description: "Search the web using configured Brave Search or Serper credentials.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query to use.", "minLength": 2},
+                    "allowed_domains": {
+                        "type": "array",
+                        "description": "Only include search results from these domains.",
+                        "items": {"type": "string"}
+                    },
+                    "blocked_domains": {
+                        "type": "array",
+                        "description": "Exclude search results from these domains.",
+                        "items": {"type": "string"}
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -529,6 +550,16 @@ mod tests {
         assert_eq!(
             web_fetch.input_schema["required"],
             serde_json::json!(["url", "prompt"])
+        );
+
+        let web_search = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "WebSearch")
+            .expect("WebSearch tool schema should be declared");
+        assert_eq!(
+            web_search.input_schema["required"],
+            serde_json::json!(["query"])
         );
 
         let todo_write = request

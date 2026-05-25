@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use reqwest::Url;
+use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
@@ -76,6 +77,7 @@ impl ToolRegistry {
         registry.register(Box::<GlobTool>::default());
         registry.register(Box::<GrepTool>::default());
         registry.register(Box::<WebFetchTool>::default());
+        registry.register(Box::<WebSearchTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
@@ -346,6 +348,309 @@ impl Tool for WebFetchTool {
 
         fetch_web_content(&requested_url)
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WebSearchTool;
+
+impl WebSearchTool {
+    pub fn call_with_environment(
+        &self,
+        input: serde_json::Value,
+        env: &BTreeMap<String, String>,
+    ) -> ToolResult {
+        web_search_with_environment(input, env)
+    }
+}
+
+impl Tool for WebSearchTool {
+    fn name(&self) -> &'static str {
+        "WebSearch"
+    }
+
+    fn description(&self) -> &'static str {
+        "Search the web using configured Brave Search or Serper credentials."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let env = std::env::vars().collect::<BTreeMap<_, _>>();
+        self.call_with_environment(input, &env)
+    }
+}
+
+fn web_search_with_environment(
+    input: serde_json::Value,
+    env: &BTreeMap<String, String>,
+) -> ToolResult {
+    let Some(query) = input.get("query").and_then(serde_json::Value::as_str) else {
+        return ToolResult::error("Missing query parameter");
+    };
+    if query.chars().count() < 2 {
+        return ToolResult::error("query must be at least 2 characters");
+    }
+    if input.get("allowed_domains").is_some() && input.get("blocked_domains").is_some() {
+        return ToolResult::error("Cannot specify both allowed_domains and blocked_domains");
+    }
+
+    let allowed_domains = extract_string_array(input.get("allowed_domains"));
+    let blocked_domains = extract_string_array(input.get("blocked_domains"));
+
+    if let Some(api_key) = env
+        .get("BRAVE_SEARCH_API_KEY")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        && let Ok(results) = search_brave(query, api_key, &allowed_domains, &blocked_domains)
+    {
+        return ToolResult::text(results);
+    }
+
+    if let Some(api_key) = env
+        .get("SERPER_API_KEY")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        && let Ok(results) = search_serper(query, api_key, &allowed_domains, &blocked_domains)
+    {
+        return ToolResult::text(results);
+    }
+
+    let encoded = encode_query_component(query);
+    ToolResult::error(format!(
+        "WebSearch requires an API key. Set one of:\n  export BRAVE_SEARCH_API_KEY=<key>   # https://search.brave.com (2000 free/month)\n  export SERPER_API_KEY=<key>          # https://serper.dev (Google results)\n\nAlternative: use WebFetch to retrieve search results directly:\n  - https://html.duckduckgo.com/html/?q={encoded}\n  - https://www.google.com/search?q={encoded}"
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveSearchResponse {
+    web: Option<BraveWebResults>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveWebResults {
+    results: Vec<BraveWebResult>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BraveWebResult {
+    title: String,
+    url: String,
+    description: Option<String>,
+    age: Option<String>,
+}
+
+fn search_brave(
+    query: &str,
+    api_key: &str,
+    allowed_domains: &[String],
+    blocked_domains: &[String],
+) -> Result<String, String> {
+    let mut url =
+        Url::parse("https://api.search.brave.com/res/v1/web/search").map_err(|e| e.to_string())?;
+    url.query_pairs_mut()
+        .append_pair("q", query)
+        .append_pair("count", "10")
+        .append_pair("text_decorations", "false");
+
+    let client = web_search_client()?;
+    let response = client
+        .get(url)
+        .header("X-Subscription-Token", api_key)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Brave Search failed with HTTP {}",
+            response.status()
+        ));
+    }
+
+    let parsed = response
+        .json::<BraveSearchResponse>()
+        .map_err(|error| error.to_string())?;
+    let results = parsed.web.map(|web| web.results).unwrap_or_default();
+    let results = apply_domain_filters(
+        results
+            .into_iter()
+            .map(|result| (result.url.clone(), result)),
+        allowed_domains,
+        blocked_domains,
+    );
+
+    Ok(format_brave_results(query, &results))
+}
+
+fn format_brave_results(query: &str, results: &[BraveWebResult]) -> String {
+    if results.is_empty() {
+        return format!("No results found for: \"{query}\"");
+    }
+
+    let mut lines = vec![format!(
+        "Web search results for: \"{query}\" (Brave Search)"
+    )];
+    for (index, result) in results.iter().take(8).enumerate() {
+        lines.push(String::new());
+        lines.push(format!("{}. {}", index + 1, result.title));
+        lines.push(format!("   URL: {}", result.url));
+        if let Some(description) = result
+            .description
+            .as_ref()
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("   {description}"));
+        }
+        if let Some(age) = result.age.as_ref().filter(|value| !value.is_empty()) {
+            lines.push(format!("   {age}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "Use WebFetch on any URL above to read the full page content.",
+    ));
+    lines.join("\n")
+}
+
+#[derive(Debug, Deserialize)]
+struct SerperResponse {
+    organic: Option<Vec<SerperOrganic>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SerperOrganic {
+    title: String,
+    link: String,
+    snippet: Option<String>,
+    date: Option<String>,
+}
+
+fn search_serper(
+    query: &str,
+    api_key: &str,
+    allowed_domains: &[String],
+    blocked_domains: &[String],
+) -> Result<String, String> {
+    let client = web_search_client()?;
+    let response = client
+        .post("https://google.serper.dev/search")
+        .header("X-API-KEY", api_key)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&serde_json::json!({"q": query, "num": 10}))
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Serper search failed with HTTP {}",
+            response.status()
+        ));
+    }
+
+    let parsed = response
+        .json::<SerperResponse>()
+        .map_err(|error| error.to_string())?;
+    let results = apply_domain_filters(
+        parsed
+            .organic
+            .unwrap_or_default()
+            .into_iter()
+            .map(|result| (result.link.clone(), result)),
+        allowed_domains,
+        blocked_domains,
+    );
+
+    Ok(format_serper_results(query, &results))
+}
+
+fn format_serper_results(query: &str, results: &[SerperOrganic]) -> String {
+    if results.is_empty() {
+        return format!("No results found for: \"{query}\"");
+    }
+
+    let mut lines = vec![format!(
+        "Web search results for: \"{query}\" (Google via Serper)"
+    )];
+    for (index, result) in results.iter().take(8).enumerate() {
+        lines.push(String::new());
+        lines.push(format!("{}. {}", index + 1, result.title));
+        lines.push(format!("   URL: {}", result.link));
+        if let Some(snippet) = result.snippet.as_ref().filter(|value| !value.is_empty()) {
+            lines.push(format!("   {snippet}"));
+        }
+        if let Some(date) = result.date.as_ref().filter(|value| !value.is_empty()) {
+            lines.push(format!("   {date}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "Use WebFetch on any URL above to read the full page content.",
+    ));
+    lines.join("\n")
+}
+
+fn web_search_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+fn apply_domain_filters<T>(
+    items: impl IntoIterator<Item = (String, T)>,
+    allowed_domains: &[String],
+    blocked_domains: &[String],
+) -> Vec<T> {
+    items
+        .into_iter()
+        .filter(|(url, _)| domain_allowed(url, allowed_domains, blocked_domains))
+        .take(8)
+        .map(|(_, value)| value)
+        .collect()
+}
+
+fn domain_allowed(url: &str, allowed_domains: &[String], blocked_domains: &[String]) -> bool {
+    let Some(host) = Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+    else {
+        return true;
+    };
+    if !allowed_domains.is_empty() {
+        return allowed_domains
+            .iter()
+            .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
+    }
+    if !blocked_domains.is_empty() {
+        return !blocked_domains
+            .iter()
+            .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
+    }
+    true
+}
+
+fn extract_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn encode_query_component(query: &str) -> String {
+    let Ok(mut url) = Url::parse("https://example.invalid/") else {
+        return query.to_owned();
+    };
+    url.query_pairs_mut().append_pair("q", query);
+    url.query()
+        .and_then(|query| query.strip_prefix("q="))
+        .unwrap_or(query)
+        .to_owned()
 }
 
 fn fetch_web_content(url: &Url) -> ToolResult {

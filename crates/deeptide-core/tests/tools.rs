@@ -1,7 +1,8 @@
 use deeptide_core::{
     BashTool, EditTool, ReadFilesTool, TaskGetTool, TaskListTool, TaskUpdateTool, TodoWriteTool,
-    Tool, ToolContext, ToolRegistry, WebFetchTool, WriteTool,
+    Tool, ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WriteTool,
 };
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -446,6 +447,51 @@ fn web_fetch_tool_reports_invalid_urls() {
 
     assert!(result.is_error);
     assert_eq!(result.content, "Invalid URL: file:///etc/passwd");
+}
+
+#[test]
+fn web_search_tool_reports_missing_api_keys_with_fetch_alternatives() {
+    let result = WebSearchTool.call_with_environment(
+        serde_json::json!({"query": "rust cli", "allowed_domains": ["example.com"]}),
+        &BTreeMap::new(),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("WebSearch requires an API key"));
+    assert!(result.content.contains("BRAVE_SEARCH_API_KEY"));
+    assert!(result.content.contains("SERPER_API_KEY"));
+    assert!(
+        result
+            .content
+            .contains("https://html.duckduckgo.com/html/?q=rust+cli")
+    );
+    assert!(
+        result
+            .content
+            .contains("https://www.google.com/search?q=rust+cli")
+    );
+}
+
+#[test]
+fn web_search_tool_validates_query_and_domain_filter_modes() {
+    let short =
+        WebSearchTool.call_with_environment(serde_json::json!({"query": "r"}), &BTreeMap::new());
+    assert!(short.is_error);
+    assert_eq!(short.content, "query must be at least 2 characters");
+
+    let conflicting = WebSearchTool.call_with_environment(
+        serde_json::json!({
+            "query": "rust",
+            "allowed_domains": ["example.com"],
+            "blocked_domains": ["example.org"]
+        }),
+        &BTreeMap::new(),
+    );
+    assert!(conflicting.is_error);
+    assert_eq!(
+        conflicting.content,
+        "Cannot specify both allowed_domains and blocked_domains"
+    );
 }
 
 #[test]
