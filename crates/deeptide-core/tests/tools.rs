@@ -1,9 +1,9 @@
 use deeptide_core::{
-    AskUserQuestionTool, BashTool, BriefTool, CtxInspectTool, EditTool, EnterPlanModeTool,
-    ExitPlanModeTool, FileMetadataTool, MemorySearchTool, MemoryWriteTool, MonitorTool,
-    ReadFilesTool, SnipTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
-    TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool,
-    WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
+    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CtxInspectTool, EditTool,
+    EnterPlanModeTool, ExitPlanModeTool, FileMetadataTool, MemorySearchTool, MemoryWriteTool,
+    MonitorTool, ReadFilesTool, SnipTool, TaskCreateTool, TaskGetTool, TaskListTool,
+    TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry,
+    ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -626,6 +626,24 @@ fn plan_mode_tools_return_approval_flow_text() {
     assert!(!exit.is_error);
     assert!(exit.content.contains("Plan is ready for review"));
     assert!(exit.content.contains("- Bash: Run cargo test"));
+}
+
+#[test]
+fn clipboard_tool_validates_operation_and_write_content() {
+    let missing_operation = ClipboardTool.call(serde_json::json!({}), &ToolContext::new("."));
+    assert!(missing_operation.is_error);
+    assert!(
+        missing_operation
+            .content
+            .contains("operation must be one of")
+    );
+
+    let missing_content = ClipboardTool.call(
+        serde_json::json!({"operation": "write"}),
+        &ToolContext::new("."),
+    );
+    assert!(missing_content.is_error);
+    assert_eq!(missing_content.content, "write operation requires content");
 }
 
 #[test]

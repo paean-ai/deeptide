@@ -379,6 +379,22 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "Clipboard",
+            description: "Read from or write to the system clipboard. Finder selection is available on macOS.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "description": "inspect, read, files, finder_selection, or write.",
+                        "enum": ["inspect", "read", "files", "finder_selection", "write"]
+                    },
+                    "content": {"type": "string", "description": "Text to write to the clipboard. Required for write operation."}
+                },
+                "required": ["operation"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -841,6 +857,7 @@ mod tests {
             "Snip",
             "EnterPlanMode",
             "ExitPlanMode",
+            "Clipboard",
         ] {
             assert!(
                 request.tools.iter().any(|tool| tool.name == name),

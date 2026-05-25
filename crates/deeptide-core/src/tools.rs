@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead, Read, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -93,6 +93,7 @@ impl ToolRegistry {
         registry.register(Box::<SnipTool>::default());
         registry.register(Box::<EnterPlanModeTool>::default());
         registry.register(Box::<ExitPlanModeTool>::default());
+        registry.register(Box::<ClipboardTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
@@ -908,6 +909,152 @@ impl Tool for ExitPlanModeTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ClipboardTool;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClipboardSnapshot {
+    type_names: Vec<String>,
+    text: Option<String>,
+    file_paths: Vec<String>,
+    has_html: bool,
+    has_rtf: bool,
+    image_size: Option<(u32, u32)>,
+}
+
+impl Tool for ClipboardTool {
+    fn name(&self) -> &'static str {
+        "Clipboard"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read from or write to the system clipboard."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(operation) = input.get("operation").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error(
+                "operation must be one of: inspect, read, files, finder_selection, write",
+            );
+        };
+
+        match operation {
+            "inspect" => match clipboard_read_text() {
+                Ok(text) => ToolResult::text(ClipboardSnapshot::from_text(text).render_inspect()),
+                Err(message) => ToolResult::error(message),
+            },
+            "read" => match clipboard_read_text() {
+                Ok(text) => ToolResult::text(ClipboardSnapshot::from_text(text).render_read()),
+                Err(message) => ToolResult::error(message),
+            },
+            "files" => match clipboard_file_paths() {
+                Ok(paths) if paths.is_empty() => {
+                    ToolResult::text("[Clipboard contains no file URLs]")
+                }
+                Ok(paths) => ToolResult::text(paths.join("\n")),
+                Err(message) => ToolResult::error(message),
+            },
+            "finder_selection" => ToolResult::text(finder_selection()),
+            "write" => {
+                let Some(content) = input.get("content").and_then(serde_json::Value::as_str) else {
+                    return ToolResult::error("write operation requires content");
+                };
+                match clipboard_write_text(content) {
+                    Ok(()) => ToolResult::text(format!(
+                        "Written {} characters to clipboard.",
+                        content.chars().count()
+                    )),
+                    Err(message) => ToolResult::error(message),
+                }
+            }
+            _ => ToolResult::error(
+                "operation must be one of: inspect, read, files, finder_selection, write",
+            ),
+        }
+    }
+}
+
+impl ClipboardSnapshot {
+    fn from_text(text: String) -> Self {
+        Self {
+            type_names: if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![String::from("text/plain")]
+            },
+            text: (!text.is_empty()).then_some(text),
+            file_paths: Vec::new(),
+            has_html: false,
+            has_rtf: false,
+            image_size: None,
+        }
+    }
+
+    fn render_inspect(&self) -> String {
+        let mut lines = vec![String::from("[Clipboard.inspect]")];
+        lines.push(format!(
+            "types: {}",
+            if self.type_names.is_empty() {
+                String::from("none")
+            } else {
+                self.type_names.join(", ")
+            }
+        ));
+        if let Some(text) = &self.text {
+            let preview = truncate_chars(&text.replace('\n', "\\n"), 240);
+            lines.push(format!("text: {} chars - {preview}", text.chars().count()));
+        } else {
+            lines.push(String::from("text: none"));
+        }
+        if self.file_paths.is_empty() {
+            lines.push(String::from("files: none"));
+        } else {
+            lines.push(format!("files: {}", self.file_paths.len()));
+            lines.extend(
+                self.file_paths
+                    .iter()
+                    .take(20)
+                    .map(|path| format!("  {path}")),
+            );
+            if self.file_paths.len() > 20 {
+                lines.push(format!("  ... {} more", self.file_paths.len() - 20));
+            }
+        }
+        lines.push(format!("html: {}", self.has_html));
+        lines.push(format!("rtf: {}", self.has_rtf));
+        if let Some((width, height)) = self.image_size {
+            lines.push(format!("image: {width}x{height}"));
+        } else {
+            lines.push(String::from("image: none"));
+        }
+        lines.join("\n")
+    }
+
+    fn render_read(&self) -> String {
+        if let Some(text) = &self.text {
+            return text.clone();
+        }
+        if !self.file_paths.is_empty() {
+            return format!("[Clipboard file URLs]\n{}", self.file_paths.join("\n"));
+        }
+        if let Some((width, height)) = self.image_size {
+            return format!(
+                "[Clipboard image]\nsize: {width}x{height}\nUse image attachment support to provide the image to the next prompt."
+            );
+        }
+        if self.has_html || self.has_rtf {
+            return String::from(
+                "[Clipboard contains rich text but no plain text]\nUse inspect to view clipboard types.",
+            );
+        }
+        String::from("[Clipboard is empty or contains unsupported content]")
+    }
+}
+
 fn parse_user_questions(input: &serde_json::Value) -> Result<Vec<UserQuestion>, String> {
     let Some(items) = input.get("questions").and_then(serde_json::Value::as_array) else {
         return Err(String::from("At least one question is required"));
@@ -1243,6 +1390,217 @@ fn extract_allowed_prompts(input: &serde_json::Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+fn clipboard_read_text() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("pbpaste");
+        command_stdout(&mut command)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("powershell");
+        command.args(["-NoProfile", "-Command", "Get-Clipboard -Raw -Format Text"]);
+        command_stdout(&mut command)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        for args in [
+            ("wl-paste", vec!["--no-newline"]),
+            ("xclip", vec!["-selection", "clipboard", "-out"]),
+            ("xsel", vec!["--clipboard", "--output"]),
+        ] {
+            let mut command = Command::new(args.0);
+            command.args(args.1);
+            if let Ok(output) = command_stdout(&mut command) {
+                return Ok(output);
+            }
+        }
+        Err(String::from(
+            "Clipboard read is unavailable. Install wl-clipboard, xclip, or xsel.",
+        ))
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        Err(String::from(
+            "Clipboard read is unsupported on this platform.",
+        ))
+    }
+}
+
+fn clipboard_write_text(content: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        write_command_stdin("pbcopy", &[], content)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut child = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Set-Clipboard -Value ([Console]::In.ReadToEnd())",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Failed to start clipboard writer: {error}"))?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(content.as_bytes())
+                .map_err(|error| format!("Failed to write clipboard content: {error}"))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("Failed to wait for clipboard writer: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Clipboard write failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        for (program, args) in [
+            ("wl-copy", Vec::<&str>::new()),
+            ("xclip", vec!["-selection", "clipboard"]),
+            ("xsel", vec!["--clipboard", "--input"]),
+        ] {
+            if write_command_stdin(program, &args, content).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(String::from(
+            "Clipboard write is unavailable. Install wl-clipboard, xclip, or xsel.",
+        ))
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        let _ = content;
+        Err(String::from(
+            "Clipboard write is unsupported on this platform.",
+        ))
+    }
+}
+
+fn clipboard_file_paths() -> Result<Vec<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let script = r#"
+        use framework "AppKit"
+        use scripting additions
+        set pb to current application's NSPasteboard's generalPasteboard()
+        set urls to pb's readObjectsForClasses:{current application's NSURL} options:{current application's NSPasteboardURLReadingFileURLsOnlyKey:true}
+        if urls is missing value then return ""
+        set out to ""
+        repeat with u in urls
+          set out to out & (u's |path|() as text) & linefeed
+        end repeat
+        return out
+        "#;
+        let mut command = Command::new("osascript");
+        command.args(["-l", "AppleScript", "-e", script]);
+        command_stdout(&mut command).map(|output| {
+            output
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+fn finder_selection() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let script = r#"
+        tell application "Finder"
+          set selectedItems to selection
+          if selectedItems is {} then return ""
+          set output to ""
+          repeat with itemRef in selectedItems
+            set output to output & POSIX path of (itemRef as alias) & linefeed
+          end repeat
+          return output
+        end tell
+        "#;
+        let mut command = Command::new("osascript");
+        command.args(["-e", script]);
+        match command_stdout(&mut command) {
+            Ok(output) if output.trim().is_empty() => {
+                String::from("[Finder has no selected files]")
+            }
+            Ok(output) => output.trim().to_owned(),
+            Err(message) => format!(
+                "[Finder selection unavailable: {message}]\nGrant Automation permission to your terminal app if macOS prompts."
+            ),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        String::from("[Finder selection is only available on macOS]")
+    }
+}
+
+fn command_stdout(command: &mut Command) -> Result<String, String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("Failed to run clipboard command: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "Clipboard command failed: {}",
+            stderr.trim().if_empty("unknown error")
+        ))
+    }
+}
+
+fn write_command_stdin(program: &str, args: &[&str], content: &str) -> Result<(), String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start clipboard writer: {error}"))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(content.as_bytes())
+            .map_err(|error| format!("Failed to write clipboard content: {error}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Failed to wait for clipboard writer: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Clipboard write failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+trait EmptyFallback {
+    fn if_empty(&self, fallback: &'static str) -> &str;
+}
+
+impl EmptyFallback for str {
+    fn if_empty(&self, fallback: &'static str) -> &str {
+        if self.is_empty() { fallback } else { self }
+    }
+}
+
 fn builtin_tool_search_entries() -> Vec<ToolSearchEntry> {
     ToolRegistry::with_builtin_tools()
         .tools
@@ -1505,6 +1863,14 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
         "Snip" => vec!["context", "trim", "history", "messages", "tokens"],
         "EnterPlanMode" => vec!["plan", "planning", "explore", "approval"],
         "ExitPlanMode" => vec!["plan", "approval", "implementation", "permissions"],
+        "Clipboard" => vec![
+            "clipboard",
+            "pasteboard",
+            "copy",
+            "paste",
+            "finder",
+            "selection",
+        ],
         "Edit" => vec!["replace", "patch", "modify", "string replacement"],
         "FileMetadata" => vec!["xattr", "quarantine", "binary", "mime", "file type"],
         "Glob" => vec!["find files", "discover", "pattern"],
@@ -3816,4 +4182,59 @@ fn home_dir() -> Option<PathBuf> {
 
 fn normalize_path(path: PathBuf) -> PathBuf {
     path.components().collect()
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::ClipboardSnapshot;
+
+    #[test]
+    fn clipboard_snapshot_read_prefers_plain_text() {
+        let snapshot = ClipboardSnapshot {
+            type_names: vec![String::from("text/plain"), String::from("public.file-url")],
+            text: Some(String::from("hello")),
+            file_paths: vec![String::from("/tmp/a.txt")],
+            has_html: false,
+            has_rtf: false,
+            image_size: None,
+        };
+
+        assert_eq!(snapshot.render_read(), "hello");
+    }
+
+    #[test]
+    fn clipboard_snapshot_read_reports_file_urls() {
+        let snapshot = ClipboardSnapshot {
+            type_names: vec![String::from("public.file-url")],
+            text: None,
+            file_paths: vec![String::from("/tmp/a.txt"), String::from("/tmp/b.txt")],
+            has_html: false,
+            has_rtf: false,
+            image_size: None,
+        };
+
+        assert_eq!(
+            snapshot.render_read(),
+            "[Clipboard file URLs]\n/tmp/a.txt\n/tmp/b.txt"
+        );
+    }
+
+    #[test]
+    fn clipboard_snapshot_inspect_reports_rich_content() {
+        let snapshot = ClipboardSnapshot {
+            type_names: vec![String::from("public.html"), String::from("public.rtf")],
+            text: None,
+            file_paths: Vec::new(),
+            has_html: true,
+            has_rtf: true,
+            image_size: Some((120, 80)),
+        };
+
+        let rendered = snapshot.render_inspect();
+
+        assert!(rendered.contains("types: public.html, public.rtf"));
+        assert!(rendered.contains("html: true"));
+        assert!(rendered.contains("rtf: true"));
+        assert!(rendered.contains("image: 120x80"));
+    }
 }
