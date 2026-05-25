@@ -420,6 +420,7 @@ fn is_read_only(tool_name: &str) -> bool {
             | "AudioTranscribe"
             | "VideoTranscribe"
             | "MemorySearch"
+            | "LSP"
     )
 }
 

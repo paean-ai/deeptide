@@ -395,6 +395,24 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "LSP",
+            description: "Code intelligence through a local Language Server Protocol server.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "description": "goToDefinition, findReferences, hover, or documentSymbol.",
+                        "enum": ["goToDefinition", "findReferences", "hover", "documentSymbol"]
+                    },
+                    "file_path": {"type": "string", "description": "Path to the source file. Relative paths resolve against the current workspace."},
+                    "line": {"type": "integer", "description": "Line number, 1-based as shown in editors."},
+                    "character": {"type": "integer", "description": "Character offset, 1-based. Required for goToDefinition, findReferences, and hover."}
+                },
+                "required": ["operation", "file_path", "line"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -858,6 +876,7 @@ mod tests {
             "EnterPlanMode",
             "ExitPlanMode",
             "Clipboard",
+            "LSP",
         ] {
             assert!(
                 request.tools.iter().any(|tool| tool.name == name),

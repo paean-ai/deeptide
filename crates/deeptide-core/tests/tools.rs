@@ -1,9 +1,9 @@
 use deeptide_core::{
     AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CtxInspectTool, EditTool,
-    EnterPlanModeTool, ExitPlanModeTool, FileMetadataTool, MemorySearchTool, MemoryWriteTool,
-    MonitorTool, ReadFilesTool, SnipTool, TaskCreateTool, TaskGetTool, TaskListTool,
-    TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry,
-    ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
+    EnterPlanModeTool, ExitPlanModeTool, FileMetadataTool, LspTool, MemorySearchTool,
+    MemoryWriteTool, MonitorTool, ReadFilesTool, SnipTool, TaskCreateTool, TaskGetTool,
+    TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext,
+    ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -644,6 +644,32 @@ fn clipboard_tool_validates_operation_and_write_content() {
     );
     assert!(missing_content.is_error);
     assert_eq!(missing_content.content, "write operation requires content");
+}
+
+#[test]
+fn lsp_tool_validates_operation_file_and_line_before_server_lookup() {
+    let context = ToolContext::new(".");
+    let missing_operation = LspTool.call(serde_json::json!({}), &context);
+    assert!(missing_operation.is_error);
+    assert!(
+        missing_operation
+            .content
+            .contains("operation must be one of")
+    );
+
+    let missing_file = LspTool.call(
+        serde_json::json!({"operation": "hover", "line": 1}),
+        &context,
+    );
+    assert!(missing_file.is_error);
+    assert_eq!(missing_file.content, "file_path is required");
+
+    let missing_line = LspTool.call(
+        serde_json::json!({"operation": "documentSymbol", "file_path": "src/lib.rs"}),
+        &context,
+    );
+    assert!(missing_line.is_error);
+    assert_eq!(missing_line.content, "line is required");
 }
 
 #[test]
