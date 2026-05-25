@@ -1507,6 +1507,9 @@ fn read_text_file_limited(path: &Path, line_limit: Option<usize>) -> Result<Stri
             path.display()
         ));
     }
+    if let Some(kind) = special_file_kind(path) {
+        return Err(unsupported_special_file_message(path, kind, metadata.len()));
+    }
 
     let file = match fs::File::open(path) {
         Ok(file) => file,
@@ -1547,6 +1550,37 @@ fn read_text_file_limited(path: &Path, line_limit: Option<usize>) -> Result<Stri
     }
 
     Ok(output)
+}
+
+fn special_file_kind(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "heic" | "avif" => {
+            Some("image")
+        }
+        "pdf" => Some("PDF document"),
+        "doc" | "docx" | "rtf" | "rtfd" | "odt" | "ppt" | "pptx" | "xls" | "xlsx" | "ods"
+        | "odp" | "webarchive" => Some("office or rich document"),
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "dmg" | "pkg" => {
+            Some("archive or package")
+        }
+        "mp3" | "wav" | "m4a" | "flac" | "mp4" | "mov" | "avi" | "mkv" | "webm" => {
+            Some("media file")
+        }
+        "sqlite" | "sqlite3" | "db" => Some("database file"),
+        _ => None,
+    }
+}
+
+fn unsupported_special_file_message(path: &Path, kind: &str, bytes: u64) -> String {
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("<unknown>");
+    format!(
+        "reason: unsupported binary or package-like file\nfile: {file}\ntype: {kind} · size: {}\nlikely_cause: this path appears to be {kind}, and Read avoids dumping binary data into context.\nnext_action: use a dedicated tool for images, PDFs, Office files, archives, media, or app bundles; if this is actually source text, report the extension/filename so Read can classify it safely.",
+        format_byte_count(bytes as usize)
+    )
 }
 
 fn execute_shell_command(command: &str, context: &ToolContext, timeout: Duration) -> ToolResult {

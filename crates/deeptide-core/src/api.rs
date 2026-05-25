@@ -143,7 +143,8 @@ fn tool_schemas() -> Vec<WireTool> {
                 "properties": {
                     "file_path": {"type": "string", "description": "Path to the file to read."},
                     "offset": {"type": "integer", "description": "Line number to start reading from. Defaults to 1."},
-                    "limit": {"type": "integer", "description": "Number of lines to read."}
+                    "limit": {"type": "integer", "description": "Number of lines to read."},
+                    "pages": {"type": "string", "description": "Page range for PDF files, reserved for PDF-capable readers."}
                 },
                 "required": ["file_path"]
             }),

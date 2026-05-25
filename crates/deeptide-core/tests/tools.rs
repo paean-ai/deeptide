@@ -59,6 +59,30 @@ fn read_tool_reports_missing_files_with_hint() {
 }
 
 #[test]
+fn read_tool_reports_special_binary_formats_without_dumping_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("diagram.png"),
+        [0x89, b'P', b'N', b'G', 0, 1],
+    )
+    .expect("write fixture");
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let result = registry.call(
+        "Read",
+        serde_json::json!({"file_path": "diagram.png"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("reason: unsupported binary"));
+    assert!(result.content.contains("file: diagram.png"));
+    assert!(result.content.contains("type: image"));
+    assert!(result.content.contains("next_action: use a dedicated tool"));
+    assert!(!result.content.contains("PNG\u{0}"));
+}
+
+#[test]
 fn read_files_tool_reads_multiple_files_with_headers() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join("a.txt"), "alpha\n").expect("write fixture");
