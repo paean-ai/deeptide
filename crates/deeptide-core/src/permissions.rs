@@ -150,6 +150,16 @@ pub struct PermissionRules {
 }
 
 impl PermissionRules {
+    pub fn in_memory() -> Self {
+        Self {
+            allow_list: Vec::new(),
+            deny_list: Vec::new(),
+            session_allow_list: Vec::new(),
+            session_deny_list: Vec::new(),
+            storage_path: std::env::temp_dir().join("deeptide-permissions.json"),
+        }
+    }
+
     pub fn load(storage_path: Option<PathBuf>) -> io::Result<Self> {
         let storage_path = storage_path.unwrap_or_else(default_rules_path);
         let file = match fs::read(&storage_path) {
@@ -362,7 +372,7 @@ impl PermissionManager {
             return PermissionDecision::Allow;
         }
 
-        if self.mode == PermissionMode::AcceptEdits && tool_name == "Edit" {
+        if self.mode == PermissionMode::AcceptEdits && matches!(tool_name, "Edit" | "Write") {
             return PermissionDecision::Allow;
         }
 
@@ -729,6 +739,24 @@ mod tests {
 
         manager.add_session_rule(false, "MemoryWrite", "*");
         assert_denied(manager.check("MemoryWrite", &ToolInput::default()));
+    }
+
+    #[test]
+    fn accept_edits_mode_allows_file_write_tools() {
+        let manager = PermissionManager::new(PermissionMode::AcceptEdits, temp_rules());
+
+        assert_eq!(
+            manager.check("Write", &sample_input("Write")),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            manager.check("Edit", &sample_input("Edit")),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            manager.check("Bash", &sample_input("Bash")),
+            PermissionDecision::Ask
+        );
     }
 
     #[test]

@@ -68,6 +68,7 @@ impl ToolRegistry {
         registry.register(Box::<ReadTool>::default());
         registry.register(Box::<GlobTool>::default());
         registry.register(Box::<GrepTool>::default());
+        registry.register(Box::<WriteTool>::default());
         registry
     }
 

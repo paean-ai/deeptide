@@ -176,6 +176,18 @@ fn tool_schemas() -> Vec<WireTool> {
                 "required": ["pattern"]
             }),
         },
+        WireTool {
+            name: "Write",
+            description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file to create or replace."},
+                    "content": {"type": "string", "description": "Complete file contents to write."}
+                },
+                "required": ["file_path", "content"]
+            }),
+        },
     ]
 }
 
@@ -266,7 +278,7 @@ fn classify_error(status: u16, body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{messages_url, parse_messages_response};
+    use super::{WireMessage, build_messages_request, messages_url, parse_messages_response};
     use std::time::Duration;
 
     #[test]
@@ -345,5 +357,27 @@ mod tests {
         assert_eq!(response.tool_calls[0].name, "Read");
         assert_eq!(response.tool_calls[0].input["file_path"], "README.md");
         assert_eq!(response.tool_calls[0].input["limit"], 5);
+    }
+
+    #[test]
+    fn messages_request_declares_write_tool_schema() {
+        let request = build_messages_request(
+            "test-model",
+            [WireMessage {
+                role: "user",
+                content: vec![super::WireContentBlock::text("write a file")],
+            }],
+            100,
+        );
+
+        let write = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "Write")
+            .expect("Write tool schema should be declared");
+        assert_eq!(
+            write.input_schema["required"],
+            serde_json::json!(["file_path", "content"])
+        );
     }
 }

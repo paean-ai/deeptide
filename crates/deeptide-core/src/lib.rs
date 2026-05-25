@@ -24,6 +24,10 @@ pub use completion::{
     Replacement,
 };
 pub use cost::{CacheHealth, CostSummary, CostTracker, ModelPricing, TurnRecord, TurnUsage};
+pub use permissions::{
+    PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
+    ToolInput,
+};
 pub use repl::{ReplEvent, ReplSession};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{

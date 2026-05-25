@@ -1,6 +1,6 @@
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
-    AgentUsage, MessageRole, ToolCall,
+    AgentUsage, MessageRole, PermissionMode, ToolCall,
 };
 
 #[test]
@@ -86,6 +86,54 @@ fn agent_loop_executes_tool_calls_and_continues() {
     );
 }
 
+#[test]
+fn agent_loop_blocks_write_tool_calls_without_edit_permission() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(WriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3);
+
+    let events = loop_.run("write notes");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: true,
+            } if tool_call.name == "Write" && content.contains("Permission required")
+        )
+    }));
+    assert!(!temp.path().join("notes.txt").exists());
+}
+
+#[test]
+fn agent_loop_allows_write_tool_calls_in_accept_edits_mode() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(WriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_permission_mode(PermissionMode::AcceptEdits)
+        .with_max_turns(3);
+
+    let events = loop_.run("write notes");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "Write" && content.contains("Created file: notes.txt")
+        )
+    }));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("written file"),
+        "hello from agent"
+    );
+}
+
 struct StaticBackend {
     content: String,
     usage: Option<AgentUsage>,
@@ -143,6 +191,33 @@ impl AgentBackend for ToolCallingBackend {
             })
         } else {
             Ok(AgentResponse::text("done after tool"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct WriteCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for WriteCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will write the file."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_write",
+                    "Write",
+                    serde_json::json!({
+                        "file_path": "notes.txt",
+                        "content": "hello from agent",
+                    }),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after write"))
         }
     }
 }

@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, ClearCommand,
     CommandCompletionSource, CommandContext, CommandResult, CompactCommand, CostCommand,
-    HelpCommand, MemoryCommand, NewCommand, RememberCommand, SlashCommand, Tool, ToolContext,
-    ToolRegistry, WriteTool,
+    HelpCommand, MemoryCommand, NewCommand, PermissionMode, RememberCommand, SlashCommand, Tool,
+    ToolContext, ToolRegistry, WriteTool,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +40,12 @@ impl ReplSession {
 
     pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
         self.tool_context = ToolContext::new(cwd);
+        self.agent_loop = self.agent_loop.with_cwd(self.tool_context.cwd.clone());
+        self
+    }
+
+    pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.agent_loop = self.agent_loop.with_permission_mode(mode);
         self
     }
 
