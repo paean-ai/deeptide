@@ -1,4 +1,4 @@
-use deeptide_core::{EditTool, Tool, ToolContext, ToolRegistry, WriteTool};
+use deeptide_core::{BashTool, EditTool, Tool, ToolContext, ToolRegistry, WriteTool};
 
 #[test]
 fn read_tool_reads_text_file_with_line_numbers() {
@@ -60,6 +60,45 @@ fn registry_reports_unknown_tools() {
 
     assert!(result.is_error);
     assert_eq!(result.content, "Unknown tool: Nope");
+}
+
+#[test]
+fn bash_tool_executes_commands_in_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\n").expect("write fixture");
+
+    let result = BashTool.call(
+        serde_json::json!({"command": list_workspace_command()}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("notes.txt"));
+}
+
+#[test]
+fn bash_tool_reports_stderr_and_exit_status_as_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = BashTool.call(
+        serde_json::json!({"command": stderr_failure_command()}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("[stderr]"));
+    assert!(result.content.contains("boom"));
+}
+
+#[test]
+fn bash_tool_rejects_multiline_commands() {
+    let result = BashTool.call(
+        serde_json::json!({"command": "echo one\necho two"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("command must be a single line"));
 }
 
 #[test]
@@ -269,4 +308,24 @@ fn edit_tool_reports_missing_old_string_with_reread_guidance() {
     assert!(result.is_error);
     assert!(result.content.contains("old_string not found in file"));
     assert!(result.content.contains("Please re-read the file"));
+}
+
+#[cfg(windows)]
+fn list_workspace_command() -> &'static str {
+    "dir /b"
+}
+
+#[cfg(not(windows))]
+fn list_workspace_command() -> &'static str {
+    "ls"
+}
+
+#[cfg(windows)]
+fn stderr_failure_command() -> &'static str {
+    "echo boom 1>&2 && exit /b 7"
+}
+
+#[cfg(not(windows))]
+fn stderr_failure_command() -> &'static str {
+    "echo boom >&2; exit 7"
 }

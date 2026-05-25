@@ -202,6 +202,20 @@ fn tool_schemas() -> Vec<WireTool> {
                 "required": ["file_path", "old_string", "new_string"]
             }),
         },
+        WireTool {
+            name: "Bash",
+            description: "Execute a single-line shell command in the current workspace. Prefer Read/Edit/Write/Glob/Grep for file work; use Bash for builds, tests, git, package managers, and shell-only operations.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Single-line shell command to execute."},
+                    "timeout": {"type": "integer", "description": "Optional timeout in milliseconds, maximum 600000."},
+                    "description": {"type": "string", "description": "Short description of what the command does."},
+                    "run_in_background": {"type": "boolean", "description": "Start command and return immediately."}
+                },
+                "required": ["command"]
+            }),
+        },
     ]
 }
 
@@ -374,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn messages_request_declares_write_and_edit_tool_schemas() {
+    fn messages_request_declares_core_mutating_tool_schemas() {
         let request = build_messages_request(
             "test-model",
             [WireMessage {
@@ -402,6 +416,16 @@ mod tests {
         assert_eq!(
             edit.input_schema["required"],
             serde_json::json!(["file_path", "old_string", "new_string"])
+        );
+
+        let bash = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "Bash")
+            .expect("Bash tool schema should be declared");
+        assert_eq!(
+            bash.input_schema["required"],
+            serde_json::json!(["command"])
         );
     }
 }

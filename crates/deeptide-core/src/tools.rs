@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
@@ -70,6 +73,7 @@ impl ToolRegistry {
         registry.register(Box::<GrepTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
+        registry.register(Box::<BashTool>::default());
         registry
     }
 
@@ -244,6 +248,58 @@ impl Tool for GrepTool {
             .map(GlobMatcher::new);
 
         grep_path(&base, &base, &regex, output_mode, glob.as_ref(), head_limit)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BashTool;
+
+impl Tool for BashTool {
+    fn name(&self) -> &'static str {
+        "Bash"
+    }
+
+    fn description(&self) -> &'static str {
+        "Execute a single-line shell command in the current workspace."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(command) = input.get("command").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing command parameter");
+        };
+        if command.trim().is_empty() {
+            return ToolResult::error("command is required and must be non-empty");
+        }
+        if command.contains('\n') || command.contains('\r') {
+            return ToolResult::error("command must be a single line; rewrite it with && or ;");
+        }
+
+        let timeout_ms = input
+            .get("timeout")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(120_000)
+            .min(600_000);
+        if input
+            .get("timeout")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|timeout| timeout > 600_000)
+        {
+            return ToolResult::error("timeout must be <= 600000ms (10 minutes)");
+        }
+
+        if input
+            .get("run_in_background")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            return start_background_command(command, context);
+        }
+
+        execute_shell_command(command, context, Duration::from_millis(timeout_ms))
     }
 }
 
@@ -467,6 +523,155 @@ fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> T
         .join("\n");
 
     ToolResult::text(output)
+}
+
+fn execute_shell_command(command: &str, context: &ToolContext, timeout: Duration) -> ToolResult {
+    let mut child = match shell_command(command)
+        .current_dir(&context.cwd)
+        .env_remove("TIDE_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("ZERO_CLI_API_KEY")
+        .env_remove("ZERO_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return ToolResult::error(format!("Failed to execute command: {error}"));
+        }
+    };
+
+    let started = Instant::now();
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) if started.elapsed() >= timeout => {
+                timed_out = true;
+                let _ = child.kill();
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(error) => return ToolResult::error(format!("Failed to wait for command: {error}")),
+        }
+    }
+
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(error) => {
+            return ToolResult::error(format!("Failed to collect command output: {error}"));
+        }
+    };
+
+    render_command_output(
+        command,
+        output.status.code(),
+        timed_out,
+        &output.stdout,
+        &output.stderr,
+    )
+}
+
+fn start_background_command(command: &str, context: &ToolContext) -> ToolResult {
+    match shell_command(command)
+        .current_dir(&context.cwd)
+        .env_remove("TIDE_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("ZERO_CLI_API_KEY")
+        .env_remove("ZERO_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_child) => ToolResult::text(format!(
+            "Command started in background: `{}`",
+            truncate_chars(command, 100)
+        )),
+        Err(error) => ToolResult::error(format!("Failed to execute command: {error}")),
+    }
+}
+
+fn shell_command(command: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut process = Command::new("cmd");
+        process.args(["/C", command]);
+        process
+    }
+    #[cfg(not(windows))]
+    {
+        let mut process = Command::new("sh");
+        process.args(["-c", command]);
+        process
+    }
+}
+
+fn render_command_output(
+    _command: &str,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> ToolResult {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let mut output = String::new();
+    if timed_out {
+        output.push_str("[Timed out after configured timeout - process killed]\n");
+    }
+    if !stdout.is_empty() {
+        output.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str("[stderr]\n");
+        output.push_str(&stderr);
+    }
+
+    let failed = timed_out || exit_code.unwrap_or(1) != 0;
+    if output.is_empty() && failed {
+        output = format!(
+            "Command exited with code {} (no output)",
+            exit_code.unwrap_or(-1)
+        );
+    }
+
+    let output = truncate_command_output(&output, 30_000, 500);
+    if failed {
+        ToolResult::error(output)
+    } else {
+        ToolResult::text(output)
+    }
+}
+
+fn truncate_command_output(output: &str, max_chars: usize, max_lines: usize) -> String {
+    let mut truncated = output
+        .lines()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if output.ends_with('\n') && output.lines().count() <= max_lines {
+        truncated.push('\n');
+    }
+    if truncated.chars().count() > max_chars {
+        truncated = truncate_chars(&truncated, max_chars);
+        truncated.push_str("\n[Output truncated]");
+    } else if output.lines().count() > max_lines {
+        truncated.push_str("\n[Output truncated]");
+    }
+    truncated
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    value.chars().take(max_chars).collect()
 }
 
 fn normalize_line_endings(content: &str) -> String {

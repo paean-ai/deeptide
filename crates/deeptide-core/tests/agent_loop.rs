@@ -161,6 +161,49 @@ fn agent_loop_allows_edit_tool_calls_in_accept_edits_mode() {
     );
 }
 
+#[test]
+fn agent_loop_blocks_bash_tool_calls_without_permission() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(BashCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3);
+
+    let events = loop_.run("run shell");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: true,
+            } if tool_call.name == "Bash" && content.contains("Permission required")
+        )
+    }));
+}
+
+#[test]
+fn agent_loop_allows_bash_tool_calls_in_bypass_mode() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(BashCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_permission_mode(PermissionMode::Bypass)
+        .with_max_turns(3);
+
+    let events = loop_.run("run shell");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "Bash" && content.contains("shell-ok")
+        )
+    }));
+}
+
 struct StaticBackend {
     content: String,
     usage: Option<AgentUsage>,
@@ -275,4 +318,40 @@ impl AgentBackend for EditCallingBackend {
             Ok(AgentResponse::text("done after edit"))
         }
     }
+}
+
+#[derive(Default)]
+struct BashCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for BashCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will run a shell command."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_bash",
+                    "Bash",
+                    serde_json::json!({
+                        "command": echo_ok_command(),
+                    }),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after bash"))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn echo_ok_command() -> &'static str {
+    "echo shell-ok"
+}
+
+#[cfg(not(windows))]
+fn echo_ok_command() -> &'static str {
+    "printf shell-ok"
 }
