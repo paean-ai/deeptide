@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use clap::{ArgAction, Parser, ValueEnum};
 use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
-use deeptide_core::{LocalEchoBackend, ReplEvent, ReplSession};
+use deeptide_core::{
+    AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
+    LocalEchoBackend, ReplEvent, ReplSession,
+};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 enum InputFormat {
@@ -54,6 +57,22 @@ struct Cli {
         help = "Permission mode: default, accept-edits, plan, bypass."
     )]
     permission_mode: String,
+
+    #[arg(long, env = "DEEPTIDE_MODEL", default_value = "deepseek-v4-pro")]
+    model: String,
+
+    #[arg(
+        long,
+        env = "DEEPTIDE_BASE_URL",
+        default_value = "https://api.anthropic.com"
+    )]
+    base_url: String,
+
+    #[arg(long, env = "DEEPTIDE_API_KEY", hide_env_values = true)]
+    api_key: Option<String>,
+
+    #[arg(long, default_value_t = 4096)]
+    max_output_tokens: usize,
 }
 
 fn main() {
@@ -77,7 +96,7 @@ fn run(mut cli: Cli) -> Result<(), String> {
 
     validate_formats(&cli)?;
     if !cli.print_mode && cli.input_format == InputFormat::Text {
-        return run_interactive(permission_mode);
+        return run_interactive(&cli, permission_mode);
     }
 
     let stdin = read_stdin_if_needed(&cli)?;
@@ -149,10 +168,11 @@ fn collect_prompt(cli: &Cli, stdin: Option<&str>) -> Result<String, String> {
     }
 }
 
-fn run_interactive(permission_mode: PermissionMode) -> Result<(), String> {
+fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), String> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut repl = ReplSession::new(Box::<LocalEchoBackend>::default()).with_model("unconfigured");
+    let (backend, model, is_configured) = configured_backend(cli)?;
+    let mut repl = ReplSession::new(backend).with_model(model);
 
     writeln!(stdout, "{}", repl.banner()).map_err(|error| error.to_string())?;
     writeln!(
@@ -161,6 +181,13 @@ fn run_interactive(permission_mode: PermissionMode) -> Result<(), String> {
         permission_mode.label()
     )
     .map_err(|error| error.to_string())?;
+    if !is_configured {
+        writeln!(
+            stdout,
+            "No API key configured; using local echo backend. Set DEEPTIDE_API_KEY or --api-key to call a model."
+        )
+        .map_err(|error| error.to_string())?;
+    }
 
     loop {
         write!(stdout, "{}", repl.prompt()).map_err(|error| error.to_string())?;
@@ -187,18 +214,22 @@ fn run_interactive(permission_mode: PermissionMode) -> Result<(), String> {
 }
 
 fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Result<(), String> {
+    let response = run_prompt(cli, prompt)?;
+
     match cli.output_format {
         OutputFormat::Text => {
-            println!("{prompt}");
+            println!("{response}");
         }
         OutputFormat::Json => {
             let body = serde_json::json!({
                 "prompt": prompt,
+                "response": response,
                 "input_format": cli.input_format.as_ref(),
                 "output_format": cli.output_format.as_ref(),
                 "embedded": cli.embedded,
                 "session_id": cli.session_id,
                 "permission_mode": permission_mode.label(),
+                "model": cli.model,
             });
             println!(
                 "{}",
@@ -215,10 +246,12 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
                 "{}",
                 serde_json::to_string(&serde_json::json!({
                     "type": "result",
-                    "subtype": "prompt_preview",
+                    "subtype": "assistant_response",
                     "prompt": prompt,
+                    "response": response,
                     "session_id": cli.session_id,
                     "permission_mode": permission_mode.label(),
+                    "model": cli.model,
                 }))
                 .map_err(|error| error.to_string())?
             );
@@ -226,6 +259,46 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
     }
 
     Ok(())
+}
+
+fn run_prompt(cli: &Cli, prompt: &str) -> Result<String, String> {
+    let (backend, model, _) = configured_backend(cli)?;
+    let mut loop_ = AgentLoop::new(backend).with_model(model);
+
+    let events = loop_.run(prompt);
+    let mut assistant = None;
+    for event in events {
+        match event {
+            AgentLoopEvent::Assistant(message) => assistant = Some(message.content),
+            AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)) => return Err(error),
+            AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => {
+                return Err(String::from("maximum turns reached"));
+            }
+            AgentLoopEvent::User(_) | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => {}
+        }
+    }
+
+    assistant.ok_or_else(|| String::from("model returned no assistant message"))
+}
+
+fn configured_backend(cli: &Cli) -> Result<(Box<dyn AgentBackend>, String, bool), String> {
+    let api_key = cli
+        .api_key
+        .clone()
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+    let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) else {
+        return Ok((
+            Box::<LocalEchoBackend>::default(),
+            String::from("unconfigured"),
+            false,
+        ));
+    };
+
+    let base_url = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| cli.base_url.clone());
+    let mut config = AnthropicConfig::new(base_url, api_key, cli.model.clone());
+    config.max_tokens = cli.max_output_tokens;
+    let backend = AnthropicBackend::new(config)?;
+    Ok((Box::new(backend), cli.model.clone(), true))
 }
 
 fn read_stdin_if_needed(cli: &Cli) -> Result<Option<String>, String> {
@@ -283,6 +356,10 @@ mod tests {
             session_id: None,
             cwd: None,
             permission_mode: "default".to_owned(),
+            model: "deepseek-v4-pro".to_owned(),
+            base_url: "https://api.anthropic.com".to_owned(),
+            api_key: None,
+            max_output_tokens: 4096,
         }
     }
 

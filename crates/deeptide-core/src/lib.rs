@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod api;
 pub mod commands;
 pub mod completion;
 pub mod cost;
@@ -12,6 +13,7 @@ pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
     AgentUsage, ConversationMessage, LocalEchoBackend, MessageRole,
 };
+pub use api::{AnthropicBackend, AnthropicConfig};
 pub use commands::{
     ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, HelpCommand,
     MemoryCommand, NewCommand, RememberCommand, SlashCommand,
