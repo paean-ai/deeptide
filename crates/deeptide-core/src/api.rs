@@ -252,6 +252,45 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "AskUserQuestion",
+            description: "Ask the user clarifying questions when progress is blocked by missing information.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "description": "Questions to ask the user (1-4 questions).",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {"type": "string", "description": "The complete question to ask the user."},
+                                "header": {"type": "string", "description": "Very short label displayed as a chip/tag (max 12 chars)."},
+                                "options": {
+                                    "type": "array",
+                                    "description": "The available choices for this question (2-4 options).",
+                                    "minItems": 2,
+                                    "maxItems": 4,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {"type": "string", "description": "The display text for this option (1-5 words)."},
+                                            "description": {"type": "string", "description": "Explanation of what this option means."}
+                                        },
+                                        "required": ["label", "description"]
+                                    }
+                                },
+                                "multiSelect": {"type": "boolean", "description": "Set to true to allow multiple answers."}
+                            },
+                            "required": ["question", "header", "options", "multiSelect"]
+                        }
+                    }
+                },
+                "required": ["questions"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -653,6 +692,16 @@ mod tests {
         assert_eq!(
             tool_search.input_schema["required"],
             serde_json::json!(["query"])
+        );
+
+        let ask_user = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "AskUserQuestion")
+            .expect("AskUserQuestion tool schema should be declared");
+        assert_eq!(
+            ask_user.input_schema["required"],
+            serde_json::json!(["questions"])
         );
 
         let todo_write = request

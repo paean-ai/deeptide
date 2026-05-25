@@ -1,7 +1,7 @@
 use deeptide_core::{
-    BashTool, EditTool, FileMetadataTool, ReadFilesTool, TaskCreateTool, TaskGetTool, TaskListTool,
-    TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry,
-    ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
+    AskUserQuestionTool, BashTool, EditTool, FileMetadataTool, ReadFilesTool, TaskCreateTool,
+    TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool,
+    ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -236,6 +236,101 @@ fn tool_search_supports_exact_names_and_select_syntax() {
     assert!(selected.content.contains("- Read [read-only, parallel]"));
     assert!(selected.content.contains("- Edit [writes]"));
     assert!(selected.content.contains("- MissingTool - not found"));
+}
+
+#[test]
+fn ask_user_question_tool_formats_questions_and_options() {
+    let result = AskUserQuestionTool.call(
+        serde_json::json!({
+            "questions": [
+                {
+                    "question": "Which implementation path should I use?",
+                    "header": "Path",
+                    "multiSelect": false,
+                    "options": [
+                        {"label": "Small", "description": "Ship a narrow compatible increment."},
+                        {"label": "Broad", "description": "Spend longer on a larger pass."}
+                    ]
+                },
+                {
+                    "question": "Which checks should run?",
+                    "header": "Checks",
+                    "multiSelect": true,
+                    "options": [
+                        {"label": "Tests", "description": "Run the Rust test suite."},
+                        {"label": "Clippy", "description": "Run Rust lints."}
+                    ]
+                }
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Questions for the user:"));
+    assert!(
+        result
+            .content
+            .contains("Q1: Which implementation path should I use?")
+    );
+    assert!(result.content.contains("Header: Path"));
+    assert!(
+        result
+            .content
+            .contains("[Small] Ship a narrow compatible increment.")
+    );
+    assert!(
+        result
+            .content
+            .contains("Q2: Which checks should run? (multi-select)")
+    );
+    assert!(result.content.contains("Please answer each question"));
+}
+
+#[test]
+fn ask_user_question_tool_validates_shape_and_limits() {
+    let missing = AskUserQuestionTool.call(serde_json::json!({}), &ToolContext::new("."));
+    assert!(missing.is_error);
+    assert_eq!(missing.content, "At least one question is required");
+
+    let one_option = AskUserQuestionTool.call(
+        serde_json::json!({
+            "questions": [{
+                "question": "Pick one",
+                "header": "Choice",
+                "multiSelect": false,
+                "options": [{"label": "Only", "description": "No alternative."}]
+            }]
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(one_option.is_error);
+    assert!(
+        one_option
+            .content
+            .contains("questions[0].options must contain 2 to 4 options")
+    );
+
+    let long_header = AskUserQuestionTool.call(
+        serde_json::json!({
+            "questions": [{
+                "question": "Pick one",
+                "header": "VeryLongHeader",
+                "multiSelect": false,
+                "options": [
+                    {"label": "A", "description": "First."},
+                    {"label": "B", "description": "Second."}
+                ]
+            }]
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(long_header.is_error);
+    assert!(
+        long_header
+            .content
+            .contains("questions[0].header must be 12 characters or fewer")
+    );
 }
 
 #[test]

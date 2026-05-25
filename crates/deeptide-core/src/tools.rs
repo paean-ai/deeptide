@@ -80,6 +80,7 @@ impl ToolRegistry {
         registry.register(Box::<WebFetchTool>::default());
         registry.register(Box::<WebSearchTool>::default());
         registry.register(Box::<ToolSearchTool>::default());
+        registry.register(Box::<AskUserQuestionTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
@@ -493,6 +494,161 @@ impl Tool for ToolSearchTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AskUserQuestionTool;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserQuestion {
+    question: String,
+    header: String,
+    options: Vec<UserQuestionOption>,
+    multi_select: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserQuestionOption {
+    label: String,
+    description: String,
+}
+
+impl Tool for AskUserQuestionTool {
+    fn name(&self) -> &'static str {
+        "AskUserQuestion"
+    }
+
+    fn description(&self) -> &'static str {
+        "Ask the user clarifying questions to gather preferences or decisions."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let questions = match parse_user_questions(&input) {
+            Ok(questions) => questions,
+            Err(message) => return ToolResult::error(message),
+        };
+
+        let formatted = questions
+            .iter()
+            .enumerate()
+            .map(|(index, question)| {
+                let multi = if question.multi_select {
+                    " (multi-select)"
+                } else {
+                    ""
+                };
+                let options = question
+                    .options
+                    .iter()
+                    .map(|option| format!("  [{}] {}", option.label, option.description))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "Q{}: {}{}\nHeader: {}\n{}",
+                    index + 1,
+                    question.question,
+                    multi,
+                    question.header,
+                    options
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        ToolResult::text(format!(
+            "Questions for the user:\n\n{formatted}\n\nPlease answer each question to help me proceed."
+        ))
+    }
+}
+
+fn parse_user_questions(input: &serde_json::Value) -> Result<Vec<UserQuestion>, String> {
+    let Some(items) = input.get("questions").and_then(serde_json::Value::as_array) else {
+        return Err(String::from("At least one question is required"));
+    };
+    if items.is_empty() {
+        return Err(String::from("At least one question is required"));
+    }
+    if items.len() > 4 {
+        return Err(String::from("questions must contain at most 4 items"));
+    }
+
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| parse_user_question(index, item))
+        .collect()
+}
+
+fn parse_user_question(index: usize, item: &serde_json::Value) -> Result<UserQuestion, String> {
+    let Some(object) = item.as_object() else {
+        return Err(format!("questions[{index}] must be an object"));
+    };
+    let question = required_trimmed_string(object.get("question"))
+        .ok_or_else(|| format!("questions[{index}].question is required"))?;
+    let header = required_trimmed_string(object.get("header"))
+        .ok_or_else(|| format!("questions[{index}].header is required"))?;
+    if header.chars().count() > 12 {
+        return Err(format!(
+            "questions[{index}].header must be 12 characters or fewer"
+        ));
+    }
+    let Some(option_items) = object.get("options").and_then(serde_json::Value::as_array) else {
+        return Err(format!("questions[{index}].options is required"));
+    };
+    if !(2..=4).contains(&option_items.len()) {
+        return Err(format!(
+            "questions[{index}].options must contain 2 to 4 options"
+        ));
+    }
+
+    let options = option_items
+        .iter()
+        .enumerate()
+        .map(|(option_index, option)| parse_user_question_option(index, option_index, option))
+        .collect::<Result<Vec<_>, _>>()?;
+    let multi_select = object
+        .get("multiSelect")
+        .or_else(|| object.get("multi_select"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    Ok(UserQuestion {
+        question,
+        header,
+        options,
+        multi_select,
+    })
+}
+
+fn parse_user_question_option(
+    question_index: usize,
+    option_index: usize,
+    item: &serde_json::Value,
+) -> Result<UserQuestionOption, String> {
+    let Some(object) = item.as_object() else {
+        return Err(format!(
+            "questions[{question_index}].options[{option_index}] must be an object"
+        ));
+    };
+    let label = required_trimmed_string(object.get("label")).ok_or_else(|| {
+        format!("questions[{question_index}].options[{option_index}].label is required")
+    })?;
+    let description = required_trimmed_string(object.get("description")).ok_or_else(|| {
+        format!("questions[{question_index}].options[{option_index}].description is required")
+    })?;
+    Ok(UserQuestionOption { label, description })
+}
+
+fn required_trimmed_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn builtin_tool_search_entries() -> Vec<ToolSearchEntry> {
     ToolRegistry::with_builtin_tools()
         .tools
@@ -721,6 +877,9 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "test",
             "git",
             "package manager",
+        ],
+        "AskUserQuestion" => vec![
+            "ask user", "clarify", "question", "choice", "decision", "blocked",
         ],
         "Edit" => vec!["replace", "patch", "modify", "string replacement"],
         "FileMetadata" => vec!["xattr", "quarantine", "binary", "mime", "file type"],
