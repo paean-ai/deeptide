@@ -262,6 +262,17 @@ fn tool_schemas() -> Vec<WireTool> {
                 "properties": {}
             }),
         },
+        WireTool {
+            name: "TaskGet",
+            description: "Get full details for one in-memory todo task by ID. Use TaskList first to discover IDs.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "The ID of the task to retrieve."}
+                },
+                "required": ["taskId"]
+            }),
+        },
     ]
 }
 
@@ -497,6 +508,16 @@ mod tests {
         assert!(
             request.tools.iter().any(|tool| tool.name == "TaskList"),
             "TaskList tool schema should be declared"
+        );
+
+        let task_get = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TaskGet")
+            .expect("TaskGet tool schema should be declared");
+        assert_eq!(
+            task_get.input_schema["required"],
+            serde_json::json!(["taskId"])
         );
     }
 }

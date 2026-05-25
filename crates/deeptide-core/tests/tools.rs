@@ -1,5 +1,5 @@
 use deeptide_core::{
-    BashTool, EditTool, ReadFilesTool, TaskListTool, TodoWriteTool, Tool, ToolContext,
+    BashTool, EditTool, ReadFilesTool, TaskGetTool, TaskListTool, TodoWriteTool, Tool, ToolContext,
     ToolRegistry, WriteTool,
 };
 
@@ -246,6 +246,38 @@ fn task_list_tool_reports_empty_list() {
 
     assert!(!result.is_error);
     assert_eq!(result.content, "No tasks.");
+}
+
+#[test]
+fn task_get_tool_returns_task_details() {
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Plan work", "status": "completed"},
+                {"content": "Implement work", "status": "in_progress", "activeForm": "Porting the task"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let result = TaskGetTool.call(serde_json::json!({"taskId": "2"}), &ToolContext::new("."));
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "Task: Implement work\nID: 2\nStatus: in_progress\nDescription: Porting the task"
+    );
+}
+
+#[test]
+fn task_get_tool_reports_missing_and_unknown_ids() {
+    let missing = TaskGetTool.call(serde_json::json!({}), &ToolContext::new("."));
+    assert!(missing.is_error);
+    assert_eq!(missing.content, "Missing taskId parameter");
+
+    let unknown = TaskGetTool.call(serde_json::json!({"taskId": "99"}), &ToolContext::new("."));
+    assert!(unknown.is_error);
+    assert_eq!(unknown.content, "Task not found: 99");
 }
 
 #[test]

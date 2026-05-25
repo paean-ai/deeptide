@@ -78,6 +78,7 @@ impl ToolRegistry {
         registry.register(Box::<BashTool>::default());
         registry.register(Box::<TodoWriteTool>::default());
         registry.register(Box::<TaskListTool>::default());
+        registry.register(Box::<TaskGetTool>::default());
         registry
     }
 
@@ -438,6 +439,42 @@ impl Tool for TaskListTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskGetTool;
+
+impl Tool for TaskGetTool {
+    fn name(&self) -> &'static str {
+        "TaskGet"
+    }
+
+    fn description(&self) -> &'static str {
+        "Get full details for one in-memory todo task by ID."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(task_id) = input.get("taskId").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing taskId parameter");
+        };
+        let Some(task) = get_todo(task_id) else {
+            return ToolResult::error(format!("Task not found: {task_id}"));
+        };
+
+        let mut lines = vec![
+            format!("Task: {}", task.content),
+            format!("ID: {task_id}"),
+            format!("Status: {}", task.status.as_str()),
+        ];
+        if let Some(active_form) = task.active_form.filter(|value| !value.is_empty()) {
+            lines.push(format!("Description: {active_form}"));
+        }
+        ToolResult::text(lines.join("\n"))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TodoItem {
     content: String,
@@ -490,6 +527,15 @@ impl TodoStatus {
             Self::Deleted => "✕",
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Deleted => "deleted",
+        }
+    }
 }
 
 fn todo_storage() -> &'static Mutex<Vec<TodoItem>> {
@@ -508,6 +554,14 @@ fn list_todos() -> Vec<TodoItem> {
         .lock()
         .map(|todos| todos.clone())
         .unwrap_or_default()
+}
+
+fn get_todo(task_id: &str) -> Option<TodoItem> {
+    let index = task_id.parse::<usize>().ok()?.checked_sub(1)?;
+    todo_storage()
+        .lock()
+        .ok()
+        .and_then(|todos| todos.get(index).cloned())
 }
 
 #[derive(Debug, Default, Clone, Copy)]
