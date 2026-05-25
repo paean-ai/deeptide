@@ -1,6 +1,7 @@
 use deeptide_core::{
-    BashTool, EditTool, ReadFilesTool, TaskGetTool, TaskListTool, TaskUpdateTool, TodoWriteTool,
-    Tool, ToolContext, ToolRegistry, WebFetchTool, WebSearchTool, WriteTool,
+    BashTool, EditTool, ReadFilesTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
+    TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, WebFetchTool,
+    WebSearchTool, WriteTool,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -249,6 +250,41 @@ fn todo_write_tool_rejects_missing_todos_array() {
 }
 
 #[test]
+fn task_create_tool_adds_task_with_description() {
+    let _guard = todo_test_guard();
+    let _ = TodoWriteTool.call(serde_json::json!({"todos": []}), &ToolContext::new("."));
+
+    let created = TaskCreateTool.call(
+        serde_json::json!({
+            "subject": "Implement task parity",
+            "description": "Port TaskCreate, TaskStop, and TaskOutput"
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!created.is_error);
+    assert_eq!(created.content, "Task created: Implement task parity");
+
+    let detail = TaskGetTool.call(serde_json::json!({"taskId": "1"}), &ToolContext::new("."));
+    assert_eq!(
+        detail.content,
+        "Task: Implement task parity\nID: 1\nStatus: pending\nDescription: Port TaskCreate, TaskStop, and TaskOutput"
+    );
+}
+
+#[test]
+fn task_create_tool_requires_subject_and_description() {
+    let _guard = todo_test_guard();
+    let result = TaskCreateTool.call(
+        serde_json::json!({"subject": "Missing details"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(result.is_error);
+    assert_eq!(result.content, "Missing subject or description");
+}
+
+#[test]
 fn task_list_tool_lists_current_todos() {
     let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(
@@ -376,6 +412,69 @@ fn task_update_tool_deletes_tasks_and_reports_no_changes() {
         unchanged.content,
         "Task #1: no changes (task may not exist)"
     );
+}
+
+#[test]
+fn task_stop_tool_marks_tasks_completed() {
+    let _guard = todo_test_guard();
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Run verification", "status": "in_progress", "activeForm": "Running cargo test"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let stopped = TaskStopTool.call(
+        serde_json::json!({"taskId": "1", "explanation": "Verification finished"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(!stopped.is_error);
+    assert_eq!(stopped.content, "Task stopped: Verification finished");
+
+    let detail = TaskGetTool.call(serde_json::json!({"taskId": "1"}), &ToolContext::new("."));
+    assert!(detail.content.contains("Status: completed"));
+}
+
+#[test]
+fn task_output_tool_returns_task_metadata_as_json() {
+    let _guard = todo_test_guard();
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Summarize work", "status": "completed", "activeForm": "Writing summary"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let output = TaskOutputTool.call(
+        serde_json::json!({"task_id": "1", "block": false}),
+        &ToolContext::new("."),
+    );
+
+    assert!(!output.is_error);
+    let value: serde_json::Value = serde_json::from_str(&output.content).expect("json");
+    assert_eq!(value["retrieval_status"], "success");
+    assert_eq!(value["task"]["task_id"], "1");
+    assert_eq!(value["task"]["status"], "completed");
+    assert_eq!(value["task"]["description"], "Writing summary");
+    assert_eq!(value["task"]["output"], "Summarize work");
+}
+
+#[test]
+fn task_output_tool_reports_missing_tasks_as_not_ready() {
+    let _guard = todo_test_guard();
+    let _ = TodoWriteTool.call(serde_json::json!({"todos": []}), &ToolContext::new("."));
+
+    let output = TaskOutputTool.call(serde_json::json!({"task_id": "99"}), &ToolContext::new("."));
+
+    assert!(output.is_error);
+    let value: serde_json::Value = serde_json::from_str(&output.content).expect("json");
+    assert_eq!(value["retrieval_status"], "not_ready");
+    assert!(value["note"].as_str().unwrap_or_default().contains("99"));
 }
 
 #[test]

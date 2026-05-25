@@ -290,6 +290,20 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "TaskCreate",
+            description: "Create one in-memory task with a subject and description.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "description": "A brief title for the task."},
+                    "description": {"type": "string", "description": "What needs to be done."},
+                    "activeForm": {"type": "string", "description": "Present continuous form shown while active."},
+                    "metadata": {"type": "object", "description": "Arbitrary metadata to attach to the task."}
+                },
+                "required": ["subject", "description"]
+            }),
+        },
+        WireTool {
             name: "TaskList",
             description: "List the current in-memory todo tasks with status icons.",
             input_schema: serde_json::json!({
@@ -320,6 +334,31 @@ fn tool_schemas() -> Vec<WireTool> {
                     "description": {"type": "string", "description": "New description for the task."}
                 },
                 "required": ["taskId"]
+            }),
+        },
+        WireTool {
+            name: "TaskStop",
+            description: "Stop a task by marking it completed.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "The ID of the task to stop."},
+                    "explanation": {"type": "string", "description": "Brief explanation of why the task is being stopped."}
+                },
+                "required": ["taskId"]
+            }),
+        },
+        WireTool {
+            name: "TaskOutput",
+            description: "Retrieve recorded metadata and output for one task.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "ID of the task whose output to fetch."},
+                    "block": {"type": "boolean", "description": "Wait for completion. Currently accepted for forward compatibility."},
+                    "timeout": {"type": "integer", "description": "Maximum wait time in milliseconds."}
+                },
+                "required": ["task_id"]
             }),
         },
     ]
@@ -581,6 +620,16 @@ mod tests {
             serde_json::json!(["todos"])
         );
 
+        let task_create = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TaskCreate")
+            .expect("TaskCreate tool schema should be declared");
+        assert_eq!(
+            task_create.input_schema["required"],
+            serde_json::json!(["subject", "description"])
+        );
+
         assert!(
             request.tools.iter().any(|tool| tool.name == "TaskList"),
             "TaskList tool schema should be declared"
@@ -604,6 +653,26 @@ mod tests {
         assert_eq!(
             task_update.input_schema["required"],
             serde_json::json!(["taskId"])
+        );
+
+        let task_stop = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TaskStop")
+            .expect("TaskStop tool schema should be declared");
+        assert_eq!(
+            task_stop.input_schema["required"],
+            serde_json::json!(["taskId"])
+        );
+
+        let task_output = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TaskOutput")
+            .expect("TaskOutput tool schema should be declared");
+        assert_eq!(
+            task_output.input_schema["required"],
+            serde_json::json!(["task_id"])
         );
     }
 }

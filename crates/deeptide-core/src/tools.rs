@@ -82,9 +82,12 @@ impl ToolRegistry {
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
         registry.register(Box::<TodoWriteTool>::default());
+        registry.register(Box::<TaskCreateTool>::default());
         registry.register(Box::<TaskListTool>::default());
         registry.register(Box::<TaskGetTool>::default());
         registry.register(Box::<TaskUpdateTool>::default());
+        registry.register(Box::<TaskStopTool>::default());
+        registry.register(Box::<TaskOutputTool>::default());
         registry
     }
 
@@ -1057,6 +1060,43 @@ impl Tool for TodoWriteTool {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+pub struct TaskCreateTool;
+
+impl Tool for TaskCreateTool {
+    fn name(&self) -> &'static str {
+        "TaskCreate"
+    }
+
+    fn description(&self) -> &'static str {
+        "Create one in-memory task with a subject and description."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(subject) = input.get("subject").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing subject or description");
+        };
+        let Some(description) = input.get("description").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing subject or description");
+        };
+        if subject.trim().is_empty() || description.trim().is_empty() {
+            return ToolResult::error("Missing subject or description");
+        }
+
+        add_todo(TodoItem {
+            content: subject.to_owned(),
+            status: TodoStatus::Pending,
+            active_form: Some(description.to_owned()),
+        });
+
+        ToolResult::text(format!("Task created: {subject}"))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
 pub struct TaskListTool;
 
 impl Tool for TaskListTool {
@@ -1175,6 +1215,94 @@ impl Tool for TaskUpdateTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskStopTool;
+
+impl Tool for TaskStopTool {
+    fn name(&self) -> &'static str {
+        "TaskStop"
+    }
+
+    fn description(&self) -> &'static str {
+        "Stop a task by marking it completed."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(task_id) = input.get("taskId").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing taskId parameter");
+        };
+        let explanation = input
+            .get("explanation")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty());
+
+        if complete_todo(task_id) {
+            if let Some(explanation) = explanation {
+                ToolResult::text(format!("Task stopped: {explanation}"))
+            } else {
+                ToolResult::text(format!("Task {task_id} stopped"))
+            }
+        } else {
+            ToolResult::error(format!("Task not found or already completed: {task_id}"))
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskOutputTool;
+
+impl Tool for TaskOutputTool {
+    fn name(&self) -> &'static str {
+        "TaskOutput"
+    }
+
+    fn description(&self) -> &'static str {
+        "Retrieve recorded metadata and output for one task."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(task_id) = input.get("task_id").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("task_id is required");
+        };
+        if task_id.trim().is_empty() {
+            return ToolResult::error("task_id is required");
+        }
+
+        let Some(task) = get_todo(task_id) else {
+            return ToolResult::error(
+                serde_json::json!({
+                    "retrieval_status": "not_ready",
+                    "task": null,
+                    "note": format!("no task with id {task_id} (TaskStorage tracks the agent's todo list; background output capture is not yet implemented)")
+                })
+                .to_string(),
+            );
+        };
+
+        ToolResult::text(
+            serde_json::json!({
+                "retrieval_status": "success",
+                "task": {
+                    "task_id": task_id,
+                    "task_type": "todo",
+                    "status": task.status.as_str(),
+                    "description": task.active_form.unwrap_or_default(),
+                    "output": task.content
+                }
+            })
+            .to_string(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TodoItem {
     content: String,
@@ -1249,6 +1377,12 @@ fn replace_todos(items: Vec<TodoItem>) {
     }
 }
 
+fn add_todo(item: TodoItem) {
+    if let Ok(mut todos) = todo_storage().lock() {
+        todos.push(item);
+    }
+}
+
 fn list_todos() -> Vec<TodoItem> {
     todo_storage()
         .lock()
@@ -1262,6 +1396,27 @@ fn get_todo(task_id: &str) -> Option<TodoItem> {
         .lock()
         .ok()
         .and_then(|todos| todos.get(index).cloned())
+}
+
+fn complete_todo(task_id: &str) -> bool {
+    let Some(index) = task_id
+        .parse::<usize>()
+        .ok()
+        .and_then(|value| value.checked_sub(1))
+    else {
+        return false;
+    };
+    let Ok(mut todos) = todo_storage().lock() else {
+        return false;
+    };
+    let Some(todo) = todos.get_mut(index) else {
+        return false;
+    };
+    if todo.status == TodoStatus::Completed {
+        return false;
+    }
+    todo.status = TodoStatus::Completed;
+    true
 }
 
 fn update_todo(
