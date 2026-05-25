@@ -308,12 +308,25 @@ impl Tool for GrepTool {
             .and_then(serde_json::Value::as_u64)
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(250);
+        let offset = input
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
         let glob = input
             .get("glob")
             .and_then(serde_json::Value::as_str)
             .map(GlobMatcher::new);
 
-        grep_path(&base, &base, &regex, output_mode, glob.as_ref(), head_limit)
+        grep_path(
+            &base,
+            &base,
+            &regex,
+            output_mode,
+            glob.as_ref(),
+            head_limit,
+            offset,
+        )
     }
 }
 
@@ -1806,6 +1819,7 @@ fn grep_path(
     output_mode: &str,
     glob: Option<&GlobMatcher>,
     head_limit: usize,
+    offset: usize,
 ) -> ToolResult {
     if path.is_file() {
         return grep_file(
@@ -1814,12 +1828,14 @@ fn grep_path(
             regex,
             output_mode,
             head_limit,
+            offset,
         );
     }
     if !path.is_dir() {
         return ToolResult::error(format!("Path does not exist: {}", path.display()));
     }
 
+    let collect_limit = collect_limit(head_limit, offset);
     let mut matching_files = BTreeMap::<String, usize>::new();
     let mut content_matches = Vec::new();
     collect_files(path, path, &mut |relative, full_path| {
@@ -1839,7 +1855,7 @@ fn grep_path(
             Ok(_) => {}
             Err(_) => {}
         }
-        head_limit == 0 || matching_files.len().max(content_matches.len()) < head_limit
+        matching_files.len().max(content_matches.len()) < collect_limit
     });
 
     render_grep_output(
@@ -1847,6 +1863,7 @@ fn grep_path(
         matching_files,
         content_matches,
         head_limit,
+        offset,
         base,
     )
 }
@@ -1857,6 +1874,7 @@ fn grep_file(
     regex: &regex::Regex,
     output_mode: &str,
     head_limit: usize,
+    offset: usize,
 ) -> ToolResult {
     match grep_file_matches(base, path, regex) {
         Ok(matches) => {
@@ -1878,6 +1896,7 @@ fn grep_file(
                 matching_files,
                 content_matches,
                 head_limit,
+                offset,
                 base,
             )
         }
@@ -1907,13 +1926,19 @@ fn render_grep_output(
     matching_files: BTreeMap<String, usize>,
     content_matches: Vec<String>,
     head_limit: usize,
+    offset: usize,
     _base: &Path,
 ) -> ToolResult {
     match output_mode {
         "content" => {
-            let lines = limit_lines(content_matches, head_limit);
+            let (lines, truncated) = page_lines(content_matches, head_limit, offset);
             if lines.is_empty() {
                 ToolResult::text("No matches found")
+            } else if truncated {
+                ToolResult::text(format!(
+                    "{}\n\n[Results truncated: use offset to paginate]",
+                    lines.join("\n")
+                ))
             } else {
                 ToolResult::text(lines.join("\n"))
             }
@@ -1923,25 +1948,54 @@ fn render_grep_output(
                 .into_iter()
                 .map(|(path, count)| format!("{path}:{count}"))
                 .collect::<Vec<_>>();
-            ToolResult::text(limit_lines(lines, head_limit).join("\n"))
+            let (lines, truncated) = page_lines(lines, head_limit, offset);
+            if truncated {
+                ToolResult::text(format!(
+                    "{}\n\n[Results truncated: use offset to paginate]",
+                    lines.join("\n")
+                ))
+            } else {
+                ToolResult::text(lines.join("\n"))
+            }
         }
         _ => {
             let lines = matching_files.into_keys().collect::<Vec<_>>();
-            ToolResult::text(format!(
-                "Found {} file{}\n\n{}",
-                lines.len(),
-                if lines.len() == 1 { "" } else { "s" },
-                limit_lines(lines, head_limit).join("\n")
-            ))
+            let (paged, truncated) = page_lines(lines, head_limit, offset);
+            let suffix = if truncated {
+                "\n\n[Results truncated: use offset to paginate]"
+            } else {
+                ""
+            };
+            ToolResult::text(
+                format!(
+                    "Found {} file{}\n\n{}",
+                    paged.len(),
+                    if paged.len() == 1 { "" } else { "s" },
+                    paged.join("\n")
+                ) + suffix,
+            )
         }
     }
 }
 
-fn limit_lines(lines: Vec<String>, head_limit: usize) -> Vec<String> {
+fn collect_limit(head_limit: usize, offset: usize) -> usize {
     if head_limit == 0 {
-        lines
+        usize::MAX
     } else {
-        lines.into_iter().take(head_limit).collect()
+        offset.saturating_add(head_limit)
+    }
+}
+
+fn page_lines(lines: Vec<String>, head_limit: usize, offset: usize) -> (Vec<String>, bool) {
+    let start = offset.min(lines.len());
+    let tail_len = lines.len().saturating_sub(start);
+    if head_limit == 0 {
+        (lines.into_iter().skip(start).collect(), false)
+    } else {
+        (
+            lines.into_iter().skip(start).take(head_limit).collect(),
+            tail_len > head_limit,
+        )
     }
 }
 

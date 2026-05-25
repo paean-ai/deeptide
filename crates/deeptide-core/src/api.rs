@@ -187,7 +187,8 @@ fn tool_schemas() -> Vec<WireTool> {
                     "glob": {"type": "string", "description": "Optional glob pattern to filter files."},
                     "output_mode": {"type": "string", "description": "files_with_matches, content, or count."},
                     "-i": {"type": "boolean", "description": "Case insensitive search."},
-                    "head_limit": {"type": "integer", "description": "Limit output to first N entries. Use 0 for unlimited."}
+                    "head_limit": {"type": "integer", "description": "Limit output to first N entries. Use 0 for unlimited."},
+                    "offset": {"type": "integer", "description": "Skip first N entries before applying head_limit for pagination. Defaults to 0."}
                 },
                 "required": ["pattern"]
             }),
@@ -542,6 +543,13 @@ mod tests {
             read_files.input_schema["required"],
             serde_json::json!(["paths"])
         );
+
+        let grep = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "Grep")
+            .expect("Grep tool schema should be declared");
+        assert!(grep.input_schema["properties"].get("offset").is_some());
 
         let web_fetch = request
             .tools

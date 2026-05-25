@@ -433,6 +433,34 @@ fn grep_tool_content_mode_includes_line_numbers() {
 }
 
 #[test]
+fn grep_tool_applies_offset_after_head_limit_for_pagination() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("notes.txt"),
+        "alpha one\nalpha two\nalpha three\n",
+    )
+    .expect("write");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({
+            "pattern": "alpha",
+            "path": "notes.txt",
+            "output_mode": "content",
+            "offset": 1,
+            "head_limit": 1
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(!result.content.contains("alpha one"));
+    assert!(result.content.contains("notes.txt:2:alpha two"));
+    assert!(!result.content.contains("alpha three"));
+    assert!(result.content.contains("use offset to paginate"));
+}
+
+#[test]
 fn web_fetch_tool_fetches_html_and_preserves_response_context() {
     let url = serve_once(
         200,
