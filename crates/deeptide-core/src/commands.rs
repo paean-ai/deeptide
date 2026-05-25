@@ -1,5 +1,10 @@
 use std::sync::Arc;
 
+use crate::memory::{
+    MemoryResolveResult, MemoryScope, delete_memory, list_memory_blocks, render_memory,
+    resolve_memory,
+};
+
 pub trait SlashCommand {
     fn name(&self) -> &'static str;
     fn aliases(&self) -> &'static [&'static str];
@@ -25,6 +30,7 @@ pub struct CommandContext {
     local_warmup_estimate: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     context_tokens: Arc<dyn Fn() -> usize + Send + Sync>,
     prime_local_cache_branch: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+    cwd: Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>,
 }
 
 impl Default for CommandContext {
@@ -37,6 +43,9 @@ impl Default for CommandContext {
             local_warmup_estimate: Arc::new(|| None),
             context_tokens: Arc::new(|| 0),
             prime_local_cache_branch: Arc::new(|| None),
+            cwd: Arc::new(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            }),
         }
     }
 }
@@ -73,6 +82,10 @@ impl CommandContext {
     pub fn prime_local_cache_branch(&self) -> Option<String> {
         (self.prime_local_cache_branch)()
     }
+
+    pub fn cwd(&self) -> std::path::PathBuf {
+        (self.cwd)()
+    }
 }
 
 #[derive(Default)]
@@ -84,6 +97,7 @@ pub struct CommandContextBuilder {
     local_warmup_estimate: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
     context_tokens: Option<Arc<dyn Fn() -> usize + Send + Sync>>,
     prime_local_cache_branch: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
+    cwd: Option<Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>>,
 }
 
 impl CommandContextBuilder {
@@ -143,6 +157,14 @@ impl CommandContextBuilder {
         self
     }
 
+    pub fn cwd<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> std::path::PathBuf + Send + Sync + 'static,
+    {
+        self.cwd = Some(Arc::new(callback));
+        self
+    }
+
     pub fn build(self) -> CommandContext {
         let defaults = CommandContext::default();
         CommandContext {
@@ -167,6 +189,7 @@ impl CommandContextBuilder {
             prime_local_cache_branch: self
                 .prime_local_cache_branch
                 .unwrap_or_else(|| defaults.prime_local_cache_branch.clone()),
+            cwd: self.cwd.unwrap_or_else(|| defaults.cwd.clone()),
         }
     }
 }
@@ -293,6 +316,144 @@ impl SlashCommand for CompactCommand {
 
         context.compact_conversation();
         CommandResult::Text(String::from("Context compacted."))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MemoryCommand;
+
+impl SlashCommand for MemoryCommand {
+    fn name(&self) -> &'static str {
+        "memory"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["mem"]
+    }
+
+    fn description(&self) -> &'static str {
+        "Show, inspect, and prune memory files"
+    }
+
+    fn usage(&self) -> &'static str {
+        "/memory [show|delete <project|global> <file-or-title>]"
+    }
+
+    fn execute(&self, args: &str, context: &CommandContext) -> CommandResult {
+        let cwd = context.cwd();
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            return CommandResult::Text(render_memory_list(&cwd));
+        }
+
+        let parts = trimmed.splitn(3, char::is_whitespace).collect::<Vec<_>>();
+        let Some(subcommand) = parts.first().map(|part| part.to_ascii_lowercase()) else {
+            return CommandResult::Text(format!("Usage: {}", self.usage()));
+        };
+
+        match subcommand.as_str() {
+            "show" | "cat" | "open" => {
+                let (scope, target) = parse_memory_target(&parts);
+                let Some(target) = target else {
+                    return CommandResult::Text(String::from(
+                        "Usage: /memory show [project|global] <file-or-title>",
+                    ));
+                };
+
+                match resolve_memory(&target, scope, &cwd) {
+                    MemoryResolveResult::Found(entry) => CommandResult::Text(render_memory(&entry)),
+                    MemoryResolveResult::Missing(message)
+                    | MemoryResolveResult::Ambiguous(message) => CommandResult::Text(message),
+                }
+            }
+            "delete" | "rm" | "remove" | "forget" => {
+                let (scope, target) = parse_memory_target(&parts);
+                let Some(target) = target else {
+                    return CommandResult::Text(String::from(
+                        "Usage: /memory delete [project|global] <file-or-title>",
+                    ));
+                };
+
+                match resolve_memory(&target, scope, &cwd) {
+                    MemoryResolveResult::Found(entry) => {
+                        let file_name = entry
+                            .file_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_default()
+                            .to_owned();
+                        let scope = entry.scope;
+                        match delete_memory(&entry) {
+                            Ok(()) => {
+                                CommandResult::Text(format!("Deleted {scope} memory: {file_name}"))
+                            }
+                            Err(error) => CommandResult::Text(format!("Failed: {error}")),
+                        }
+                    }
+                    MemoryResolveResult::Missing(message)
+                    | MemoryResolveResult::Ambiguous(message) => CommandResult::Text(message),
+                }
+            }
+            _ => CommandResult::Text(format!("Usage: {}", self.usage())),
+        }
+    }
+}
+
+fn render_memory_list(cwd: &std::path::Path) -> String {
+    let mut lines = vec![String::from("Memory files:")];
+
+    for (index, block) in list_memory_blocks(cwd).into_iter().enumerate() {
+        if index > 0 {
+            lines.push(String::new());
+        }
+
+        let status = if block.exists { "*" } else { "o" };
+        let created = if block.exists { "" } else { ", not created" };
+        lines.push(format!(
+            "  {status} {} ({}{created})",
+            block.index_path.display(),
+            block.label
+        ));
+
+        if block.exists {
+            if block.files.is_empty() {
+                lines.push(String::from("    (no entries yet - index alone)"));
+            } else {
+                for file in block.files {
+                    let description = file
+                        .description
+                        .map(|description| format!(" - {description}"))
+                        .unwrap_or_default();
+                    lines.push(format!("    - {}{description}", file.name));
+                }
+            }
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(String::from("/remember <text> saves a new memory."));
+    lines.push(String::from(
+        "/memory show <file> inspects one memory; /memory delete <file> prunes it.",
+    ));
+    lines.join("\n")
+}
+
+fn parse_memory_target(parts: &[&str]) -> (Option<MemoryScope>, Option<String>) {
+    if parts.len() < 2 {
+        return (None, None);
+    }
+
+    if parts.len() >= 3
+        && let Some(scope) = MemoryScope::parse(parts[1])
+    {
+        return (Some(scope), Some(parts[2].trim().to_owned()));
+    }
+
+    let target = parts[1..].join(" ").trim().to_owned();
+    if target.is_empty() {
+        (None, None)
+    } else {
+        (None, Some(target))
     }
 }
 
