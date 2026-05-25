@@ -1,7 +1,7 @@
 use deeptide_core::{
-    BashTool, EditTool, ReadFilesTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
-    TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, WebFetchTool,
-    WebSearchTool, WriteTool,
+    BashTool, EditTool, FileMetadataTool, ReadFilesTool, TaskCreateTool, TaskGetTool, TaskListTool,
+    TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry,
+    WebFetchTool, WebSearchTool, WriteTool,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -81,6 +81,40 @@ fn read_tool_reports_special_binary_formats_without_dumping_bytes() {
     assert!(result.content.contains("type: image"));
     assert!(result.content.contains("next_action: use a dedicated tool"));
     assert!(!result.content.contains("PNG\u{0}"));
+}
+
+#[test]
+fn file_metadata_tool_reports_existing_text_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "hello").expect("write fixture");
+
+    let result = FileMetadataTool.call(
+        serde_json::json!({"file_path": "notes.txt"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("[FileMetadata]"));
+    assert!(result.content.contains("exists: true"));
+    assert!(result.content.contains("kind: file"));
+    assert!(result.content.contains("size: 5 bytes"));
+    assert!(result.content.contains("extension: txt"));
+    assert!(result.content.contains("type: text"));
+    assert!(result.content.contains("mime: text/plain"));
+}
+
+#[test]
+fn file_metadata_tool_reports_missing_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = FileMetadataTool.call(
+        serde_json::json!({"file_path": "missing.bin"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("missing.bin"));
+    assert!(result.content.contains("exists: false"));
 }
 
 #[test]

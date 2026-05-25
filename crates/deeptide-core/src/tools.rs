@@ -73,6 +73,7 @@ impl ToolRegistry {
     pub fn with_builtin_tools() -> Self {
         let mut registry = Self::new();
         registry.register(Box::<ReadTool>::default());
+        registry.register(Box::<FileMetadataTool>::default());
         registry.register(Box::<ReadFilesTool>::default());
         registry.register(Box::<GlobTool>::default());
         registry.register(Box::<GrepTool>::default());
@@ -146,6 +147,35 @@ impl Tool for ReadTool {
             .and_then(|value| usize::try_from(value).ok());
 
         read_text_file(&path, offset, limit)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FileMetadataTool;
+
+impl Tool for FileMetadataTool {
+    fn name(&self) -> &'static str {
+        "FileMetadata"
+    }
+
+    fn description(&self) -> &'static str {
+        "Inspect file metadata without reading file contents."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("file_path is required");
+        };
+        if file_path.trim().is_empty() {
+            return ToolResult::error("file_path is required");
+        }
+
+        let path = context.resolve_path(file_path);
+        ToolResult::text(render_file_metadata(&path))
     }
 }
 
@@ -1718,6 +1748,170 @@ fn read_text_file_limited(path: &Path, line_limit: Option<usize>) -> Result<Stri
     }
 
     Ok(output)
+}
+
+fn render_file_metadata(path: &Path) -> String {
+    let mut lines = vec![format!("[FileMetadata] {}", path.display())];
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            lines.push(String::from("exists: false"));
+            return lines.join("\n");
+        }
+        Err(error) => {
+            lines.push(String::from("exists: unknown"));
+            lines.push(format!("error: {error}"));
+            return lines.join("\n");
+        }
+    };
+
+    lines.push(String::from("exists: true"));
+    lines.push(format!(
+        "kind: {}",
+        if metadata.is_dir() {
+            "directory"
+        } else if metadata.is_file() {
+            "file"
+        } else {
+            "other"
+        }
+    ));
+    if metadata.is_file() {
+        lines.push(format!(
+            "size: {}",
+            format_byte_count(metadata.len() as usize)
+        ));
+    }
+    if let Ok(created) = metadata.created() {
+        lines.push(format!("created: {}", format_system_time(created)));
+    }
+    if let Ok(modified) = metadata.modified() {
+        lines.push(format!("modified: {}", format_system_time(modified)));
+    }
+    lines.push(format!("readonly: {}", metadata.permissions().readonly()));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        lines.push(format!(
+            "mode: {:o}",
+            metadata.permissions().mode() & 0o7777
+        ));
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    lines.push(format!(
+        "extension: {}",
+        if ext.is_empty() { "none" } else { ext.as_str() }
+    ));
+    let (type_name, mime) = file_type_hint(&ext, &metadata);
+    lines.push(format!("type: {type_name}"));
+    lines.push(format!("mime: {mime}"));
+
+    #[cfg(target_os = "macos")]
+    append_macos_metadata(path, &mut lines);
+    #[cfg(not(target_os = "macos"))]
+    {
+        lines.push(String::from("xattrs: unsupported on this platform"));
+        lines.push(String::from("spotlight: unavailable"));
+    }
+
+    lines.join("\n")
+}
+
+fn format_system_time(value: std::time::SystemTime) -> String {
+    let datetime = time::OffsetDateTime::from(value);
+    datetime
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| format!("{datetime}"))
+}
+
+fn file_type_hint(ext: &str, metadata: &fs::Metadata) -> (&'static str, &'static str) {
+    if metadata.is_dir() {
+        return ("directory", "inode/directory");
+    }
+    match ext {
+        "txt" | "md" | "rs" | "swift" | "js" | "ts" | "tsx" | "jsx" | "py" | "go" | "java"
+        | "c" | "h" | "cpp" | "hpp" | "json" | "toml" | "yaml" | "yml" | "csv" | "tsv" | "html"
+        | "css" | "xml" | "sh" | "zsh" | "bash" => ("text", "text/plain"),
+        "png" => ("image", "image/png"),
+        "jpg" | "jpeg" => ("image", "image/jpeg"),
+        "gif" => ("image", "image/gif"),
+        "webp" => ("image", "image/webp"),
+        "bmp" => ("image", "image/bmp"),
+        "tif" | "tiff" => ("image", "image/tiff"),
+        "pdf" => ("PDF document", "application/pdf"),
+        "zip" => ("archive", "application/zip"),
+        "gz" | "tgz" => ("archive", "application/gzip"),
+        "tar" => ("archive", "application/x-tar"),
+        "doc" | "docx" | "rtf" | "odt" => ("office or rich document", "application/octet-stream"),
+        "ppt" | "pptx" | "xls" | "xlsx" => ("office document", "application/octet-stream"),
+        "sqlite" | "sqlite3" | "db" => ("database", "application/octet-stream"),
+        "" => ("unknown", "unknown"),
+        _ => ("unknown", "application/octet-stream"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn append_macos_metadata(path: &Path, lines: &mut Vec<String>) {
+    let xattrs = Command::new("/usr/bin/xattr").arg("-l").arg(path).output();
+    match xattrs {
+        Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let names = text
+                .lines()
+                .filter_map(|line| line.split_once(": ").map(|(name, _)| name.to_owned()))
+                .collect::<Vec<_>>();
+            if names.is_empty() {
+                lines.push(String::from("xattrs: present"));
+            } else {
+                lines.push(format!("xattrs: {}", names.join(", ")));
+            }
+            if let Some(quarantine) = text
+                .lines()
+                .find(|line| line.starts_with("com.apple.quarantine:"))
+            {
+                lines.push(format!(
+                    "quarantine: {}",
+                    quarantine
+                        .strip_prefix("com.apple.quarantine:")
+                        .unwrap_or("")
+                        .trim()
+                ));
+            } else {
+                lines.push(String::from("quarantine: none"));
+            }
+        }
+        _ => lines.push(String::from("xattrs: none")),
+    }
+
+    let spotlight = Command::new("/usr/bin/mdls")
+        .args([
+            "-name",
+            "kMDItemKind",
+            "-name",
+            "kMDItemContentType",
+            "-name",
+            "kMDItemFSName",
+        ])
+        .arg(path)
+        .output();
+    match spotlight {
+        Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+            lines.push(String::from("spotlight:"));
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !trimmed.ends_with("= (null)") {
+                    lines.push(format!("  {trimmed}"));
+                }
+            }
+        }
+        _ => lines.push(String::from("spotlight: unavailable")),
+    }
 }
 
 fn special_file_kind(path: &Path) -> Option<&'static str> {

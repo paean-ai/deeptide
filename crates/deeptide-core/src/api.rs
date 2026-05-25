@@ -150,6 +150,19 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "FileMetadata",
+            description: "Inspect file metadata without reading file contents.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file or directory. Relative paths resolve against the current workspace."},
+                    "include_xattrs": {"type": "boolean", "description": "Whether to include extended attribute names where supported."},
+                    "include_spotlight": {"type": "boolean", "description": "Whether to include Spotlight metadata where supported."}
+                },
+                "required": ["file_path"]
+            }),
+        },
+        WireTool {
             name: "ReadFiles",
             description: "Read multiple text files in one ordered result. Use this when inspecting several known paths.",
             input_schema: serde_json::json!({
@@ -581,6 +594,16 @@ mod tests {
         assert_eq!(
             read_files.input_schema["required"],
             serde_json::json!(["paths"])
+        );
+
+        let file_metadata = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "FileMetadata")
+            .expect("FileMetadata tool schema should be declared");
+        assert_eq!(
+            file_metadata.input_schema["required"],
+            serde_json::json!(["file_path"])
         );
 
         let grep = request
