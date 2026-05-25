@@ -79,6 +79,7 @@ impl ToolRegistry {
         registry.register(Box::<TodoWriteTool>::default());
         registry.register(Box::<TaskListTool>::default());
         registry.register(Box::<TaskGetTool>::default());
+        registry.register(Box::<TaskUpdateTool>::default());
         registry
     }
 
@@ -475,6 +476,57 @@ impl Tool for TaskGetTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskUpdateTool;
+
+impl Tool for TaskUpdateTool {
+    fn name(&self) -> &'static str {
+        "TaskUpdate"
+    }
+
+    fn description(&self) -> &'static str {
+        "Update an in-memory todo task by ID."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(task_id) = input.get("taskId").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing taskId");
+        };
+
+        if input.get("status").and_then(serde_json::Value::as_str) == Some("deleted") {
+            return if delete_todo(task_id) {
+                ToolResult::text(format!("Task #{task_id} deleted"))
+            } else {
+                ToolResult::error(format!("Task #{task_id} not found"))
+            };
+        }
+
+        let status = input
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(TodoStatus::parse);
+        let subject = input
+            .get("subject")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        let description = input
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+
+        let changes = update_todo(task_id, status, subject, description);
+        if changes.is_empty() {
+            return ToolResult::text(format!("Task #{task_id}: no changes (task may not exist)"));
+        }
+
+        ToolResult::text(format!("Task #{task_id} updated: {}", changes.join(", ")))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TodoItem {
     content: String,
@@ -562,6 +614,61 @@ fn get_todo(task_id: &str) -> Option<TodoItem> {
         .lock()
         .ok()
         .and_then(|todos| todos.get(index).cloned())
+}
+
+fn update_todo(
+    task_id: &str,
+    status: Option<TodoStatus>,
+    subject: Option<String>,
+    description: Option<String>,
+) -> Vec<String> {
+    let Some(index) = task_id
+        .parse::<usize>()
+        .ok()
+        .and_then(|value| value.checked_sub(1))
+    else {
+        return Vec::new();
+    };
+
+    let Ok(mut todos) = todo_storage().lock() else {
+        return Vec::new();
+    };
+    let Some(todo) = todos.get_mut(index) else {
+        return Vec::new();
+    };
+
+    let mut changes = Vec::new();
+    if let Some(status) = status {
+        todo.status = status;
+        changes.push(format!("status -> {}", status.as_str()));
+    }
+    if let Some(subject) = subject {
+        todo.content = subject;
+        changes.push(String::from("subject updated"));
+    }
+    if let Some(description) = description {
+        todo.active_form = Some(description);
+        changes.push(String::from("description updated"));
+    }
+    changes
+}
+
+fn delete_todo(task_id: &str) -> bool {
+    let Some(index) = task_id
+        .parse::<usize>()
+        .ok()
+        .and_then(|value| value.checked_sub(1))
+    else {
+        return false;
+    };
+    let Ok(mut todos) = todo_storage().lock() else {
+        return false;
+    };
+    if index >= todos.len() {
+        return false;
+    }
+    todos.remove(index);
+    true
 }
 
 #[derive(Debug, Default, Clone, Copy)]

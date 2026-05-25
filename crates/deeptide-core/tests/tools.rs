@@ -1,6 +1,6 @@
 use deeptide_core::{
-    BashTool, EditTool, ReadFilesTool, TaskGetTool, TaskListTool, TodoWriteTool, Tool, ToolContext,
-    ToolRegistry, WriteTool,
+    BashTool, EditTool, ReadFilesTool, TaskGetTool, TaskListTool, TaskUpdateTool, TodoWriteTool,
+    Tool, ToolContext, ToolRegistry, WriteTool,
 };
 
 #[test]
@@ -278,6 +278,66 @@ fn task_get_tool_reports_missing_and_unknown_ids() {
     let unknown = TaskGetTool.call(serde_json::json!({"taskId": "99"}), &ToolContext::new("."));
     assert!(unknown.is_error);
     assert_eq!(unknown.content, "Task not found: 99");
+}
+
+#[test]
+fn task_update_tool_updates_status_subject_and_description() {
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Implement work", "status": "pending"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let result = TaskUpdateTool.call(
+        serde_json::json!({
+            "taskId": "1",
+            "status": "in_progress",
+            "subject": "Implement Rust task update",
+            "description": "Updating task metadata"
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "Task #1 updated: status -> in_progress, subject updated, description updated"
+    );
+
+    let detail = TaskGetTool.call(serde_json::json!({"taskId": "1"}), &ToolContext::new("."));
+    assert_eq!(
+        detail.content,
+        "Task: Implement Rust task update\nID: 1\nStatus: in_progress\nDescription: Updating task metadata"
+    );
+}
+
+#[test]
+fn task_update_tool_deletes_tasks_and_reports_no_changes() {
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Remove me", "status": "pending"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let deleted = TaskUpdateTool.call(
+        serde_json::json!({"taskId": "1", "status": "deleted"}),
+        &ToolContext::new("."),
+    );
+    assert!(!deleted.is_error);
+    assert_eq!(deleted.content, "Task #1 deleted");
+
+    let unchanged = TaskUpdateTool.call(serde_json::json!({"taskId": "1"}), &ToolContext::new("."));
+    assert!(!unchanged.is_error);
+    assert_eq!(
+        unchanged.content,
+        "Task #1: no changes (task may not exist)"
+    );
 }
 
 #[test]

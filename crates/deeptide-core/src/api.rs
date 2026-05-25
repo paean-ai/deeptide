@@ -273,6 +273,20 @@ fn tool_schemas() -> Vec<WireTool> {
                 "required": ["taskId"]
             }),
         },
+        WireTool {
+            name: "TaskUpdate",
+            description: "Update an in-memory todo task by ID. Supports status, subject, description, and status=deleted.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "The ID of the task to update."},
+                    "status": {"type": "string", "description": "pending, in_progress, completed, or deleted."},
+                    "subject": {"type": "string", "description": "New subject for the task."},
+                    "description": {"type": "string", "description": "New description for the task."}
+                },
+                "required": ["taskId"]
+            }),
+        },
     ]
 }
 
@@ -517,6 +531,16 @@ mod tests {
             .expect("TaskGet tool schema should be declared");
         assert_eq!(
             task_get.input_schema["required"],
+            serde_json::json!(["taskId"])
+        );
+
+        let task_update = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TaskUpdate")
+            .expect("TaskUpdate tool schema should be declared");
+        assert_eq!(
+            task_update.input_schema["required"],
             serde_json::json!(["taskId"])
         );
     }
