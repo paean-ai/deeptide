@@ -32,5 +32,6 @@ pub use repl::{ReplEvent, ReplSession};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
     BashTool, EditTool, GlobTool, GrepTool, ReadFilesTool, ReadTool, TaskGetTool, TaskListTool,
-    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, WriteTool,
+    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, WebFetchTool,
+    WriteTool,
 };

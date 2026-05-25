@@ -192,6 +192,18 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "WebFetch",
+            description: "Fetch web content over HTTP or HTTPS and return readable text with response diagnostics.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch content from."},
+                    "prompt": {"type": "string", "description": "The prompt describing what to extract from the page."}
+                },
+                "required": ["url", "prompt"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -507,6 +519,16 @@ mod tests {
         assert_eq!(
             read_files.input_schema["required"],
             serde_json::json!(["paths"])
+        );
+
+        let web_fetch = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "WebFetch")
+            .expect("WebFetch tool schema should be declared");
+        assert_eq!(
+            web_fetch.input_schema["required"],
+            serde_json::json!(["url", "prompt"])
         );
 
         let todo_write = request

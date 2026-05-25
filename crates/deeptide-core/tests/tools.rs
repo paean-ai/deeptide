@@ -1,7 +1,11 @@
 use deeptide_core::{
     BashTool, EditTool, ReadFilesTool, TaskGetTool, TaskListTool, TaskUpdateTool, TodoWriteTool,
-    Tool, ToolContext, ToolRegistry, WriteTool,
+    Tool, ToolContext, ToolRegistry, WebFetchTool, WriteTool,
 };
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::thread;
 
 #[test]
 fn read_tool_reads_text_file_with_line_numbers() {
@@ -173,6 +177,7 @@ fn bash_tool_rejects_multiline_commands() {
 
 #[test]
 fn todo_write_tool_updates_in_memory_list() {
+    let _guard = todo_test_guard();
     let result = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -192,6 +197,7 @@ fn todo_write_tool_updates_in_memory_list() {
 
 #[test]
 fn todo_write_tool_clears_when_all_tasks_complete() {
+    let _guard = todo_test_guard();
     let result = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -210,6 +216,7 @@ fn todo_write_tool_clears_when_all_tasks_complete() {
 
 #[test]
 fn todo_write_tool_rejects_missing_todos_array() {
+    let _guard = todo_test_guard();
     let result = TodoWriteTool.call(serde_json::json!({}), &ToolContext::new("."));
 
     assert!(result.is_error);
@@ -218,6 +225,7 @@ fn todo_write_tool_rejects_missing_todos_array() {
 
 #[test]
 fn task_list_tool_lists_current_todos() {
+    let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -240,6 +248,7 @@ fn task_list_tool_lists_current_todos() {
 
 #[test]
 fn task_list_tool_reports_empty_list() {
+    let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(serde_json::json!({"todos": []}), &ToolContext::new("."));
 
     let result = TaskListTool.call(serde_json::json!({}), &ToolContext::new("."));
@@ -250,6 +259,7 @@ fn task_list_tool_reports_empty_list() {
 
 #[test]
 fn task_get_tool_returns_task_details() {
+    let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -271,6 +281,7 @@ fn task_get_tool_returns_task_details() {
 
 #[test]
 fn task_get_tool_reports_missing_and_unknown_ids() {
+    let _guard = todo_test_guard();
     let missing = TaskGetTool.call(serde_json::json!({}), &ToolContext::new("."));
     assert!(missing.is_error);
     assert_eq!(missing.content, "Missing taskId parameter");
@@ -282,6 +293,7 @@ fn task_get_tool_reports_missing_and_unknown_ids() {
 
 #[test]
 fn task_update_tool_updates_status_subject_and_description() {
+    let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -316,6 +328,7 @@ fn task_update_tool_updates_status_subject_and_description() {
 
 #[test]
 fn task_update_tool_deletes_tasks_and_reports_no_changes() {
+    let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -392,6 +405,47 @@ fn grep_tool_content_mode_includes_line_numbers() {
     assert!(!result.is_error);
     assert!(result.content.contains("notes.txt:1:alpha"));
     assert!(result.content.contains("notes.txt:3:alphabet"));
+}
+
+#[test]
+fn web_fetch_tool_fetches_html_and_preserves_response_context() {
+    let url = serve_once(
+        200,
+        "text/html; charset=utf-8",
+        r#"<!doctype html>
+        <html>
+          <head><title>Fixture</title><style>.hidden { color: red; }</style></head>
+          <body>
+            <h1>Hello &amp; welcome</h1>
+            <p>Read the <a href="/docs">docs</a>.</p>
+            <script>window.secret = true;</script>
+          </body>
+        </html>"#,
+    );
+
+    let result = WebFetchTool.call(
+        serde_json::json!({"url": url, "prompt": "Extract the page"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("HTTP 200 |"));
+    assert!(result.content.contains("Content-Type: text/html"));
+    assert!(result.content.contains("Hello & welcome"));
+    assert!(result.content.contains("docs ["));
+    assert!(result.content.contains("/docs]"));
+    assert!(!result.content.contains("window.secret"));
+}
+
+#[test]
+fn web_fetch_tool_reports_invalid_urls() {
+    let result = WebFetchTool.call(
+        serde_json::json!({"url": "file:///etc/passwd", "prompt": "read"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(result.is_error);
+    assert_eq!(result.content, "Invalid URL: file:///etc/passwd");
 }
 
 #[test]
@@ -567,4 +621,30 @@ fn stderr_failure_command() -> &'static str {
 #[cfg(not(windows))]
 fn stderr_failure_command() -> &'static str {
     "echo boom >&2; exit 7"
+}
+
+fn serve_once(status: u16, content_type: &'static str, body: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local fixture server");
+    let addr = listener.local_addr().expect("fixture server address");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept fixture request");
+        let mut buffer = [0_u8; 1024];
+        let _ = stream.read(&mut buffer);
+        let reason = if status == 200 { "OK" } else { "ERROR" };
+        write!(
+            stream,
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write fixture response");
+    });
+    format!("http://{addr}/page")
+}
+
+fn todo_test_guard() -> MutexGuard<'static, ()> {
+    static TODO_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TODO_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("todo test lock")
 }
