@@ -88,6 +88,11 @@ impl ToolRegistry {
         registry.register(Box::<AskUserQuestionTool>::default());
         registry.register(Box::<MemorySearchTool>::default());
         registry.register(Box::<MemoryWriteTool>::default());
+        registry.register(Box::<BriefTool>::default());
+        registry.register(Box::<CtxInspectTool>::default());
+        registry.register(Box::<SnipTool>::default());
+        registry.register(Box::<EnterPlanModeTool>::default());
+        registry.register(Box::<ExitPlanModeTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
@@ -705,6 +710,204 @@ impl Tool for MemoryWriteTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BriefTool;
+
+impl Tool for BriefTool {
+    fn name(&self) -> &'static str {
+        "Brief"
+    }
+
+    fn description(&self) -> &'static str {
+        "Request a context compaction summary of the conversation so far."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, _input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        ToolResult::text(
+            "Context compaction triggered. The system will:\n\
+             1. Summarize older messages into a compact form\n\
+             2. Keep the most recent messages intact\n\
+             3. Free context tokens for continued work\n\n\
+             Key information (decisions, bugs, current task status) will be preserved in the summary. Continue your task after compaction completes.",
+        )
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CtxInspectTool;
+
+impl Tool for CtxInspectTool {
+    fn name(&self) -> &'static str {
+        "CtxInspect"
+    }
+
+    fn description(&self) -> &'static str {
+        "Inspect the current context window budget and cache expectations."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let model = input
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unconfigured");
+        let estimated_tokens = input
+            .get("estimated_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let message_count = input
+            .get("message_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let window = model_context_window(model);
+        let used_pct = estimated_tokens
+            .saturating_mul(100)
+            .checked_div(window)
+            .unwrap_or(0);
+        let remaining = window.saturating_sub(estimated_tokens);
+
+        let mut lines = vec![
+            String::from("Context Window Report:"),
+            String::new(),
+            format!("Model: {model}"),
+            format!("Context window: {} tokens", format_compact_number(window)),
+            format!(
+                "Estimated usage: {} tokens ({}%)",
+                format_compact_number(estimated_tokens),
+                used_pct
+            ),
+            format!("Remaining: {} tokens", format_compact_number(remaining)),
+            format!("Active messages: {message_count}"),
+        ];
+
+        if used_pct > 90 {
+            lines.push(String::new());
+            lines.push(format!(
+                "CRITICAL: Context at {used_pct}% - consider calling Brief or ending the task."
+            ));
+        } else if used_pct > 70 {
+            lines.push(String::new());
+            lines.push(format!(
+                "WARNING: Context at {used_pct}% - monitor usage on upcoming tool calls."
+            ));
+        } else if used_pct < 30 {
+            lines.push(String::new());
+            lines.push(String::from(
+                "Context usage is healthy - ample room for multi-step work.",
+            ));
+        }
+
+        ToolResult::text(lines.join("\n"))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SnipTool;
+
+impl Tool for SnipTool {
+    fn name(&self) -> &'static str {
+        "Snip"
+    }
+
+    fn description(&self) -> &'static str {
+        "Request aggressive trimming of older conversation history."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let keep_last = input
+            .get("keepLast")
+            .or_else(|| input.get("keep_last"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(10)
+            .clamp(1, 100);
+        let explanation = input
+            .get("explanation")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let reason = explanation
+            .map(|value| format!("\nReason: {value}\n"))
+            .unwrap_or_else(|| String::from("\n"));
+        ToolResult::text(format!(
+            "History trim requested: keeping last {keep_last} messages.{reason}\nThe system will remove older messages and insert a boundary marker. The agent should continue the task with the remaining context."
+        ))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EnterPlanModeTool;
+
+impl Tool for EnterPlanModeTool {
+    fn name(&self) -> &'static str {
+        "EnterPlanMode"
+    }
+
+    fn description(&self) -> &'static str {
+        "Enter plan mode before making significant code changes."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, _input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        ToolResult::text(
+            "Plan mode activated. You should now:\n\
+             1. Explore the codebase to understand the existing architecture (Read, Grep, Glob, and read-only Bash are allowed)\n\
+             2. Identify the files and components involved\n\
+             3. Design an implementation approach\n\
+             4. Present your plan to the user for approval using ExitPlanMode\n\
+             File edits, writes, sub-agents, MCP calls, clipboard writes, and shell commands with side effects are blocked until you exit plan mode or the user changes permission mode. Do not modify project files until the user approves your plan.",
+        )
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ExitPlanModeTool;
+
+impl Tool for ExitPlanModeTool {
+    fn name(&self) -> &'static str {
+        "ExitPlanMode"
+    }
+
+    fn description(&self) -> &'static str {
+        "Exit plan mode and present the implementation plan for user approval."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let prompts = extract_allowed_prompts(&input);
+        let prompt_list = if prompts.is_empty() {
+            String::from("(no additional permissions requested)")
+        } else {
+            prompts
+                .into_iter()
+                .map(|(tool, prompt)| format!("  - {tool}: {prompt}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        ToolResult::text(format!(
+            "Plan is ready for review. Implementation will require:\n{prompt_list}\n\nThe plan has been written to the plan file. Please review and approve to begin implementation."
+        ))
+    }
+}
+
 fn parse_user_questions(input: &serde_json::Value) -> Result<Vec<UserQuestion>, String> {
     let Some(items) = input.get("questions").and_then(serde_json::Value::as_array) else {
         return Err(String::from("At least one question is required"));
@@ -994,6 +1197,52 @@ fn safe_inline(value: &str) -> String {
         .to_owned()
 }
 
+fn model_context_window(model: &str) -> u64 {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("deepseek-v4-pro") || lower.contains("deepseek-v4-flash-q4") {
+        1_000_000
+    } else if lower.contains("deepseek-v4-flash") {
+        512_000
+    } else if lower.contains("qwen3-coder") || lower.contains("qwen3.6") || lower.contains("claude")
+    {
+        262_144
+    } else {
+        200_000
+    }
+}
+
+fn format_compact_number(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn extract_allowed_prompts(input: &serde_json::Value) -> Vec<(String, String)> {
+    input
+        .get("allowedPrompts")
+        .or_else(|| input.get("allowed_prompts"))
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let tool = item.get("tool")?.as_str()?.trim();
+                    let prompt = item.get("prompt")?.as_str()?.trim();
+                    if tool.is_empty() || prompt.is_empty() {
+                        None
+                    } else {
+                        Some((tool.to_owned(), prompt.to_owned()))
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn builtin_tool_search_entries() -> Vec<ToolSearchEntry> {
     ToolRegistry::with_builtin_tools()
         .tools
@@ -1251,6 +1500,11 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "project memory",
             "global memory",
         ],
+        "Brief" => vec!["context", "summary", "compact", "compaction", "tokens"],
+        "CtxInspect" => vec!["context", "tokens", "window", "cache", "budget"],
+        "Snip" => vec!["context", "trim", "history", "messages", "tokens"],
+        "EnterPlanMode" => vec!["plan", "planning", "explore", "approval"],
+        "ExitPlanMode" => vec!["plan", "approval", "implementation", "permissions"],
         "Edit" => vec!["replace", "patch", "modify", "string replacement"],
         "FileMetadata" => vec!["xattr", "quarantine", "binary", "mime", "file type"],
         "Glob" => vec!["find files", "discover", "pattern"],

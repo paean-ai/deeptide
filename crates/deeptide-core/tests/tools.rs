@@ -1,6 +1,7 @@
 use deeptide_core::{
-    AskUserQuestionTool, BashTool, EditTool, FileMetadataTool, MemorySearchTool, MemoryWriteTool,
-    MonitorTool, ReadFilesTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
+    AskUserQuestionTool, BashTool, BriefTool, CtxInspectTool, EditTool, EnterPlanModeTool,
+    ExitPlanModeTool, FileMetadataTool, MemorySearchTool, MemoryWriteTool, MonitorTool,
+    ReadFilesTool, SnipTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
     TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool,
     WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
 };
@@ -556,6 +557,75 @@ fn memory_search_tool_finds_project_and_global_memory() {
     assert!(project.content.contains("Provider Policy"));
     assert!(project.content.contains("scope: project"));
     assert!(project.content.contains("configured provider profiles"));
+}
+
+#[test]
+fn brief_tool_requests_context_compaction() {
+    let result = BriefTool.call(serde_json::json!({}), &ToolContext::new("."));
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Context compaction triggered"));
+    assert!(result.content.contains("Summarize older messages"));
+    assert!(result.content.contains("Continue your task"));
+}
+
+#[test]
+fn ctx_inspect_tool_reports_context_budget_and_warnings() {
+    let result = CtxInspectTool.call(
+        serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "estimated_tokens": 470000,
+            "message_count": 42
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Context Window Report:"));
+    assert!(result.content.contains("Model: deepseek-v4-flash"));
+    assert!(result.content.contains("Context window: 512.0K tokens"));
+    assert!(result.content.contains("Active messages: 42"));
+    assert!(result.content.contains("CRITICAL: Context at 91%"));
+}
+
+#[test]
+fn snip_tool_formats_history_trim_request() {
+    let result = SnipTool.call(
+        serde_json::json!({"keepLast": 200, "explanation": "Older build logs are no longer needed."}),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert!(
+        result
+            .content
+            .contains("History trim requested: keeping last 100 messages.")
+    );
+    assert!(
+        result
+            .content
+            .contains("Reason: Older build logs are no longer needed.")
+    );
+}
+
+#[test]
+fn plan_mode_tools_return_approval_flow_text() {
+    let enter = EnterPlanModeTool.call(serde_json::json!({}), &ToolContext::new("."));
+    assert!(!enter.is_error);
+    assert!(enter.content.contains("Plan mode activated"));
+    assert!(enter.content.contains("Do not modify project files"));
+
+    let exit = ExitPlanModeTool.call(
+        serde_json::json!({
+            "allowedPrompts": [
+                {"tool": "Bash", "prompt": "Run cargo test"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(!exit.is_error);
+    assert!(exit.content.contains("Plan is ready for review"));
+    assert!(exit.content.contains("- Bash: Run cargo test"));
 }
 
 #[test]

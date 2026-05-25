@@ -31,8 +31,9 @@ pub use permissions::{
 pub use repl::{ReplEvent, ReplSession};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
-    AskUserQuestionTool, BashTool, EditTool, FileMetadataTool, GlobTool, GrepTool,
-    MemorySearchTool, MemoryWriteTool, MonitorTool, ReadFilesTool, ReadTool, TaskCreateTool,
-    TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool,
-    ToolContext, ToolRegistry, ToolResult, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
+    AskUserQuestionTool, BashTool, BriefTool, CtxInspectTool, EditTool, EnterPlanModeTool,
+    ExitPlanModeTool, FileMetadataTool, GlobTool, GrepTool, MemorySearchTool, MemoryWriteTool,
+    MonitorTool, ReadFilesTool, ReadTool, SnipTool, TaskCreateTool, TaskGetTool, TaskListTool,
+    TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry,
+    ToolResult, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
 };

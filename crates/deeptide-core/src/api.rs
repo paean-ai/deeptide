@@ -319,6 +319,66 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "Brief",
+            description: "Request a context compaction summary of the conversation so far.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        WireTool {
+            name: "CtxInspect",
+            description: "Inspect context window usage, estimated remaining capacity, and cache expectations.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "Optional model name used to estimate the context window."},
+                    "estimated_tokens": {"type": "integer", "description": "Optional current token estimate supplied by the host."},
+                    "message_count": {"type": "integer", "description": "Optional active message count supplied by the host."}
+                }
+            }),
+        },
+        WireTool {
+            name: "Snip",
+            description: "Request aggressive trimming of older conversation history when context is overloaded.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "keepLast": {"type": "integer", "description": "Number of most recent messages to keep. Defaults to 10 and is clamped to 1..100."},
+                    "explanation": {"type": "string", "description": "Brief explanation of why history is being trimmed."}
+                }
+            }),
+        },
+        WireTool {
+            name: "EnterPlanMode",
+            description: "Enter plan mode before significant code changes: explore, design, and ask for approval before editing.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        WireTool {
+            name: "ExitPlanMode",
+            description: "Exit plan mode and present the plan for user approval before implementation.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "allowedPrompts": {
+                        "type": "array",
+                        "description": "Categories of actions needed to implement the plan.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": {"type": "string", "description": "The tool this prompt applies to."},
+                                "prompt": {"type": "string", "description": "Semantic description of the action."}
+                            },
+                            "required": ["tool", "prompt"]
+                        }
+                    }
+                }
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -774,6 +834,19 @@ mod tests {
             memory_write.input_schema["required"],
             serde_json::json!(["title", "body", "reason"])
         );
+
+        for name in [
+            "Brief",
+            "CtxInspect",
+            "Snip",
+            "EnterPlanMode",
+            "ExitPlanMode",
+        ] {
+            assert!(
+                request.tools.iter().any(|tool| tool.name == name),
+                "{name} tool schema should be declared"
+            );
+        }
 
         let todo_write = request
             .tools
