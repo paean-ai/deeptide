@@ -77,6 +77,7 @@ impl ToolRegistry {
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
         registry.register(Box::<TodoWriteTool>::default());
+        registry.register(Box::<TaskListTool>::default());
         registry
     }
 
@@ -405,6 +406,38 @@ impl Tool for TodoWriteTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskListTool;
+
+impl Tool for TaskListTool {
+    fn name(&self) -> &'static str {
+        "TaskList"
+    }
+
+    fn description(&self) -> &'static str {
+        "List the current in-memory todo tasks."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, _input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let todos = list_todos();
+        if todos.is_empty() {
+            return ToolResult::text("No tasks.");
+        }
+
+        let lines = todos
+            .iter()
+            .enumerate()
+            .map(|(index, item)| format!("#{} {} {}", index + 1, item.status.icon(), item.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ToolResult::text(lines)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TodoItem {
     content: String,
@@ -448,6 +481,15 @@ impl TodoStatus {
             _ => Self::Pending,
         }
     }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Pending => "○",
+            Self::InProgress => "◉",
+            Self::Completed => "⌬",
+            Self::Deleted => "✕",
+        }
+    }
 }
 
 fn todo_storage() -> &'static Mutex<Vec<TodoItem>> {
@@ -459,6 +501,13 @@ fn replace_todos(items: Vec<TodoItem>) {
     if let Ok(mut todos) = todo_storage().lock() {
         *todos = items;
     }
+}
+
+fn list_todos() -> Vec<TodoItem> {
+    todo_storage()
+        .lock()
+        .map(|todos| todos.clone())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Default, Clone, Copy)]

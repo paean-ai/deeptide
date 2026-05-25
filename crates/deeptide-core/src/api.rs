@@ -254,6 +254,14 @@ fn tool_schemas() -> Vec<WireTool> {
                 "required": ["todos"]
             }),
         },
+        WireTool {
+            name: "TaskList",
+            description: "List the current in-memory todo tasks with status icons.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
     ]
 }
 
@@ -484,6 +492,11 @@ mod tests {
         assert_eq!(
             todo_write.input_schema["required"],
             serde_json::json!(["todos"])
+        );
+
+        assert!(
+            request.tools.iter().any(|tool| tool.name == "TaskList"),
+            "TaskList tool schema should be declared"
         );
     }
 }

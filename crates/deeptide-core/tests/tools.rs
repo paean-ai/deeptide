@@ -1,5 +1,6 @@
 use deeptide_core::{
-    BashTool, EditTool, ReadFilesTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, WriteTool,
+    BashTool, EditTool, ReadFilesTool, TaskListTool, TodoWriteTool, Tool, ToolContext,
+    ToolRegistry, WriteTool,
 };
 
 #[test]
@@ -213,6 +214,38 @@ fn todo_write_tool_rejects_missing_todos_array() {
 
     assert!(result.is_error);
     assert_eq!(result.content, "Missing or invalid todos array");
+}
+
+#[test]
+fn task_list_tool_lists_current_todos() {
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Plan work", "status": "completed"},
+                {"content": "Implement work", "status": "in_progress"},
+                {"content": "Verify work", "status": "pending"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let result = TaskListTool.call(serde_json::json!({}), &ToolContext::new("."));
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "#1 ⌬ Plan work\n#2 ◉ Implement work\n#3 ○ Verify work"
+    );
+}
+
+#[test]
+fn task_list_tool_reports_empty_list() {
+    let _ = TodoWriteTool.call(serde_json::json!({"todos": []}), &ToolContext::new("."));
+
+    let result = TaskListTool.call(serde_json::json!({}), &ToolContext::new("."));
+
+    assert!(!result.is_error);
+    assert_eq!(result.content, "No tasks.");
 }
 
 #[test]
