@@ -1,4 +1,4 @@
-use deeptide_core::{Tool, ToolContext, ToolRegistry, WriteTool};
+use deeptide_core::{EditTool, Tool, ToolContext, ToolRegistry, WriteTool};
 
 #[test]
 fn read_tool_reads_text_file_with_line_numbers() {
@@ -162,4 +162,111 @@ fn write_tool_reports_missing_content() {
 
     assert!(result.is_error);
     assert!(result.content.contains("string `content` field"));
+}
+
+#[test]
+fn edit_tool_replaces_one_exact_match() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\ngamma\n").expect("write fixture");
+
+    let result = EditTool.call(
+        serde_json::json!({
+            "file_path": "notes.txt",
+            "old_string": "beta",
+            "new_string": "bravo"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(
+        result
+            .content
+            .contains("File edited successfully: notes.txt")
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("read edited file"),
+        "alpha\nbravo\ngamma\n"
+    );
+}
+
+#[test]
+fn edit_tool_requires_replace_all_for_multiple_matches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha alpha\n").expect("write fixture");
+
+    let result = EditTool.call(
+        serde_json::json!({
+            "file_path": "notes.txt",
+            "old_string": "alpha",
+            "new_string": "bravo"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("old_string matches 2 locations"));
+}
+
+#[test]
+fn edit_tool_replace_all_updates_every_match() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha alpha\n").expect("write fixture");
+
+    let result = EditTool.call(
+        serde_json::json!({
+            "file_path": "notes.txt",
+            "old_string": "alpha",
+            "new_string": "bravo",
+            "replace_all": true
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("all 2 occurrences"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("read edited file"),
+        "bravo bravo\n"
+    );
+}
+
+#[test]
+fn edit_tool_can_create_file_when_old_string_is_empty() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = EditTool.call(
+        serde_json::json!({
+            "file_path": "src/new.txt",
+            "old_string": "",
+            "new_string": "created\n"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(result.content, "Created new file: new.txt");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("src/new.txt")).expect("read created file"),
+        "created\n"
+    );
+}
+
+#[test]
+fn edit_tool_reports_missing_old_string_with_reread_guidance() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\n").expect("write fixture");
+
+    let result = EditTool.call(
+        serde_json::json!({
+            "file_path": "notes.txt",
+            "old_string": "beta",
+            "new_string": "bravo"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("old_string not found in file"));
+    assert!(result.content.contains("Please re-read the file"));
 }

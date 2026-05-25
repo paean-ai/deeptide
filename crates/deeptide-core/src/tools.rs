@@ -69,6 +69,7 @@ impl ToolRegistry {
         registry.register(Box::<GlobTool>::default());
         registry.register(Box::<GrepTool>::default());
         registry.register(Box::<WriteTool>::default());
+        registry.register(Box::<EditTool>::default());
         registry
     }
 
@@ -309,6 +310,102 @@ impl Tool for WriteTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EditTool;
+
+impl Tool for EditTool {
+    fn name(&self) -> &'static str {
+        "Edit"
+    }
+
+    fn description(&self) -> &'static str {
+        "Perform exact string replacement in an existing UTF-8 file."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("file_path is required");
+        };
+        if file_path.trim().is_empty() {
+            return ToolResult::error("file_path is required");
+        }
+        let Some(old_string) = input.get("old_string").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("old_string is required");
+        };
+        let Some(new_string) = input.get("new_string").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("new_string is required");
+        };
+        if old_string == new_string {
+            return ToolResult::error("old_string and new_string must be different");
+        }
+
+        let path = context.resolve_path(file_path);
+        let replace_all = input
+            .get("replace_all")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        if !path.exists() && old_string.is_empty() {
+            if let Some(parent) = path.parent()
+                && let Err(error) = fs::create_dir_all(parent)
+            {
+                return ToolResult::error(format!(
+                    "Failed to create parent directory {}: {error}",
+                    parent.display()
+                ));
+            }
+            let normalized_new = normalize_line_endings(new_string);
+            if let Err(error) = fs::write(&path, normalized_new.as_bytes()) {
+                return ToolResult::error(format!("Failed to write {}: {error}", path.display()));
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(file_path);
+            return ToolResult::text(format!("Created new file: {name}"));
+        }
+
+        let original = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return ToolResult::error(format!("File does not exist: {file_path}"));
+            }
+            Err(error) => {
+                return ToolResult::error(format!("Failed to read {}: {error}", path.display()));
+            }
+        };
+        if old_string.is_empty() {
+            return ToolResult::error(
+                "old_string not found in file. The file may have been modified. Please re-read the file.",
+            );
+        }
+
+        let (edited, matches) =
+            match apply_exact_edit(&original, old_string, new_string, replace_all) {
+                Ok(result) => result,
+                Err(message) => return ToolResult::error(message),
+            };
+        if let Err(error) = fs::write(&path, edited.as_bytes()) {
+            return ToolResult::error(format!("Failed to write {}: {error}", path.display()));
+        }
+
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(file_path);
+        let occurrence = if replace_all && matches > 1 {
+            format!("all {matches} occurrences")
+        } else {
+            String::from("1 occurrence")
+        };
+        ToolResult::text(format!("File edited successfully: {name} ({occurrence})"))
+    }
+}
+
 fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> ToolResult {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -382,6 +479,57 @@ fn format_byte_count(bytes: usize) -> String {
     } else {
         format!("{bytes} bytes")
     }
+}
+
+fn apply_exact_edit(
+    content: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> Result<(String, usize), String> {
+    let matches = content.matches(old_string).count();
+    if matches == 0 {
+        let normalized_content = normalize_quotes(content);
+        let normalized_old = normalize_quotes(old_string);
+        let normalized_matches = normalized_content.matches(&normalized_old).count();
+        if normalized_matches == 0 {
+            return Err(String::from(
+                "old_string not found in file. The file may have been modified. Please re-read the file.",
+            ));
+        }
+        if normalized_matches > 1 && !replace_all {
+            return Err(format!(
+                "old_string matches {normalized_matches} locations. Use replace_all=true or provide a more specific string."
+            ));
+        }
+
+        let normalized_new = normalize_quotes(new_string);
+        let edited = if replace_all {
+            normalized_content.replace(&normalized_old, &normalized_new)
+        } else {
+            normalized_content.replacen(&normalized_old, &normalized_new, 1)
+        };
+        return Ok((edited, normalized_matches));
+    }
+
+    if matches > 1 && !replace_all {
+        return Err(format!(
+            "old_string matches {matches} locations. Use replace_all=true or provide a more specific string."
+        ));
+    }
+
+    let edited = if replace_all {
+        content.replace(old_string, new_string)
+    } else {
+        content.replacen(old_string, new_string, 1)
+    };
+    Ok((edited, matches))
+}
+
+fn normalize_quotes(content: &str) -> String {
+    content
+        .replace(['\u{201c}', '\u{201d}'], "\"")
+        .replace(['\u{2018}', '\u{2019}'], "'")
 }
 
 fn grep_path(

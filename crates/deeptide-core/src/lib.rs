@@ -31,5 +31,5 @@ pub use permissions::{
 pub use repl::{ReplEvent, ReplSession};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
-    GlobTool, GrepTool, ReadTool, Tool, ToolContext, ToolRegistry, ToolResult, WriteTool,
+    EditTool, GlobTool, GrepTool, ReadTool, Tool, ToolContext, ToolRegistry, ToolResult, WriteTool,
 };

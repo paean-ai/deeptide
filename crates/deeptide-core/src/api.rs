@@ -188,6 +188,20 @@ fn tool_schemas() -> Vec<WireTool> {
                 "required": ["file_path", "content"]
             }),
         },
+        WireTool {
+            name: "Edit",
+            description: "Perform an exact string replacement in an existing file. Read the file first; old_string must match current contents exactly and be unique unless replace_all is true.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file to modify."},
+                    "old_string": {"type": "string", "description": "Exact text to replace."},
+                    "new_string": {"type": "string", "description": "Replacement text."},
+                    "replace_all": {"type": "boolean", "description": "Replace all occurrences. Defaults to false."}
+                },
+                "required": ["file_path", "old_string", "new_string"]
+            }),
+        },
     ]
 }
 
@@ -360,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn messages_request_declares_write_tool_schema() {
+    fn messages_request_declares_write_and_edit_tool_schemas() {
         let request = build_messages_request(
             "test-model",
             [WireMessage {
@@ -378,6 +392,16 @@ mod tests {
         assert_eq!(
             write.input_schema["required"],
             serde_json::json!(["file_path", "content"])
+        );
+
+        let edit = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "Edit")
+            .expect("Edit tool schema should be declared");
+        assert_eq!(
+            edit.input_schema["required"],
+            serde_json::json!(["file_path", "old_string", "new_string"])
         );
     }
 }

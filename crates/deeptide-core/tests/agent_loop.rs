@@ -134,6 +134,33 @@ fn agent_loop_allows_write_tool_calls_in_accept_edits_mode() {
     );
 }
 
+#[test]
+fn agent_loop_allows_edit_tool_calls_in_accept_edits_mode() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\n").expect("write fixture");
+    let mut loop_ = AgentLoop::new(Box::new(EditCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_permission_mode(PermissionMode::AcceptEdits)
+        .with_max_turns(3);
+
+    let events = loop_.run("edit notes");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "Edit" && content.contains("File edited successfully")
+        )
+    }));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("edited file"),
+        "bravo\n"
+    );
+}
+
 struct StaticBackend {
     content: String,
     usage: Option<AgentUsage>,
@@ -218,6 +245,34 @@ impl AgentBackend for WriteCallingBackend {
             })
         } else {
             Ok(AgentResponse::text("done after write"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct EditCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for EditCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will edit the file."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_edit",
+                    "Edit",
+                    serde_json::json!({
+                        "file_path": "notes.txt",
+                        "old_string": "alpha",
+                        "new_string": "bravo",
+                    }),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after edit"))
         }
     }
 }
