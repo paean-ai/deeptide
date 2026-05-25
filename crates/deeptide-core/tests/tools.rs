@@ -61,3 +61,57 @@ fn registry_reports_unknown_tools() {
     assert!(result.is_error);
     assert_eq!(result.content, "Unknown tool: Nope");
 }
+
+#[test]
+fn glob_tool_finds_matching_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("src/nested")).expect("mkdir");
+    std::fs::write(temp.path().join("src/lib.rs"), "").expect("write");
+    std::fs::write(temp.path().join("src/nested/mod.rs"), "").expect("write");
+    std::fs::write(temp.path().join("README.md"), "").expect("write");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Glob",
+        serde_json::json!({"pattern": "**/*.rs"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("src/lib.rs"));
+    assert!(result.content.contains("src/nested/mod.rs"));
+    assert!(!result.content.contains("README.md"));
+}
+
+#[test]
+fn grep_tool_finds_files_with_matches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    std::fs::write(temp.path().join("src/lib.rs"), "pub fn hello() {}\n").expect("write");
+    std::fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({"pattern": "pub fn", "glob": "**/*.rs"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("src/lib.rs"));
+    assert!(!result.content.contains("src/main.rs"));
+}
+
+#[test]
+fn grep_tool_content_mode_includes_line_numbers() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\nalphabet\n").expect("write");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({"pattern": "alpha", "path": "notes.txt", "output_mode": "content"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("notes.txt:1:alpha"));
+    assert!(result.content.contains("notes.txt:3:alphabet"));
+}

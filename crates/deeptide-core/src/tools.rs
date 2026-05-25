@@ -66,6 +66,8 @@ impl ToolRegistry {
     pub fn with_builtin_tools() -> Self {
         let mut registry = Self::new();
         registry.register(Box::<ReadTool>::default());
+        registry.register(Box::<GlobTool>::default());
+        registry.register(Box::<GrepTool>::default());
         registry
     }
 
@@ -124,6 +126,122 @@ impl Tool for ReadTool {
             .and_then(|value| usize::try_from(value).ok());
 
         read_text_file(&path, offset, limit)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GlobTool;
+
+impl Tool for GlobTool {
+    fn name(&self) -> &'static str {
+        "Glob"
+    }
+
+    fn description(&self) -> &'static str {
+        "Find files by glob pattern."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(pattern) = input.get("pattern").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing pattern parameter");
+        };
+        if pattern.trim().is_empty() {
+            return ToolResult::error("pattern is required");
+        }
+
+        let base = input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|path| context.resolve_path(path))
+            .unwrap_or_else(|| context.cwd.clone());
+        if !base.is_dir() {
+            return ToolResult::error(format!("Path is not a directory: {}", base.display()));
+        }
+
+        let matcher = GlobMatcher::new(pattern);
+        let mut matches = Vec::new();
+        collect_files(&base, &base, &mut |relative, _full_path| {
+            if matcher.matches(relative) {
+                matches.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+            matches.len() < 100
+        });
+
+        matches.sort();
+        let truncated = matches.len() >= 100;
+        let output = matches.join("\n");
+        let suffix = if truncated {
+            "\n\n[Results truncated at 100]"
+        } else {
+            ""
+        };
+        ToolResult::text(format!(
+            "Found {} file{}\n\n{}{}",
+            matches.len(),
+            if matches.len() == 1 { "" } else { "s" },
+            output,
+            suffix
+        ))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GrepTool;
+
+impl Tool for GrepTool {
+    fn name(&self) -> &'static str {
+        "Grep"
+    }
+
+    fn description(&self) -> &'static str {
+        "Search text files using a regular expression."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(pattern) = input.get("pattern").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing pattern parameter");
+        };
+        if pattern.trim().is_empty() {
+            return ToolResult::error("pattern is required");
+        }
+
+        let pattern = if input.get("-i").and_then(serde_json::Value::as_bool) == Some(true) {
+            format!("(?i){pattern}")
+        } else {
+            pattern.to_owned()
+        };
+        let regex = match regex::Regex::new(&pattern) {
+            Ok(regex) => regex,
+            Err(error) => return ToolResult::error(format!("Invalid regex pattern: {error}")),
+        };
+        let base = input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|path| context.resolve_path(path))
+            .unwrap_or_else(|| context.cwd.clone());
+        let output_mode = input
+            .get("output_mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("files_with_matches");
+        let head_limit = input
+            .get("head_limit")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(250);
+        let glob = input
+            .get("glob")
+            .and_then(serde_json::Value::as_str)
+            .map(GlobMatcher::new);
+
+        grep_path(&base, &base, &regex, output_mode, glob.as_ref(), head_limit)
     }
 }
 
@@ -188,6 +306,246 @@ fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> T
         .join("\n");
 
     ToolResult::text(output)
+}
+
+fn grep_path(
+    base: &Path,
+    path: &Path,
+    regex: &regex::Regex,
+    output_mode: &str,
+    glob: Option<&GlobMatcher>,
+    head_limit: usize,
+) -> ToolResult {
+    if path.is_file() {
+        return grep_file(
+            path.parent().unwrap_or(base),
+            path,
+            regex,
+            output_mode,
+            head_limit,
+        );
+    }
+    if !path.is_dir() {
+        return ToolResult::error(format!("Path does not exist: {}", path.display()));
+    }
+
+    let mut matching_files = BTreeMap::<String, usize>::new();
+    let mut content_matches = Vec::new();
+    collect_files(path, path, &mut |relative, full_path| {
+        if let Some(glob) = glob
+            && !glob.matches(relative)
+        {
+            return true;
+        }
+        match grep_file_matches(path, full_path, regex) {
+            Ok(matches) if !matches.is_empty() => {
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                matching_files.insert(relative.clone(), matches.len());
+                for (line_number, line) in matches {
+                    content_matches.push(format!("{relative}:{line_number}:{line}"));
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        head_limit == 0 || matching_files.len().max(content_matches.len()) < head_limit
+    });
+
+    render_grep_output(
+        output_mode,
+        matching_files,
+        content_matches,
+        head_limit,
+        base,
+    )
+}
+
+fn grep_file(
+    base: &Path,
+    path: &Path,
+    regex: &regex::Regex,
+    output_mode: &str,
+    head_limit: usize,
+) -> ToolResult {
+    match grep_file_matches(base, path, regex) {
+        Ok(matches) => {
+            let relative = path
+                .strip_prefix(base)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let mut matching_files = BTreeMap::new();
+            let mut content_matches = Vec::new();
+            if !matches.is_empty() {
+                matching_files.insert(relative.clone(), matches.len());
+                for (line_number, line) in matches {
+                    content_matches.push(format!("{relative}:{line_number}:{line}"));
+                }
+            }
+            render_grep_output(
+                output_mode,
+                matching_files,
+                content_matches,
+                head_limit,
+                base,
+            )
+        }
+        Err(error) => ToolResult::error(format!("Failed to search {}: {error}", path.display())),
+    }
+}
+
+fn grep_file_matches(
+    base: &Path,
+    path: &Path,
+    regex: &regex::Regex,
+) -> io::Result<Vec<(usize, String)>> {
+    let file = fs::File::open(path)?;
+    let mut matches = Vec::new();
+    for (index, line) in io::BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        if regex.is_match(&line) {
+            matches.push((index + 1, line));
+        }
+    }
+    let _ = base;
+    Ok(matches)
+}
+
+fn render_grep_output(
+    output_mode: &str,
+    matching_files: BTreeMap<String, usize>,
+    content_matches: Vec<String>,
+    head_limit: usize,
+    _base: &Path,
+) -> ToolResult {
+    match output_mode {
+        "content" => {
+            let lines = limit_lines(content_matches, head_limit);
+            if lines.is_empty() {
+                ToolResult::text("No matches found")
+            } else {
+                ToolResult::text(lines.join("\n"))
+            }
+        }
+        "count" => {
+            let lines = matching_files
+                .into_iter()
+                .map(|(path, count)| format!("{path}:{count}"))
+                .collect::<Vec<_>>();
+            ToolResult::text(limit_lines(lines, head_limit).join("\n"))
+        }
+        _ => {
+            let lines = matching_files.into_keys().collect::<Vec<_>>();
+            ToolResult::text(format!(
+                "Found {} file{}\n\n{}",
+                lines.len(),
+                if lines.len() == 1 { "" } else { "s" },
+                limit_lines(lines, head_limit).join("\n")
+            ))
+        }
+    }
+}
+
+fn limit_lines(lines: Vec<String>, head_limit: usize) -> Vec<String> {
+    if head_limit == 0 {
+        lines
+    } else {
+        lines.into_iter().take(head_limit).collect()
+    }
+}
+
+fn collect_files(base: &Path, path: &Path, visit: &mut impl FnMut(&Path, &Path) -> bool) -> bool {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return true,
+    };
+
+    for entry in entries.flatten() {
+        let full_path = entry.path();
+        let relative = full_path.strip_prefix(base).unwrap_or(&full_path);
+        if is_vcs_path(relative) {
+            continue;
+        }
+        if full_path.is_dir() {
+            if !collect_files(base, &full_path, visit) {
+                return false;
+            }
+        } else if full_path.is_file() && !visit(relative, &full_path) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_vcs_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some(".git" | ".svn" | ".hg" | ".bzr" | ".jj" | ".sl")
+        )
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GlobMatcher {
+    components: Vec<String>,
+}
+
+impl GlobMatcher {
+    fn new(pattern: &str) -> Self {
+        Self {
+            components: pattern.split('/').map(ToOwned::to_owned).collect(),
+        }
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        let parts = path
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .collect::<Vec<_>>();
+        match_glob_components(&parts, &self.components)
+    }
+}
+
+fn match_glob_components(path: &[&str], pattern: &[String]) -> bool {
+    if pattern.is_empty() {
+        return path.is_empty();
+    }
+    if pattern[0] == "**" {
+        return match_glob_components(path, &pattern[1..])
+            || (!path.is_empty() && match_glob_components(&path[1..], pattern));
+    }
+    if path.is_empty() {
+        return false;
+    }
+    matches_glob_segment(path[0], &pattern[0]) && match_glob_components(&path[1..], &pattern[1..])
+}
+
+fn matches_glob_segment(name: &str, pattern: &str) -> bool {
+    let name = name.as_bytes();
+    let pattern = pattern.as_bytes();
+    let (mut ni, mut pi) = (0usize, 0usize);
+    let (mut star, mut match_i) = (None, 0usize);
+    while ni < name.len() {
+        if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == name[ni]) {
+            ni += 1;
+            pi += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'*' {
+            star = Some(pi);
+            match_i = ni;
+            pi += 1;
+        } else if let Some(star_i) = star {
+            pi = star_i + 1;
+            match_i += 1;
+            ni = match_i;
+        } else {
+            return false;
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern.len()
 }
 
 fn expand_home(path: &str) -> String {

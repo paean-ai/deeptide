@@ -26,4 +26,4 @@ pub use completion::{
 pub use cost::{CacheHealth, CostSummary, CostTracker, ModelPricing, TurnRecord, TurnUsage};
 pub use repl::{ReplEvent, ReplSession};
 pub use tool_result_summary::ToolResultSummaryFormatter;
-pub use tools::{ReadTool, Tool, ToolContext, ToolRegistry, ToolResult};
+pub use tools::{GlobTool, GrepTool, ReadTool, Tool, ToolContext, ToolRegistry, ToolResult};

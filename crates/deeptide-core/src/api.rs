@@ -128,30 +128,55 @@ fn build_messages_request<'a>(
         model,
         max_tokens,
         messages: messages.into_iter().collect(),
-        tools: vec![WireTool {
+        tools: tool_schemas(),
+        stream: false,
+    }
+}
+
+fn tool_schemas() -> Vec<WireTool> {
+    vec![
+        WireTool {
             name: "Read",
             description: "Read a text file from the current workspace. Relative paths are resolved against the current working directory.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the file to read."
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "Line number to start reading from. Defaults to 1."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Number of lines to read."
-                    }
+                    "file_path": {"type": "string", "description": "Path to the file to read."},
+                    "offset": {"type": "integer", "description": "Line number to start reading from. Defaults to 1."},
+                    "limit": {"type": "integer", "description": "Number of lines to read."}
                 },
                 "required": ["file_path"]
             }),
-        }],
-        stream: false,
-    }
+        },
+        WireTool {
+            name: "Glob",
+            description: "Find files by glob pattern. Use this when you need to discover file paths before reading.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob pattern, for example **/*.rs"},
+                    "path": {"type": "string", "description": "Directory to search. Defaults to the workspace root."}
+                },
+                "required": ["pattern"]
+            }),
+        },
+        WireTool {
+            name: "Grep",
+            description: "Search text files using a regular expression.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regular expression pattern to search for."},
+                    "path": {"type": "string", "description": "File or directory to search. Defaults to the workspace root."},
+                    "glob": {"type": "string", "description": "Optional glob pattern to filter files."},
+                    "output_mode": {"type": "string", "description": "files_with_matches, content, or count."},
+                    "-i": {"type": "boolean", "description": "Case insensitive search."},
+                    "head_limit": {"type": "integer", "description": "Limit output to first N entries. Use 0 for unlimited."}
+                },
+                "required": ["pattern"]
+            }),
+        },
+    ]
 }
 
 fn messages_url(base_url: &str) -> String {
