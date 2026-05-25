@@ -106,6 +106,8 @@ impl ToolRegistry {
         registry.register(Box::<CronCreateTool>::default());
         registry.register(Box::<CronListTool>::default());
         registry.register(Box::<CronDeleteTool>::default());
+        registry.register(Box::<ReviewArtifactTool>::default());
+        registry.register(Box::<SkillTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
@@ -1297,6 +1299,21 @@ struct CronJob {
 
 static CRON_JOBS: OnceLock<Mutex<BTreeMap<String, CronJob>>> = OnceLock::new();
 static CRON_ID_COUNTER: OnceLock<Mutex<u64>> = OnceLock::new();
+static REVIEW_ARTIFACTS: OnceLock<Mutex<BTreeMap<PathBuf, String>>> = OnceLock::new();
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReviewArtifactTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SkillTool;
+
+#[derive(Debug, Clone, Copy)]
+struct BuiltinSkill {
+    name: &'static str,
+    description: &'static str,
+    when_to_use: Option<&'static str>,
+    prompt: &'static str,
+}
 
 impl Tool for CrashLogTool {
     fn name(&self) -> &'static str {
@@ -1567,6 +1584,76 @@ impl Tool for CronDeleteTool {
         } else {
             ToolResult::error(format!("Job {id} not found."))
         }
+    }
+}
+
+impl Tool for ReviewArtifactTool {
+    fn name(&self) -> &'static str {
+        "ReviewArtifact"
+    }
+
+    fn description(&self) -> &'static str {
+        "Mark a workspace file as needing human review."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("file_path is required");
+        };
+        if file_path.trim().is_empty() {
+            return ToolResult::error("file_path is required");
+        }
+        let reason = input
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let path = context.resolve_path(file_path);
+        review_artifacts()
+            .lock()
+            .expect("review artifacts lock")
+            .insert(path.clone(), reason.to_owned());
+        let suffix = if reason.is_empty() {
+            String::new()
+        } else {
+            format!(" - {reason}")
+        };
+        ToolResult::text(format!("Marked {} for review.{suffix}", path.display()))
+    }
+}
+
+impl Tool for SkillTool {
+    fn name(&self) -> &'static str {
+        "Skill"
+    }
+
+    fn description(&self) -> &'static str {
+        "Invoke a named built-in skill by expanding its reusable prompt template."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(skill_name) = input.get("skill").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("skill name is required");
+        };
+        let Some(skill) = find_builtin_skill(skill_name) else {
+            return ToolResult::error(format!(
+                "Unknown skill: {skill_name}. Available:\n{}",
+                builtin_skill_descriptions()
+            ));
+        };
+        let args = input.get("args").and_then(serde_json::Value::as_str);
+        let expanded = expand_skill_prompt(skill.prompt, args);
+        ToolResult::text(format!(
+            "Skill invoked: {skill_name}\n\n[SKILL PROMPT START]\n{expanded}\n[SKILL PROMPT END]\n\nFollow the instructions above. The skill specifies what to do and how to do it."
+        ))
     }
 }
 
@@ -3525,6 +3612,89 @@ fn format_cron_time(time: std::time::SystemTime) -> String {
     )
 }
 
+fn review_artifacts() -> &'static Mutex<BTreeMap<PathBuf, String>> {
+    REVIEW_ARTIFACTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn builtin_skills() -> &'static [BuiltinSkill] {
+    &[
+        BuiltinSkill {
+            name: "commit",
+            description: "Generate a git commit message for staged changes",
+            when_to_use: None,
+            prompt: "Generate a concise, descriptive git commit message for the staged changes.\n\nFollow these rules:\n1. Run `git diff --cached` to see what's staged\n2. Run `git log --oneline -10` to see recent commit style\n3. Write a one-line summary (under 72 chars) followed by a blank line, then details\n4. Use imperative mood: \"Add feature\" not \"Added feature\"\n5. Reference related issues with owner/repo#123 format\n6. End with: Co-authored-by: Deeptide <ds@deeptide.sh>\n\n$ARGUMENTS",
+        },
+        BuiltinSkill {
+            name: "simplify",
+            description: "Review code for reuse, quality, and efficiency",
+            when_to_use: None,
+            prompt: "Review the changed code for reuse opportunities, quality issues, and efficiency improvements. Then fix any issues found.\n\nCheck for:\n1. Duplicated logic that could be extracted into shared utilities\n2. Overly complex code that could be simplified\n3. Inefficient patterns (unnecessary allocations, repeated work)\n4. Dead code or unused imports\n5. Violations of existing codebase conventions\n\nAfter analysis, make minimal, targeted fixes. Do not refactor for the sake of refactoring.\n\n$ARGUMENTS",
+        },
+        BuiltinSkill {
+            name: "review-pr",
+            description: "Review a GitHub pull request",
+            when_to_use: None,
+            prompt: "Review the GitHub pull request provided.\n\nSteps:\n1. Run `gh pr view <number>` to get PR details\n2. Run `gh pr diff <number>` to see the changes\n3. Analyze the changes for: correctness, security, performance, test coverage, style\n4. Optionally run `gh pr review <number>` to submit your review\n\nProvide a clear, structured review with:\n- Summary of changes\n- Issues found (by severity)\n- Suggestions for improvement\n\n$ARGUMENTS",
+        },
+        BuiltinSkill {
+            name: "init",
+            description: "Scan this repo and write a TIDE.md project guide",
+            when_to_use: None,
+            prompt: "Bootstrap project memory for Deeptide in this repository.\n\nPhase 1 - explore without writing: inspect top-level layout, README, package manifests, CI config, and source structure.\nPhase 2 - check for existing project guides such as TIDE.md, AGENTS.md, CLAUDE.md, ZERO.md, CURSOR.md, or .cursorrules. Do not overwrite substantive existing guidance.\nPhase 3 - write TIDE.md with concise project-specific commands, architecture notes, conventions, and safety guidance.\nPhase 4 - summarize what was learned and what changed.\n\n$ARGUMENTS",
+        },
+        BuiltinSkill {
+            name: "batch",
+            description: "Plan and execute large parallelizable changes across the codebase",
+            when_to_use: None,
+            prompt: "Orchestrate a large, parallelizable change across this repository.\n\nPhase 1 - scope the files, symbols, and conventions touched by the request.\nPhase 2 - split work into independent units and use sub-agents or plan mode where useful.\nPhase 3 - verify with the project's tests or build commands.\nPhase 4 - report completed units, key files changed, and verification commands.\n\n$ARGUMENTS",
+        },
+        BuiltinSkill {
+            name: "publish",
+            description: "Publish or delete a static frontend on clide.app with Paean credentials",
+            when_to_use: Some(
+                "Use when the user asks to publish, deploy, upload, remove, unpublish, or delete a static frontend app/site to or from Paean Clide hosting / clide.app.",
+            ),
+            prompt: "Publish or delete the current project's static frontend via Paean Clide hosting.\n\nCall the native Publish tool for the operation. Do not run slash commands through Bash. Prefer built output directories over source: dist, build, out, .output/public, then public. Ensure a top-level index.html exists and report the published URL or authentication/build issue.\n\n$ARGUMENTS",
+        },
+        BuiltinSkill {
+            name: "update-config",
+            description: "Configure Deeptide CLI settings",
+            when_to_use: None,
+            prompt: "Help the user configure their Deeptide CLI settings.\n\nAvailable settings include model, api_key, max_turns, max_tokens, permission_mode, thinking, effort, and fast_mode. Use `tide config --set <key>=<value>` for global settings or add `--project` for project-specific settings. Use `tide config --show` to inspect current configuration.\n\n$ARGUMENTS",
+        },
+    ]
+}
+
+fn find_builtin_skill(name: &str) -> Option<&'static BuiltinSkill> {
+    builtin_skills().iter().find(|skill| skill.name == name)
+}
+
+fn builtin_skill_descriptions() -> String {
+    builtin_skills()
+        .iter()
+        .map(|skill| {
+            let mut line = format!("  - {}: {}", skill.name, skill.description);
+            if let Some(when) = skill.when_to_use {
+                line.push_str(&format!("\n    When to use: {when}"));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn expand_skill_prompt(prompt: &str, args: Option<&str>) -> String {
+    let Some(args) = args.filter(|value| !value.is_empty()) else {
+        return prompt.replace("$ARGUMENTS", "");
+    };
+    let parts = args.splitn(11, ' ').collect::<Vec<_>>();
+    let mut expanded = prompt.replace("$ARGUMENTS", args);
+    for (index, part) in parts.iter().enumerate() {
+        expanded = expanded.replace(&format!("${}", index + 1), part);
+    }
+    expanded
+}
+
 fn clipboard_read_text() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
@@ -4029,6 +4199,10 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
         "CronCreate" | "CronList" | "CronDelete" => {
             vec!["cron", "schedule", "recurring", "reminder", "automation"]
         }
+        "ReviewArtifact" => vec!["review", "human review", "flag", "artifact", "edited file"],
+        "Skill" => vec![
+            "skill", "prompt", "template", "workflow", "publish", "commit",
+        ],
         "Edit" => vec!["replace", "patch", "modify", "string replacement"],
         "FileMetadata" => vec!["xattr", "quarantine", "binary", "mime", "file type"],
         "Glob" => vec!["find files", "discover", "pattern"],

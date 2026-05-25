@@ -34,8 +34,8 @@ pub use tools::{
     AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
     CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
     FileMetadataTool, GlobTool, GrepTool, ImagePreprocessTool, LspTool, MacDiagnoseTool,
-    MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, ReadFilesTool, ReadTool, SnipTool,
-    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, ToolSearchTool, WebFetchTool,
-    WebSearchTool, WriteTool,
+    MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, ReadFilesTool, ReadTool,
+    ReviewArtifactTool, SkillTool, SnipTool, TaskCreateTool, TaskGetTool, TaskListTool,
+    TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry,
+    ToolResult, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
 };

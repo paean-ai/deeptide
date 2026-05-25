@@ -425,6 +425,7 @@ fn is_read_only(tool_name: &str) -> bool {
             | "CrashLog"
             | "MacLog"
             | "MacDiagnose"
+            | "ReviewArtifact"
     )
 }
 

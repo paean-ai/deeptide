@@ -2,9 +2,10 @@ use deeptide_core::{
     AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
     CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
     FileMetadataTool, ImagePreprocessTool, LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool,
-    MemoryWriteTool, MonitorTool, ReadFilesTool, SnipTool, TaskCreateTool, TaskGetTool,
-    TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext,
-    ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
+    MemoryWriteTool, MonitorTool, ReadFilesTool, ReviewArtifactTool, SkillTool, SnipTool,
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
+    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool,
+    WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -798,6 +799,45 @@ fn cron_create_rejects_malformed_expressions_and_empty_prompts() {
     );
     assert!(missing_prompt.is_error);
     assert_eq!(missing_prompt.content, "prompt is required");
+}
+
+#[test]
+fn review_artifact_marks_resolved_workspace_path_with_reason() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temp.path());
+    let result = ReviewArtifactTool.call(
+        serde_json::json!({"file_path": "src/lib.rs", "reason": "check edge case"}),
+        &context,
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Marked"));
+    assert!(result.content.contains("src/lib.rs"));
+    assert!(result.content.contains("check edge case"));
+
+    let missing = ReviewArtifactTool.call(serde_json::json!({}), &context);
+    assert!(missing.is_error);
+    assert_eq!(missing.content, "file_path is required");
+}
+
+#[test]
+fn skill_tool_expands_builtin_skill_prompts_and_reports_unknown_names() {
+    let context = ToolContext::new(".");
+    let commit = SkillTool.call(
+        serde_json::json!({"skill": "commit", "args": "-m fix"}),
+        &context,
+    );
+    assert!(!commit.is_error);
+    assert!(commit.content.contains("Skill invoked: commit"));
+    assert!(commit.content.contains("[SKILL PROMPT START]"));
+    assert!(commit.content.contains("git diff --cached"));
+    assert!(commit.content.contains("-m fix"));
+
+    let unknown = SkillTool.call(serde_json::json!({"skill": "missing"}), &context);
+    assert!(unknown.is_error);
+    assert!(unknown.content.contains("Unknown skill: missing"));
+    assert!(unknown.content.contains("commit"));
+    assert!(unknown.content.contains("publish"));
 }
 
 #[test]

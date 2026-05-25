@@ -510,6 +510,30 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "ReviewArtifact",
+            description: "Mark a workspace file as needing human review.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file to flag for review. Relative paths resolve against the current workspace."},
+                    "reason": {"type": "string", "description": "Short context to help the human reviewer."}
+                },
+                "required": ["file_path"]
+            }),
+        },
+        WireTool {
+            name: "Skill",
+            description: "Invoke a named built-in skill by expanding its reusable prompt template.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "The skill name.", "enum": ["commit", "simplify", "review-pr", "init", "batch", "publish", "update-config"]},
+                    "args": {"type": "string", "description": "Optional arguments for the skill."}
+                },
+                "required": ["skill"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -981,6 +1005,8 @@ mod tests {
             "CronCreate",
             "CronList",
             "CronDelete",
+            "ReviewArtifact",
+            "Skill",
         ] {
             assert!(
                 request.tools.iter().any(|tool| tool.name == name),
