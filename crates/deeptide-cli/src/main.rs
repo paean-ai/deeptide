@@ -1,9 +1,10 @@
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, ValueEnum};
 use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
+use deeptide_core::{LocalEchoBackend, ReplEvent, ReplSession};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 enum InputFormat {
@@ -75,6 +76,10 @@ fn run(mut cli: Cli) -> Result<(), String> {
     }
 
     validate_formats(&cli)?;
+    if !cli.print_mode && cli.input_format == InputFormat::Text {
+        return run_interactive(permission_mode);
+    }
+
     let stdin = read_stdin_if_needed(&cli)?;
     let prompt = collect_prompt(&cli, stdin.as_deref())?;
     emit_output(&cli, &prompt, permission_mode)
@@ -139,10 +144,44 @@ fn collect_prompt(cli: &Cli, stdin: Option<&str>) -> Result<String, String> {
                 return Ok(prompt.trim().to_owned());
             }
 
-            Err(
-                "interactive REPL mode is not implemented yet; use --print or --embedded"
-                    .to_owned(),
-            )
+            Err("interactive REPL mode requires a terminal; use --print or --embedded".to_owned())
+        }
+    }
+}
+
+fn run_interactive(permission_mode: PermissionMode) -> Result<(), String> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let mut repl = ReplSession::new(Box::<LocalEchoBackend>::default()).with_model("unconfigured");
+
+    writeln!(stdout, "{}", repl.banner()).map_err(|error| error.to_string())?;
+    writeln!(
+        stdout,
+        "Permission mode: {}. Type /help for commands, /exit to quit.",
+        permission_mode.label()
+    )
+    .map_err(|error| error.to_string())?;
+
+    loop {
+        write!(stdout, "{}", repl.prompt()).map_err(|error| error.to_string())?;
+        stdout.flush().map_err(|error| error.to_string())?;
+
+        let mut line = String::new();
+        let bytes = stdin
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        if bytes == 0 {
+            writeln!(stdout).map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+
+        for event in repl.submit(&line) {
+            match event {
+                ReplEvent::Output(text) => {
+                    writeln!(stdout, "{text}").map_err(|error| error.to_string())?;
+                }
+                ReplEvent::Exit => return Ok(()),
+            }
         }
     }
 }
