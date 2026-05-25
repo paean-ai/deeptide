@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use reqwest::Url;
+use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
@@ -70,16 +73,25 @@ impl ToolRegistry {
     pub fn with_builtin_tools() -> Self {
         let mut registry = Self::new();
         registry.register(Box::<ReadTool>::default());
+        registry.register(Box::<FileMetadataTool>::default());
         registry.register(Box::<ReadFilesTool>::default());
         registry.register(Box::<GlobTool>::default());
         registry.register(Box::<GrepTool>::default());
+        registry.register(Box::<WebFetchTool>::default());
+        registry.register(Box::<WebSearchTool>::default());
+        registry.register(Box::<ToolSearchTool>::default());
+        registry.register(Box::<AskUserQuestionTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
+        registry.register(Box::<MonitorTool>::default());
         registry.register(Box::<TodoWriteTool>::default());
+        registry.register(Box::<TaskCreateTool>::default());
         registry.register(Box::<TaskListTool>::default());
         registry.register(Box::<TaskGetTool>::default());
         registry.register(Box::<TaskUpdateTool>::default());
+        registry.register(Box::<TaskStopTool>::default());
+        registry.register(Box::<TaskOutputTool>::default());
         registry
     }
 
@@ -138,6 +150,35 @@ impl Tool for ReadTool {
             .and_then(|value| usize::try_from(value).ok());
 
         read_text_file(&path, offset, limit)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FileMetadataTool;
+
+impl Tool for FileMetadataTool {
+    fn name(&self) -> &'static str {
+        "FileMetadata"
+    }
+
+    fn description(&self) -> &'static str {
+        "Inspect file metadata without reading file contents."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("file_path is required");
+        };
+        if file_path.trim().is_empty() {
+            return ToolResult::error("file_path is required");
+        }
+
+        let path = context.resolve_path(file_path);
+        ToolResult::text(render_file_metadata(&path))
     }
 }
 
@@ -303,13 +344,1132 @@ impl Tool for GrepTool {
             .and_then(serde_json::Value::as_u64)
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(250);
+        let offset = input
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
         let glob = input
             .get("glob")
             .and_then(serde_json::Value::as_str)
             .map(GlobMatcher::new);
 
-        grep_path(&base, &base, &regex, output_mode, glob.as_ref(), head_limit)
+        grep_path(
+            &base,
+            &base,
+            &regex,
+            output_mode,
+            glob.as_ref(),
+            head_limit,
+            offset,
+        )
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WebFetchTool;
+
+impl Tool for WebFetchTool {
+    fn name(&self) -> &'static str {
+        "WebFetch"
+    }
+
+    fn description(&self) -> &'static str {
+        "Fetch web content over HTTP or HTTPS and return readable text."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(url_value) = input.get("url").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("url is required");
+        };
+        if url_value.trim().is_empty() {
+            return ToolResult::error("url is required");
+        }
+
+        let requested_url = match Url::parse(url_value) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") => url,
+            _ => return ToolResult::error(format!("Invalid URL: {url_value}")),
+        };
+
+        fetch_web_content(&requested_url)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WebSearchTool;
+
+impl WebSearchTool {
+    pub fn call_with_environment(
+        &self,
+        input: serde_json::Value,
+        env: &BTreeMap<String, String>,
+    ) -> ToolResult {
+        web_search_with_environment(input, env)
+    }
+}
+
+impl Tool for WebSearchTool {
+    fn name(&self) -> &'static str {
+        "WebSearch"
+    }
+
+    fn description(&self) -> &'static str {
+        "Search the web using configured Brave Search or Serper credentials."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let env = std::env::vars().collect::<BTreeMap<_, _>>();
+        self.call_with_environment(input, &env)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ToolSearchTool;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolSearchEntry {
+    name: &'static str,
+    summary: String,
+    is_read_only: bool,
+    is_concurrency_safe: bool,
+    keywords: Vec<&'static str>,
+}
+
+impl Tool for ToolSearchTool {
+    fn name(&self) -> &'static str {
+        "ToolSearch"
+    }
+
+    fn description(&self) -> &'static str {
+        "Search available tools by name or capability."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(raw_query) = input.get("query").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("query is required");
+        };
+        let query = raw_query.trim();
+        if query.is_empty() {
+            return ToolResult::error("query is required");
+        }
+
+        let max_results = input
+            .get("max_results")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(10)
+            .clamp(1, 40);
+        let entries = builtin_tool_search_entries();
+
+        if query.to_ascii_lowercase().starts_with("select:") {
+            return ToolResult::text(render_selected_tools(query, &entries));
+        }
+
+        let matches = search_tool_entries(query, &entries);
+        if matches.is_empty() {
+            return ToolResult::text(
+                "No matching tools. Try a tool name, an action, or `select:<ToolName>`.",
+            );
+        }
+
+        ToolResult::text(
+            matches
+                .into_iter()
+                .take(max_results)
+                .map(render_tool_search_entry)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AskUserQuestionTool;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserQuestion {
+    question: String,
+    header: String,
+    options: Vec<UserQuestionOption>,
+    multi_select: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserQuestionOption {
+    label: String,
+    description: String,
+}
+
+impl Tool for AskUserQuestionTool {
+    fn name(&self) -> &'static str {
+        "AskUserQuestion"
+    }
+
+    fn description(&self) -> &'static str {
+        "Ask the user clarifying questions to gather preferences or decisions."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let questions = match parse_user_questions(&input) {
+            Ok(questions) => questions,
+            Err(message) => return ToolResult::error(message),
+        };
+
+        let formatted = questions
+            .iter()
+            .enumerate()
+            .map(|(index, question)| {
+                let multi = if question.multi_select {
+                    " (multi-select)"
+                } else {
+                    ""
+                };
+                let options = question
+                    .options
+                    .iter()
+                    .map(|option| format!("  [{}] {}", option.label, option.description))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "Q{}: {}{}\nHeader: {}\n{}",
+                    index + 1,
+                    question.question,
+                    multi,
+                    question.header,
+                    options
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        ToolResult::text(format!(
+            "Questions for the user:\n\n{formatted}\n\nPlease answer each question to help me proceed."
+        ))
+    }
+}
+
+fn parse_user_questions(input: &serde_json::Value) -> Result<Vec<UserQuestion>, String> {
+    let Some(items) = input.get("questions").and_then(serde_json::Value::as_array) else {
+        return Err(String::from("At least one question is required"));
+    };
+    if items.is_empty() {
+        return Err(String::from("At least one question is required"));
+    }
+    if items.len() > 4 {
+        return Err(String::from("questions must contain at most 4 items"));
+    }
+
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| parse_user_question(index, item))
+        .collect()
+}
+
+fn parse_user_question(index: usize, item: &serde_json::Value) -> Result<UserQuestion, String> {
+    let Some(object) = item.as_object() else {
+        return Err(format!("questions[{index}] must be an object"));
+    };
+    let question = required_trimmed_string(object.get("question"))
+        .ok_or_else(|| format!("questions[{index}].question is required"))?;
+    let header = required_trimmed_string(object.get("header"))
+        .ok_or_else(|| format!("questions[{index}].header is required"))?;
+    if header.chars().count() > 12 {
+        return Err(format!(
+            "questions[{index}].header must be 12 characters or fewer"
+        ));
+    }
+    let Some(option_items) = object.get("options").and_then(serde_json::Value::as_array) else {
+        return Err(format!("questions[{index}].options is required"));
+    };
+    if !(2..=4).contains(&option_items.len()) {
+        return Err(format!(
+            "questions[{index}].options must contain 2 to 4 options"
+        ));
+    }
+
+    let options = option_items
+        .iter()
+        .enumerate()
+        .map(|(option_index, option)| parse_user_question_option(index, option_index, option))
+        .collect::<Result<Vec<_>, _>>()?;
+    let multi_select = object
+        .get("multiSelect")
+        .or_else(|| object.get("multi_select"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    Ok(UserQuestion {
+        question,
+        header,
+        options,
+        multi_select,
+    })
+}
+
+fn parse_user_question_option(
+    question_index: usize,
+    option_index: usize,
+    item: &serde_json::Value,
+) -> Result<UserQuestionOption, String> {
+    let Some(object) = item.as_object() else {
+        return Err(format!(
+            "questions[{question_index}].options[{option_index}] must be an object"
+        ));
+    };
+    let label = required_trimmed_string(object.get("label")).ok_or_else(|| {
+        format!("questions[{question_index}].options[{option_index}].label is required")
+    })?;
+    let description = required_trimmed_string(object.get("description")).ok_or_else(|| {
+        format!("questions[{question_index}].options[{option_index}].description is required")
+    })?;
+    Ok(UserQuestionOption { label, description })
+}
+
+fn required_trimmed_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn builtin_tool_search_entries() -> Vec<ToolSearchEntry> {
+    ToolRegistry::with_builtin_tools()
+        .tools
+        .values()
+        .map(|tool| ToolSearchEntry {
+            name: tool.name(),
+            summary: tool.description().to_owned(),
+            is_read_only: tool.is_read_only(),
+            is_concurrency_safe: tool.is_read_only(),
+            keywords: tool_search_keywords(tool.name()),
+        })
+        .collect()
+}
+
+fn search_tool_entries(query: &str, entries: &[ToolSearchEntry]) -> Vec<ToolSearchEntry> {
+    let lower = query.trim().to_ascii_lowercase();
+    if let Some(exact) = entries
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(&lower))
+    {
+        return vec![exact.clone()];
+    }
+
+    let terms = lower.split_whitespace().collect::<Vec<_>>();
+    let required = terms
+        .iter()
+        .filter_map(|term| term.strip_prefix('+').filter(|term| !term.is_empty()))
+        .collect::<Vec<_>>();
+    let optional = terms
+        .iter()
+        .copied()
+        .filter(|term| !term.starts_with('+'))
+        .collect::<Vec<_>>();
+    let scoring_terms = if required.is_empty() {
+        optional
+    } else {
+        required
+            .iter()
+            .copied()
+            .chain(optional.iter().copied())
+            .collect()
+    };
+    if scoring_terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut scored = entries
+        .iter()
+        .filter_map(|entry| {
+            let searchable = SearchableToolEntry::new(entry);
+            if !required.iter().all(|term| searchable.matches(term)) {
+                return None;
+            }
+
+            let mut score = 0usize;
+            if searchable.name == lower {
+                score += 1_000;
+            }
+            if searchable.name.starts_with(&lower) {
+                score += 350;
+            }
+            if searchable.name.contains(&lower) {
+                score += 180;
+            }
+            if searchable.full_name_parts == lower {
+                score += 120;
+            }
+
+            for term in &scoring_terms {
+                if searchable.name_parts.iter().any(|part| part == term) {
+                    score += 90;
+                }
+                if searchable
+                    .name_parts
+                    .iter()
+                    .any(|part| part.starts_with(term))
+                {
+                    score += 55;
+                }
+                if searchable.name_parts.iter().any(|part| part.contains(term)) {
+                    score += 25;
+                }
+                if searchable
+                    .keyword_parts
+                    .iter()
+                    .any(|keyword| keyword == term)
+                {
+                    score += 45;
+                }
+                if searchable.summary_words.iter().any(|word| word == term) {
+                    score += 18;
+                }
+                if searchable.summary.contains(term) {
+                    score += 8;
+                }
+            }
+
+            (score > 0).then_some((entry.clone(), score))
+        })
+        .collect::<Vec<_>>();
+
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.name.cmp(right.0.name))
+    });
+    scored.into_iter().map(|(entry, _)| entry).collect()
+}
+
+fn render_tool_search_entry(entry: ToolSearchEntry) -> String {
+    let mut traits = Vec::new();
+    traits.push(if entry.is_read_only {
+        "read-only"
+    } else {
+        "writes"
+    });
+    if entry.is_concurrency_safe {
+        traits.push("parallel");
+    }
+    format!(
+        "- {} [{}] - {}",
+        entry.name,
+        traits.join(", "),
+        truncate_chars(&entry.summary, 160)
+    )
+}
+
+fn render_selected_tools(query: &str, entries: &[ToolSearchEntry]) -> String {
+    let selected = query
+        .get("select:".len()..)
+        .unwrap_or_default()
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return String::from("No tools selected. Use `select:Read,Edit,Grep`.");
+    }
+
+    selected
+        .into_iter()
+        .map(|name| {
+            entries
+                .iter()
+                .find(|entry| entry.name.eq_ignore_ascii_case(name))
+                .cloned()
+                .map(render_tool_search_entry)
+                .unwrap_or_else(|| format!("- {name} - not found"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchableToolEntry {
+    name: String,
+    name_parts: Vec<String>,
+    full_name_parts: String,
+    summary: String,
+    summary_words: Vec<String>,
+    keyword_parts: Vec<String>,
+}
+
+impl SearchableToolEntry {
+    fn new(entry: &ToolSearchEntry) -> Self {
+        let name_parts = split_search_words(entry.name);
+        let summary = entry.summary.to_ascii_lowercase();
+        Self {
+            name: entry.name.to_ascii_lowercase(),
+            full_name_parts: name_parts.join(" "),
+            name_parts,
+            summary_words: split_search_words(&entry.summary),
+            keyword_parts: entry
+                .keywords
+                .iter()
+                .flat_map(|keyword| split_search_words(keyword))
+                .collect(),
+            summary,
+        }
+    }
+
+    fn matches(&self, term: &str) -> bool {
+        self.name.contains(term)
+            || self.name_parts.iter().any(|part| part == term)
+            || self.name_parts.iter().any(|part| part.contains(term))
+            || self.keyword_parts.iter().any(|keyword| keyword == term)
+            || self.summary_words.iter().any(|word| word == term)
+            || self.summary.contains(term)
+    }
+}
+
+fn split_search_words(value: &str) -> Vec<String> {
+    let mut spaced = String::with_capacity(value.len());
+    let mut previous: Option<char> = None;
+    for character in value.chars() {
+        if matches!(character, '_' | '-') {
+            spaced.push(' ');
+        } else {
+            if let Some(prev) = previous
+                && (prev.is_ascii_lowercase() || prev.is_ascii_digit())
+                && character.is_ascii_uppercase()
+            {
+                spaced.push(' ');
+            }
+            spaced.push(character);
+        }
+        previous = Some(character);
+    }
+
+    spaced
+        .to_ascii_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn tool_search_keywords(name: &str) -> Vec<&'static str> {
+    match name {
+        "Bash" => vec![
+            "shell",
+            "command",
+            "terminal",
+            "build",
+            "test",
+            "git",
+            "package manager",
+        ],
+        "Monitor" => vec![
+            "long running",
+            "logs",
+            "watch",
+            "server",
+            "until",
+            "tail",
+            "process",
+        ],
+        "AskUserQuestion" => vec![
+            "ask user", "clarify", "question", "choice", "decision", "blocked",
+        ],
+        "Edit" => vec!["replace", "patch", "modify", "string replacement"],
+        "FileMetadata" => vec!["xattr", "quarantine", "binary", "mime", "file type"],
+        "Glob" => vec!["find files", "discover", "pattern"],
+        "Grep" => vec!["search", "regex", "ripgrep", "content search"],
+        "Read" => vec!["open", "inspect", "file contents"],
+        "ReadFiles" => vec!["multi read", "batch read", "several files"],
+        "TaskCreate" | "TaskGet" | "TaskList" | "TaskOutput" | "TaskStop" | "TaskUpdate"
+        | "TodoWrite" => vec!["todo", "task", "plan", "progress"],
+        "ToolSearch" => vec!["tool", "capability", "search tools", "find tool", "select"],
+        "WebFetch" => vec!["url", "http", "fetch", "page"],
+        "WebSearch" => vec!["web", "internet", "search", "brave", "serper"],
+        "Write" => vec!["create", "overwrite", "new file"],
+        _ => Vec::new(),
+    }
+}
+
+fn web_search_with_environment(
+    input: serde_json::Value,
+    env: &BTreeMap<String, String>,
+) -> ToolResult {
+    let Some(query) = input.get("query").and_then(serde_json::Value::as_str) else {
+        return ToolResult::error("Missing query parameter");
+    };
+    if query.chars().count() < 2 {
+        return ToolResult::error("query must be at least 2 characters");
+    }
+    if input.get("allowed_domains").is_some() && input.get("blocked_domains").is_some() {
+        return ToolResult::error("Cannot specify both allowed_domains and blocked_domains");
+    }
+
+    let allowed_domains = extract_string_array(input.get("allowed_domains"));
+    let blocked_domains = extract_string_array(input.get("blocked_domains"));
+
+    if let Some(api_key) = env
+        .get("BRAVE_SEARCH_API_KEY")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        && let Ok(results) = search_brave(query, api_key, &allowed_domains, &blocked_domains)
+    {
+        return ToolResult::text(results);
+    }
+
+    if let Some(api_key) = env
+        .get("SERPER_API_KEY")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        && let Ok(results) = search_serper(query, api_key, &allowed_domains, &blocked_domains)
+    {
+        return ToolResult::text(results);
+    }
+
+    let encoded = encode_query_component(query);
+    ToolResult::error(format!(
+        "WebSearch requires an API key. Set one of:\n  export BRAVE_SEARCH_API_KEY=<key>   # https://search.brave.com (2000 free/month)\n  export SERPER_API_KEY=<key>          # https://serper.dev (Google results)\n\nAlternative: use WebFetch to retrieve search results directly:\n  - https://html.duckduckgo.com/html/?q={encoded}\n  - https://www.google.com/search?q={encoded}"
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveSearchResponse {
+    web: Option<BraveWebResults>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveWebResults {
+    results: Vec<BraveWebResult>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BraveWebResult {
+    title: String,
+    url: String,
+    description: Option<String>,
+    age: Option<String>,
+}
+
+fn search_brave(
+    query: &str,
+    api_key: &str,
+    allowed_domains: &[String],
+    blocked_domains: &[String],
+) -> Result<String, String> {
+    let mut url =
+        Url::parse("https://api.search.brave.com/res/v1/web/search").map_err(|e| e.to_string())?;
+    url.query_pairs_mut()
+        .append_pair("q", query)
+        .append_pair("count", "10")
+        .append_pair("text_decorations", "false");
+
+    let client = web_search_client()?;
+    let response = client
+        .get(url)
+        .header("X-Subscription-Token", api_key)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Brave Search failed with HTTP {}",
+            response.status()
+        ));
+    }
+
+    let parsed = response
+        .json::<BraveSearchResponse>()
+        .map_err(|error| error.to_string())?;
+    let results = parsed.web.map(|web| web.results).unwrap_or_default();
+    let results = apply_domain_filters(
+        results
+            .into_iter()
+            .map(|result| (result.url.clone(), result)),
+        allowed_domains,
+        blocked_domains,
+    );
+
+    Ok(format_brave_results(query, &results))
+}
+
+fn format_brave_results(query: &str, results: &[BraveWebResult]) -> String {
+    if results.is_empty() {
+        return format!("No results found for: \"{query}\"");
+    }
+
+    let mut lines = vec![format!(
+        "Web search results for: \"{query}\" (Brave Search)"
+    )];
+    for (index, result) in results.iter().take(8).enumerate() {
+        lines.push(String::new());
+        lines.push(format!("{}. {}", index + 1, result.title));
+        lines.push(format!("   URL: {}", result.url));
+        if let Some(description) = result
+            .description
+            .as_ref()
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("   {description}"));
+        }
+        if let Some(age) = result.age.as_ref().filter(|value| !value.is_empty()) {
+            lines.push(format!("   {age}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "Use WebFetch on any URL above to read the full page content.",
+    ));
+    lines.join("\n")
+}
+
+#[derive(Debug, Deserialize)]
+struct SerperResponse {
+    organic: Option<Vec<SerperOrganic>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SerperOrganic {
+    title: String,
+    link: String,
+    snippet: Option<String>,
+    date: Option<String>,
+}
+
+fn search_serper(
+    query: &str,
+    api_key: &str,
+    allowed_domains: &[String],
+    blocked_domains: &[String],
+) -> Result<String, String> {
+    let client = web_search_client()?;
+    let response = client
+        .post("https://google.serper.dev/search")
+        .header("X-API-KEY", api_key)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&serde_json::json!({"q": query, "num": 10}))
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Serper search failed with HTTP {}",
+            response.status()
+        ));
+    }
+
+    let parsed = response
+        .json::<SerperResponse>()
+        .map_err(|error| error.to_string())?;
+    let results = apply_domain_filters(
+        parsed
+            .organic
+            .unwrap_or_default()
+            .into_iter()
+            .map(|result| (result.link.clone(), result)),
+        allowed_domains,
+        blocked_domains,
+    );
+
+    Ok(format_serper_results(query, &results))
+}
+
+fn format_serper_results(query: &str, results: &[SerperOrganic]) -> String {
+    if results.is_empty() {
+        return format!("No results found for: \"{query}\"");
+    }
+
+    let mut lines = vec![format!(
+        "Web search results for: \"{query}\" (Google via Serper)"
+    )];
+    for (index, result) in results.iter().take(8).enumerate() {
+        lines.push(String::new());
+        lines.push(format!("{}. {}", index + 1, result.title));
+        lines.push(format!("   URL: {}", result.link));
+        if let Some(snippet) = result.snippet.as_ref().filter(|value| !value.is_empty()) {
+            lines.push(format!("   {snippet}"));
+        }
+        if let Some(date) = result.date.as_ref().filter(|value| !value.is_empty()) {
+            lines.push(format!("   {date}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "Use WebFetch on any URL above to read the full page content.",
+    ));
+    lines.join("\n")
+}
+
+fn web_search_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+fn apply_domain_filters<T>(
+    items: impl IntoIterator<Item = (String, T)>,
+    allowed_domains: &[String],
+    blocked_domains: &[String],
+) -> Vec<T> {
+    items
+        .into_iter()
+        .filter(|(url, _)| domain_allowed(url, allowed_domains, blocked_domains))
+        .take(8)
+        .map(|(_, value)| value)
+        .collect()
+}
+
+fn domain_allowed(url: &str, allowed_domains: &[String], blocked_domains: &[String]) -> bool {
+    let Some(host) = Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+    else {
+        return true;
+    };
+    if !allowed_domains.is_empty() {
+        return allowed_domains
+            .iter()
+            .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
+    }
+    if !blocked_domains.is_empty() {
+        return !blocked_domains
+            .iter()
+            .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
+    }
+    true
+}
+
+fn extract_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn encode_query_component(query: &str) -> String {
+    let Ok(mut url) = Url::parse("https://example.invalid/") else {
+        return query.to_owned();
+    };
+    url.query_pairs_mut().append_pair("q", query);
+    url.query()
+        .and_then(|query| query.strip_prefix("q="))
+        .unwrap_or(query)
+        .to_owned()
+}
+
+fn fetch_web_content(url: &Url) -> ToolResult {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Deeptide/1.0 Safari/537.36",
+        )
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => return ToolResult::error(format!("Failed to create HTTP client: {error}")),
+    };
+
+    let response = match client
+        .get(url.clone())
+        .header(
+            reqwest::header::ACCEPT,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+        )
+        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+        .send()
+    {
+        Ok(response) => response,
+        Err(error) => return ToolResult::error(format!("Failed to fetch URL: {error}")),
+    };
+
+    let status = response.status();
+    let final_url = response.url().clone();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_owned();
+    let selected_headers = selected_response_headers(&response);
+    let bytes = match response.bytes() {
+        Ok(bytes) => bytes,
+        Err(error) => return ToolResult::error(format!("Failed to read response body: {error}")),
+    };
+    let size = bytes.len();
+
+    let body = decode_response_body(&bytes);
+    let is_http_error = !status.is_success();
+    let mut output = response_header(
+        status.as_u16(),
+        size,
+        url.as_str(),
+        final_url.as_str(),
+        &content_type,
+        &selected_headers,
+    );
+
+    let Some(body) = body else {
+        output.push_str("\n\nCould not decode response body (binary content).");
+        return if is_http_error {
+            ToolResult::error(output)
+        } else {
+            ToolResult::text(output)
+        };
+    };
+
+    if is_http_error {
+        output.push_str("\n\n--- HTTP diagnostics ---\n");
+        output.push_str(&http_diagnostic(
+            status.as_u16(),
+            &selected_headers,
+            final_url.as_str(),
+            url.as_str(),
+        ));
+    }
+
+    let lower_content_type = content_type.to_lowercase();
+    let is_html_like = lower_content_type.contains("html") || body.to_lowercase().contains("<html");
+    let mut text = if is_html_like {
+        html_to_text(&body, Some(&final_url))
+    } else {
+        decode_entities(&body)
+    };
+    text = text.trim().to_owned();
+    let total_chars = text.chars().count();
+    if total_chars > 50_000 {
+        text = format!(
+            "{}\n\n[Content truncated: {total_chars} total chars; fetch a narrower URL or linked resource if needed]",
+            truncate_chars(&text, 50_000)
+        );
+    }
+
+    output.push_str("\n\n");
+    output.push_str(&text);
+
+    if is_http_error {
+        ToolResult::error(output)
+    } else {
+        ToolResult::text(output)
+    }
+}
+
+fn selected_response_headers(response: &reqwest::blocking::Response) -> Vec<(String, String)> {
+    ["Location", "Retry-After", "WWW-Authenticate", "Server"]
+        .into_iter()
+        .filter_map(|name| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+                .map(|value| (name.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+fn decode_response_body(bytes: &[u8]) -> Option<String> {
+    String::from_utf8(bytes.to_vec()).ok().or_else(|| {
+        if bytes.contains(&0) {
+            None
+        } else {
+            Some(bytes.iter().map(|byte| char::from(*byte)).collect())
+        }
+    })
+}
+
+fn response_header(
+    code: u16,
+    size: usize,
+    requested_url: &str,
+    final_url: &str,
+    content_type: &str,
+    selected_headers: &[(String, String)],
+) -> String {
+    let mut lines = vec![
+        format!("HTTP {code} | {}", format_byte_count(size)),
+        format!("URL: {requested_url}"),
+    ];
+    if final_url != requested_url {
+        lines.push(format!("Final URL: {final_url}"));
+    }
+    lines.push(format!("Content-Type: {content_type}"));
+    lines.extend(
+        selected_headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}")),
+    );
+    lines.join("\n")
+}
+
+fn http_diagnostic(
+    code: u16,
+    selected_headers: &[(String, String)],
+    final_url: &str,
+    requested_url: &str,
+) -> String {
+    let mut lines = Vec::new();
+    if final_url != requested_url {
+        lines.push(String::from(
+            "Request followed redirects from the requested URL; verify the final URL when diagnosing.",
+        ));
+    }
+
+    match code {
+        400 => lines.push(String::from("400 Bad Request: inspect query encoding, required parameters, and whether the endpoint expects a different method or content type.")),
+        401 => lines.push(String::from("401 Unauthorized: authentication is missing, expired, or not accepted by this endpoint.")),
+        403 => lines.push(String::from("403 Forbidden: access may require login, a token, different permissions, or the site may be blocking automated clients.")),
+        404 => lines.push(String::from("404 Not Found: verify the path, slug, version, and redirects; the host is reachable but this resource was not served.")),
+        408 => lines.push(String::from("408 Request Timeout: retry later and check whether the server expects a smaller or more specific request.")),
+        409 => lines.push(String::from("409 Conflict: the request reached the endpoint but conflicts with current resource state.")),
+        410 => lines.push(String::from("410 Gone: the resource has been intentionally removed or archived.")),
+        429 => {
+            let retry = selected_headers
+                .iter()
+                .find(|(name, _)| name == "Retry-After")
+                .map(|(_, value)| format!(" Retry-After: {value}."))
+                .unwrap_or_default();
+            lines.push(format!("429 Rate Limited: wait before retrying, reduce request frequency, or use an authenticated API.{retry}"));
+        }
+        500..=599 => lines.push(format!("{code} Server Error: the upstream service failed; capture the body, final URL, and relevant headers before retrying.")),
+        _ => lines.push(format!("{code} HTTP status: use the response body plus headers above as the primary evidence.")),
+    }
+
+    lines.join("\n")
+}
+
+fn html_to_text(html: &str, base_url: Option<&Url>) -> String {
+    let mut text = regex_replace(html, r"(?is)<!--.*?-->", "");
+    text = regex_replace(&text, r"(?is)<script\b[^>]*>.*?</script>", "");
+    text = regex_replace(&text, r"(?is)<style\b[^>]*>.*?</style>", "");
+    text = replace_anchor_tags(&text, base_url);
+    text = regex_replace(&text, r"(?i)<br\s*/?>", "\n");
+    text = regex_replace(
+        &text,
+        r"(?i)</(p|div|section|article|header|footer|main|nav|tr|table|ul|ol|h[1-6])\s*>",
+        "\n",
+    );
+    text = regex_replace(&text, r"(?i)<li\b[^>]*>", "\n- ");
+    text = regex_replace(&text, r"(?i)</(td|th)\s*>", "\t");
+    text = regex_replace(&text, r"<[^>]+>", "");
+
+    let decoded = decode_entities(&text);
+    let decoded = regex_replace(&decoded, r"[ \t\u{00A0}]+", " ");
+    let decoded = regex_replace(&decoded, r" *\n *", "\n");
+    regex_replace(&decoded, r"\n{3,}", "\n\n")
+}
+
+fn replace_anchor_tags(html: &str, base_url: Option<&Url>) -> String {
+    let Ok(regex) = regex::Regex::new(r#"(?is)<a\b([^>]*)>(.*?)</a>"#) else {
+        return html.to_owned();
+    };
+    regex
+        .replace_all(html, |captures: &regex::Captures<'_>| {
+            let attrs = captures.get(1).map(|value| value.as_str()).unwrap_or("");
+            let inner = captures.get(2).map(|value| value.as_str()).unwrap_or("");
+            let label = regex_replace(inner, r"<[^>]+>", "");
+            if let Some(href) = extract_href(attrs).filter(|href| !href.is_empty()) {
+                let resolved = base_url
+                    .and_then(|base| base.join(&href).ok())
+                    .map(|url| url.to_string())
+                    .unwrap_or(href);
+                format!("{label} [{resolved}]")
+            } else {
+                label
+            }
+        })
+        .into_owned()
+}
+
+fn extract_href(attrs: &str) -> Option<String> {
+    let regex = regex::Regex::new(r#"(?is)\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#).ok()?;
+    let captures = regex.captures(attrs)?;
+    (1..=3)
+        .find_map(|group| captures.get(group).map(|value| value.as_str()))
+        .map(decode_entities)
+}
+
+fn decode_entities(text: &str) -> String {
+    let mut output = String::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if ch != '&' {
+            output.push(ch);
+            continue;
+        }
+
+        let Some((semicolon_index, _)) = text[index..]
+            .char_indices()
+            .take_while(|(_, candidate)| *candidate != '\n')
+            .find(|(_, candidate)| *candidate == ';')
+        else {
+            output.push(ch);
+            continue;
+        };
+        if semicolon_index > 12 {
+            output.push(ch);
+            continue;
+        }
+
+        let entity = &text[index + 1..index + semicolon_index];
+        if let Some(replacement) = decode_entity(entity) {
+            output.push(replacement);
+            while chars
+                .peek()
+                .is_some_and(|(next_index, _)| *next_index <= index + semicolon_index)
+            {
+                chars.next();
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn decode_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" | "#39" => Some('\''),
+        "nbsp" => Some(' '),
+        value if value.starts_with("#x") || value.starts_with("#X") => {
+            u32::from_str_radix(&value[2..], 16)
+                .ok()
+                .and_then(char::from_u32)
+        }
+        value if value.starts_with('#') => value[1..].parse::<u32>().ok().and_then(char::from_u32),
+        _ => None,
+    }
+}
+
+fn regex_replace(input: &str, pattern: &str, replacement: &str) -> String {
+    regex::Regex::new(pattern)
+        .map(|regex| regex.replace_all(input, replacement).into_owned())
+        .unwrap_or_else(|_| input.to_owned())
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -365,6 +1525,59 @@ impl Tool for BashTool {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+pub struct MonitorTool;
+
+impl Tool for MonitorTool {
+    fn name(&self) -> &'static str {
+        "Monitor"
+    }
+
+    fn description(&self) -> &'static str {
+        "Run a long command and return recent output after a timeout or regex match."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(command) = input.get("command").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("command is required");
+        };
+        if command.trim().is_empty() {
+            return ToolResult::error("command is required");
+        }
+
+        let max_seconds = input
+            .get("max_seconds")
+            .or_else(|| input.get("timeout"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(30)
+            .clamp(5, 300);
+        let until = input
+            .get("until")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let regex = match until {
+            Some(pattern) => match regex::Regex::new(pattern) {
+                Ok(regex) => Some(regex),
+                Err(error) => return ToolResult::error(format!("Invalid until regex: {error}")),
+            },
+            None => None,
+        };
+
+        monitor_shell_command(
+            command,
+            context,
+            Duration::from_secs(max_seconds),
+            regex,
+            until,
+        )
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
 pub struct TodoWriteTool;
 
 impl Tool for TodoWriteTool {
@@ -405,6 +1618,43 @@ impl Tool for TodoWriteTool {
             "Todo list updated ({} items). Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable.",
             parsed.len()
         ))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskCreateTool;
+
+impl Tool for TaskCreateTool {
+    fn name(&self) -> &'static str {
+        "TaskCreate"
+    }
+
+    fn description(&self) -> &'static str {
+        "Create one in-memory task with a subject and description."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(subject) = input.get("subject").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing subject or description");
+        };
+        let Some(description) = input.get("description").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing subject or description");
+        };
+        if subject.trim().is_empty() || description.trim().is_empty() {
+            return ToolResult::error("Missing subject or description");
+        }
+
+        add_todo(TodoItem {
+            content: subject.to_owned(),
+            status: TodoStatus::Pending,
+            active_form: Some(description.to_owned()),
+        });
+
+        ToolResult::text(format!("Task created: {subject}"))
     }
 }
 
@@ -527,6 +1777,94 @@ impl Tool for TaskUpdateTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskStopTool;
+
+impl Tool for TaskStopTool {
+    fn name(&self) -> &'static str {
+        "TaskStop"
+    }
+
+    fn description(&self) -> &'static str {
+        "Stop a task by marking it completed."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(task_id) = input.get("taskId").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing taskId parameter");
+        };
+        let explanation = input
+            .get("explanation")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty());
+
+        if complete_todo(task_id) {
+            if let Some(explanation) = explanation {
+                ToolResult::text(format!("Task stopped: {explanation}"))
+            } else {
+                ToolResult::text(format!("Task {task_id} stopped"))
+            }
+        } else {
+            ToolResult::error(format!("Task not found or already completed: {task_id}"))
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskOutputTool;
+
+impl Tool for TaskOutputTool {
+    fn name(&self) -> &'static str {
+        "TaskOutput"
+    }
+
+    fn description(&self) -> &'static str {
+        "Retrieve recorded metadata and output for one task."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(task_id) = input.get("task_id").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("task_id is required");
+        };
+        if task_id.trim().is_empty() {
+            return ToolResult::error("task_id is required");
+        }
+
+        let Some(task) = get_todo(task_id) else {
+            return ToolResult::error(
+                serde_json::json!({
+                    "retrieval_status": "not_ready",
+                    "task": null,
+                    "note": format!("no task with id {task_id} (TaskStorage tracks the agent's todo list; background output capture is not yet implemented)")
+                })
+                .to_string(),
+            );
+        };
+
+        ToolResult::text(
+            serde_json::json!({
+                "retrieval_status": "success",
+                "task": {
+                    "task_id": task_id,
+                    "task_type": "todo",
+                    "status": task.status.as_str(),
+                    "description": task.active_form.unwrap_or_default(),
+                    "output": task.content
+                }
+            })
+            .to_string(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TodoItem {
     content: String,
@@ -601,6 +1939,12 @@ fn replace_todos(items: Vec<TodoItem>) {
     }
 }
 
+fn add_todo(item: TodoItem) {
+    if let Ok(mut todos) = todo_storage().lock() {
+        todos.push(item);
+    }
+}
+
 fn list_todos() -> Vec<TodoItem> {
     todo_storage()
         .lock()
@@ -614,6 +1958,27 @@ fn get_todo(task_id: &str) -> Option<TodoItem> {
         .lock()
         .ok()
         .and_then(|todos| todos.get(index).cloned())
+}
+
+fn complete_todo(task_id: &str) -> bool {
+    let Some(index) = task_id
+        .parse::<usize>()
+        .ok()
+        .and_then(|value| value.checked_sub(1))
+    else {
+        return false;
+    };
+    let Ok(mut todos) = todo_storage().lock() else {
+        return false;
+    };
+    let Some(todo) = todos.get_mut(index) else {
+        return false;
+    };
+    if todo.status == TodoStatus::Completed {
+        return false;
+    }
+    todo.status = TodoStatus::Completed;
+    true
 }
 
 fn update_todo(
@@ -872,6 +2237,9 @@ fn read_text_file_limited(path: &Path, line_limit: Option<usize>) -> Result<Stri
             path.display()
         ));
     }
+    if let Some(kind) = special_file_kind(path) {
+        return Err(unsupported_special_file_message(path, kind, metadata.len()));
+    }
 
     let file = match fs::File::open(path) {
         Ok(file) => file,
@@ -912,6 +2280,201 @@ fn read_text_file_limited(path: &Path, line_limit: Option<usize>) -> Result<Stri
     }
 
     Ok(output)
+}
+
+fn render_file_metadata(path: &Path) -> String {
+    let mut lines = vec![format!("[FileMetadata] {}", path.display())];
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            lines.push(String::from("exists: false"));
+            return lines.join("\n");
+        }
+        Err(error) => {
+            lines.push(String::from("exists: unknown"));
+            lines.push(format!("error: {error}"));
+            return lines.join("\n");
+        }
+    };
+
+    lines.push(String::from("exists: true"));
+    lines.push(format!(
+        "kind: {}",
+        if metadata.is_dir() {
+            "directory"
+        } else if metadata.is_file() {
+            "file"
+        } else {
+            "other"
+        }
+    ));
+    if metadata.is_file() {
+        lines.push(format!(
+            "size: {}",
+            format_byte_count(metadata.len() as usize)
+        ));
+    }
+    if let Ok(created) = metadata.created() {
+        lines.push(format!("created: {}", format_system_time(created)));
+    }
+    if let Ok(modified) = metadata.modified() {
+        lines.push(format!("modified: {}", format_system_time(modified)));
+    }
+    lines.push(format!("readonly: {}", metadata.permissions().readonly()));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        lines.push(format!(
+            "mode: {:o}",
+            metadata.permissions().mode() & 0o7777
+        ));
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    lines.push(format!(
+        "extension: {}",
+        if ext.is_empty() { "none" } else { ext.as_str() }
+    ));
+    let (type_name, mime) = file_type_hint(&ext, &metadata);
+    lines.push(format!("type: {type_name}"));
+    lines.push(format!("mime: {mime}"));
+
+    #[cfg(target_os = "macos")]
+    append_macos_metadata(path, &mut lines);
+    #[cfg(not(target_os = "macos"))]
+    {
+        lines.push(String::from("xattrs: unsupported on this platform"));
+        lines.push(String::from("spotlight: unavailable"));
+    }
+
+    lines.join("\n")
+}
+
+fn format_system_time(value: std::time::SystemTime) -> String {
+    let datetime = time::OffsetDateTime::from(value);
+    datetime
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| format!("{datetime}"))
+}
+
+fn file_type_hint(ext: &str, metadata: &fs::Metadata) -> (&'static str, &'static str) {
+    if metadata.is_dir() {
+        return ("directory", "inode/directory");
+    }
+    match ext {
+        "txt" | "md" | "rs" | "swift" | "js" | "ts" | "tsx" | "jsx" | "py" | "go" | "java"
+        | "c" | "h" | "cpp" | "hpp" | "json" | "toml" | "yaml" | "yml" | "csv" | "tsv" | "html"
+        | "css" | "xml" | "sh" | "zsh" | "bash" => ("text", "text/plain"),
+        "png" => ("image", "image/png"),
+        "jpg" | "jpeg" => ("image", "image/jpeg"),
+        "gif" => ("image", "image/gif"),
+        "webp" => ("image", "image/webp"),
+        "bmp" => ("image", "image/bmp"),
+        "tif" | "tiff" => ("image", "image/tiff"),
+        "pdf" => ("PDF document", "application/pdf"),
+        "zip" => ("archive", "application/zip"),
+        "gz" | "tgz" => ("archive", "application/gzip"),
+        "tar" => ("archive", "application/x-tar"),
+        "doc" | "docx" | "rtf" | "odt" => ("office or rich document", "application/octet-stream"),
+        "ppt" | "pptx" | "xls" | "xlsx" => ("office document", "application/octet-stream"),
+        "sqlite" | "sqlite3" | "db" => ("database", "application/octet-stream"),
+        "" => ("unknown", "unknown"),
+        _ => ("unknown", "application/octet-stream"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn append_macos_metadata(path: &Path, lines: &mut Vec<String>) {
+    let xattrs = Command::new("/usr/bin/xattr").arg("-l").arg(path).output();
+    match xattrs {
+        Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let names = text
+                .lines()
+                .filter_map(|line| line.split_once(": ").map(|(name, _)| name.to_owned()))
+                .collect::<Vec<_>>();
+            if names.is_empty() {
+                lines.push(String::from("xattrs: present"));
+            } else {
+                lines.push(format!("xattrs: {}", names.join(", ")));
+            }
+            if let Some(quarantine) = text
+                .lines()
+                .find(|line| line.starts_with("com.apple.quarantine:"))
+            {
+                lines.push(format!(
+                    "quarantine: {}",
+                    quarantine
+                        .strip_prefix("com.apple.quarantine:")
+                        .unwrap_or("")
+                        .trim()
+                ));
+            } else {
+                lines.push(String::from("quarantine: none"));
+            }
+        }
+        _ => lines.push(String::from("xattrs: none")),
+    }
+
+    let spotlight = Command::new("/usr/bin/mdls")
+        .args([
+            "-name",
+            "kMDItemKind",
+            "-name",
+            "kMDItemContentType",
+            "-name",
+            "kMDItemFSName",
+        ])
+        .arg(path)
+        .output();
+    match spotlight {
+        Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+            lines.push(String::from("spotlight:"));
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !trimmed.ends_with("= (null)") {
+                    lines.push(format!("  {trimmed}"));
+                }
+            }
+        }
+        _ => lines.push(String::from("spotlight: unavailable")),
+    }
+}
+
+fn special_file_kind(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "heic" | "avif" => {
+            Some("image")
+        }
+        "pdf" => Some("PDF document"),
+        "doc" | "docx" | "rtf" | "rtfd" | "odt" | "ppt" | "pptx" | "xls" | "xlsx" | "ods"
+        | "odp" | "webarchive" => Some("office or rich document"),
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "dmg" | "pkg" => {
+            Some("archive or package")
+        }
+        "mp3" | "wav" | "m4a" | "flac" | "mp4" | "mov" | "avi" | "mkv" | "webm" => {
+            Some("media file")
+        }
+        "sqlite" | "sqlite3" | "db" => Some("database file"),
+        _ => None,
+    }
+}
+
+fn unsupported_special_file_message(path: &Path, kind: &str, bytes: u64) -> String {
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("<unknown>");
+    format!(
+        "reason: unsupported binary or package-like file\nfile: {file}\ntype: {kind} · size: {}\nlikely_cause: this path appears to be {kind}, and Read avoids dumping binary data into context.\nnext_action: use a dedicated tool for images, PDFs, Office files, archives, media, or app bundles; if this is actually source text, report the extension/filename so Read can classify it safely.",
+        format_byte_count(bytes as usize)
+    )
 }
 
 fn execute_shell_command(command: &str, context: &ToolContext, timeout: Duration) -> ToolResult {
@@ -980,6 +2543,207 @@ fn start_background_command(command: &str, context: &ToolContext) -> ToolResult 
             truncate_chars(command, 100)
         )),
         Err(error) => ToolResult::error(format!("Failed to execute command: {error}")),
+    }
+}
+
+#[derive(Debug)]
+enum MonitorEvent {
+    Stdout(String),
+    Stderr(String),
+}
+
+fn monitor_shell_command(
+    command: &str,
+    context: &ToolContext,
+    timeout: Duration,
+    until_regex: Option<regex::Regex>,
+    until_pattern: Option<&str>,
+) -> ToolResult {
+    let mut child = match shell_command(command)
+        .current_dir(&context.cwd)
+        .env_remove("TIDE_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("ZERO_CLI_API_KEY")
+        .env_remove("ZERO_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return ToolResult::error(format!("Failed to launch: {error}")),
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    if let Some(stdout) = stdout {
+        spawn_monitor_reader(stdout, sender.clone(), true);
+    }
+    if let Some(stderr) = stderr {
+        spawn_monitor_reader(stderr, sender, false);
+    }
+
+    let started = Instant::now();
+    let mut stdout_lines = Vec::new();
+    let mut stderr_lines = Vec::new();
+    let mut matched = false;
+    let mut timed_out = false;
+    let exit_code;
+
+    loop {
+        while let Ok(event) = receiver.try_recv() {
+            match event {
+                MonitorEvent::Stdout(line) => {
+                    if until_regex
+                        .as_ref()
+                        .is_some_and(|regex| regex.is_match(&line))
+                    {
+                        matched = true;
+                    }
+                    stdout_lines.push(line);
+                }
+                MonitorEvent::Stderr(line) => stderr_lines.push(line),
+            }
+        }
+
+        if matched {
+            let _ = child.kill();
+            exit_code = child.wait().ok().and_then(|status| status.code());
+            break;
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_code = status.code();
+                break;
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                timed_out = true;
+                let _ = child.kill();
+                exit_code = child.wait().ok().and_then(|status| status.code());
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(error) => return ToolResult::error(format!("Failed to monitor command: {error}")),
+        }
+    }
+
+    let drain_deadline = Instant::now() + Duration::from_millis(250);
+    while Instant::now() < drain_deadline {
+        match receiver.try_recv() {
+            Ok(MonitorEvent::Stdout(line)) => stdout_lines.push(line),
+            Ok(MonitorEvent::Stderr(line)) => stderr_lines.push(line),
+            Err(std::sync::mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+
+    render_monitor_output(
+        &stdout_lines,
+        &stderr_lines,
+        exit_code,
+        timed_out,
+        matched,
+        until_pattern,
+        timeout,
+    )
+}
+
+fn spawn_monitor_reader<R>(
+    reader: R,
+    sender: std::sync::mpsc::Sender<MonitorEvent>,
+    is_stdout: bool,
+) where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = io::BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                    let event = if is_stdout {
+                        MonitorEvent::Stdout(trimmed)
+                    } else {
+                        MonitorEvent::Stderr(trimmed)
+                    };
+                    if sender.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn render_monitor_output(
+    stdout_lines: &[String],
+    stderr_lines: &[String],
+    exit_code: Option<i32>,
+    timed_out: bool,
+    matched: bool,
+    until_pattern: Option<&str>,
+    timeout: Duration,
+) -> ToolResult {
+    let header = if matched {
+        format!(
+            "(matched `{}` after {} lines)",
+            until_pattern.unwrap_or_default(),
+            stdout_lines.len()
+        )
+    } else if timed_out {
+        format!(
+            "(captured {} lines, timed out after {}s)",
+            stdout_lines.len(),
+            timeout.as_secs()
+        )
+    } else {
+        format!(
+            "(captured {} lines, exit={})",
+            stdout_lines.len(),
+            exit_code.unwrap_or(-1)
+        )
+    };
+
+    let mut body = header;
+    let stdout_tail = stdout_lines
+        .iter()
+        .rev()
+        .take(200)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !stdout_tail.is_empty() {
+        body.push('\n');
+        body.push_str(&stdout_tail);
+    }
+    if !stderr_lines.is_empty() {
+        let stderr_tail = stderr_lines
+            .iter()
+            .rev()
+            .take(100)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        body.push_str("\n--- stderr ---\n");
+        body.push_str(&truncate_chars(&stderr_tail, 2_000));
+    }
+
+    if !matched && exit_code.unwrap_or(0) != 0 && !timed_out {
+        ToolResult::error(body)
+    } else {
+        ToolResult::text(body)
     }
 }
 
@@ -1137,6 +2901,7 @@ fn grep_path(
     output_mode: &str,
     glob: Option<&GlobMatcher>,
     head_limit: usize,
+    offset: usize,
 ) -> ToolResult {
     if path.is_file() {
         return grep_file(
@@ -1145,12 +2910,14 @@ fn grep_path(
             regex,
             output_mode,
             head_limit,
+            offset,
         );
     }
     if !path.is_dir() {
         return ToolResult::error(format!("Path does not exist: {}", path.display()));
     }
 
+    let collect_limit = collect_limit(head_limit, offset);
     let mut matching_files = BTreeMap::<String, usize>::new();
     let mut content_matches = Vec::new();
     collect_files(path, path, &mut |relative, full_path| {
@@ -1170,7 +2937,7 @@ fn grep_path(
             Ok(_) => {}
             Err(_) => {}
         }
-        head_limit == 0 || matching_files.len().max(content_matches.len()) < head_limit
+        matching_files.len().max(content_matches.len()) < collect_limit
     });
 
     render_grep_output(
@@ -1178,6 +2945,7 @@ fn grep_path(
         matching_files,
         content_matches,
         head_limit,
+        offset,
         base,
     )
 }
@@ -1188,6 +2956,7 @@ fn grep_file(
     regex: &regex::Regex,
     output_mode: &str,
     head_limit: usize,
+    offset: usize,
 ) -> ToolResult {
     match grep_file_matches(base, path, regex) {
         Ok(matches) => {
@@ -1209,6 +2978,7 @@ fn grep_file(
                 matching_files,
                 content_matches,
                 head_limit,
+                offset,
                 base,
             )
         }
@@ -1238,13 +3008,19 @@ fn render_grep_output(
     matching_files: BTreeMap<String, usize>,
     content_matches: Vec<String>,
     head_limit: usize,
+    offset: usize,
     _base: &Path,
 ) -> ToolResult {
     match output_mode {
         "content" => {
-            let lines = limit_lines(content_matches, head_limit);
+            let (lines, truncated) = page_lines(content_matches, head_limit, offset);
             if lines.is_empty() {
                 ToolResult::text("No matches found")
+            } else if truncated {
+                ToolResult::text(format!(
+                    "{}\n\n[Results truncated: use offset to paginate]",
+                    lines.join("\n")
+                ))
             } else {
                 ToolResult::text(lines.join("\n"))
             }
@@ -1254,25 +3030,54 @@ fn render_grep_output(
                 .into_iter()
                 .map(|(path, count)| format!("{path}:{count}"))
                 .collect::<Vec<_>>();
-            ToolResult::text(limit_lines(lines, head_limit).join("\n"))
+            let (lines, truncated) = page_lines(lines, head_limit, offset);
+            if truncated {
+                ToolResult::text(format!(
+                    "{}\n\n[Results truncated: use offset to paginate]",
+                    lines.join("\n")
+                ))
+            } else {
+                ToolResult::text(lines.join("\n"))
+            }
         }
         _ => {
             let lines = matching_files.into_keys().collect::<Vec<_>>();
-            ToolResult::text(format!(
-                "Found {} file{}\n\n{}",
-                lines.len(),
-                if lines.len() == 1 { "" } else { "s" },
-                limit_lines(lines, head_limit).join("\n")
-            ))
+            let (paged, truncated) = page_lines(lines, head_limit, offset);
+            let suffix = if truncated {
+                "\n\n[Results truncated: use offset to paginate]"
+            } else {
+                ""
+            };
+            ToolResult::text(
+                format!(
+                    "Found {} file{}\n\n{}",
+                    paged.len(),
+                    if paged.len() == 1 { "" } else { "s" },
+                    paged.join("\n")
+                ) + suffix,
+            )
         }
     }
 }
 
-fn limit_lines(lines: Vec<String>, head_limit: usize) -> Vec<String> {
+fn collect_limit(head_limit: usize, offset: usize) -> usize {
     if head_limit == 0 {
-        lines
+        usize::MAX
     } else {
-        lines.into_iter().take(head_limit).collect()
+        offset.saturating_add(head_limit)
+    }
+}
+
+fn page_lines(lines: Vec<String>, head_limit: usize, offset: usize) -> (Vec<String>, bool) {
+    let start = offset.min(lines.len());
+    let tail_len = lines.len().saturating_sub(start);
+    if head_limit == 0 {
+        (lines.into_iter().skip(start).collect(), false)
+    } else {
+        (
+            lines.into_iter().skip(start).take(head_limit).collect(),
+            tail_len > head_limit,
+        )
     }
 }
 

@@ -1,7 +1,14 @@
 use deeptide_core::{
-    BashTool, EditTool, ReadFilesTool, TaskGetTool, TaskListTool, TaskUpdateTool, TodoWriteTool,
-    Tool, ToolContext, ToolRegistry, WriteTool,
+    AskUserQuestionTool, BashTool, EditTool, FileMetadataTool, MonitorTool, ReadFilesTool,
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
+    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool,
+    WriteTool,
 };
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::thread;
 
 #[test]
 fn read_tool_reads_text_file_with_line_numbers() {
@@ -51,6 +58,64 @@ fn read_tool_reports_missing_files_with_hint() {
     assert!(result.is_error);
     assert!(result.content.contains("File does not exist"));
     assert!(result.content.contains("Glob"));
+}
+
+#[test]
+fn read_tool_reports_special_binary_formats_without_dumping_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("diagram.png"),
+        [0x89, b'P', b'N', b'G', 0, 1],
+    )
+    .expect("write fixture");
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let result = registry.call(
+        "Read",
+        serde_json::json!({"file_path": "diagram.png"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("reason: unsupported binary"));
+    assert!(result.content.contains("file: diagram.png"));
+    assert!(result.content.contains("type: image"));
+    assert!(result.content.contains("next_action: use a dedicated tool"));
+    assert!(!result.content.contains("PNG\u{0}"));
+}
+
+#[test]
+fn file_metadata_tool_reports_existing_text_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "hello").expect("write fixture");
+
+    let result = FileMetadataTool.call(
+        serde_json::json!({"file_path": "notes.txt"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("[FileMetadata]"));
+    assert!(result.content.contains("exists: true"));
+    assert!(result.content.contains("kind: file"));
+    assert!(result.content.contains("size: 5 bytes"));
+    assert!(result.content.contains("extension: txt"));
+    assert!(result.content.contains("type: text"));
+    assert!(result.content.contains("mime: text/plain"));
+}
+
+#[test]
+fn file_metadata_tool_reports_missing_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = FileMetadataTool.call(
+        serde_json::json!({"file_path": "missing.bin"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("missing.bin"));
+    assert!(result.content.contains("exists: false"));
 }
 
 #[test]
@@ -133,6 +198,143 @@ fn registry_reports_unknown_tools() {
 }
 
 #[test]
+fn tool_search_finds_tools_by_capability_synonyms() {
+    let result = ToolSearchTool.call(
+        serde_json::json!({"query": "file metadata quarantine"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert!(
+        result
+            .content
+            .lines()
+            .next()
+            .unwrap_or("")
+            .contains("FileMetadata")
+    );
+
+    let grep = ToolSearchTool.call(
+        serde_json::json!({"query": "regex search"}),
+        &ToolContext::new("."),
+    );
+    assert!(!grep.is_error);
+    assert!(grep.content.contains("Grep"));
+}
+
+#[test]
+fn tool_search_supports_exact_names_and_select_syntax() {
+    let exact = ToolSearchTool.call(serde_json::json!({"query": "Read"}), &ToolContext::new("."));
+    assert!(!exact.is_error);
+    assert_eq!(exact.content.lines().count(), 1);
+    assert!(exact.content.contains("- Read [read-only, parallel]"));
+
+    let selected = ToolSearchTool.call(
+        serde_json::json!({"query": "select:Read,Edit,MissingTool"}),
+        &ToolContext::new("."),
+    );
+    assert!(!selected.is_error);
+    assert!(selected.content.contains("- Read [read-only, parallel]"));
+    assert!(selected.content.contains("- Edit [writes]"));
+    assert!(selected.content.contains("- MissingTool - not found"));
+}
+
+#[test]
+fn ask_user_question_tool_formats_questions_and_options() {
+    let result = AskUserQuestionTool.call(
+        serde_json::json!({
+            "questions": [
+                {
+                    "question": "Which implementation path should I use?",
+                    "header": "Path",
+                    "multiSelect": false,
+                    "options": [
+                        {"label": "Small", "description": "Ship a narrow compatible increment."},
+                        {"label": "Broad", "description": "Spend longer on a larger pass."}
+                    ]
+                },
+                {
+                    "question": "Which checks should run?",
+                    "header": "Checks",
+                    "multiSelect": true,
+                    "options": [
+                        {"label": "Tests", "description": "Run the Rust test suite."},
+                        {"label": "Clippy", "description": "Run Rust lints."}
+                    ]
+                }
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Questions for the user:"));
+    assert!(
+        result
+            .content
+            .contains("Q1: Which implementation path should I use?")
+    );
+    assert!(result.content.contains("Header: Path"));
+    assert!(
+        result
+            .content
+            .contains("[Small] Ship a narrow compatible increment.")
+    );
+    assert!(
+        result
+            .content
+            .contains("Q2: Which checks should run? (multi-select)")
+    );
+    assert!(result.content.contains("Please answer each question"));
+}
+
+#[test]
+fn ask_user_question_tool_validates_shape_and_limits() {
+    let missing = AskUserQuestionTool.call(serde_json::json!({}), &ToolContext::new("."));
+    assert!(missing.is_error);
+    assert_eq!(missing.content, "At least one question is required");
+
+    let one_option = AskUserQuestionTool.call(
+        serde_json::json!({
+            "questions": [{
+                "question": "Pick one",
+                "header": "Choice",
+                "multiSelect": false,
+                "options": [{"label": "Only", "description": "No alternative."}]
+            }]
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(one_option.is_error);
+    assert!(
+        one_option
+            .content
+            .contains("questions[0].options must contain 2 to 4 options")
+    );
+
+    let long_header = AskUserQuestionTool.call(
+        serde_json::json!({
+            "questions": [{
+                "question": "Pick one",
+                "header": "VeryLongHeader",
+                "multiSelect": false,
+                "options": [
+                    {"label": "A", "description": "First."},
+                    {"label": "B", "description": "Second."}
+                ]
+            }]
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(long_header.is_error);
+    assert!(
+        long_header
+            .content
+            .contains("questions[0].header must be 12 characters or fewer")
+    );
+}
+
+#[test]
 fn bash_tool_executes_commands_in_workspace() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join("notes.txt"), "alpha\n").expect("write fixture");
@@ -172,7 +374,56 @@ fn bash_tool_rejects_multiline_commands() {
 }
 
 #[test]
+fn monitor_tool_returns_stdout_and_exit_status() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = MonitorTool.call(
+        serde_json::json!({"command": monitor_stdout_command(), "max_seconds": 5}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("(captured 2 lines, exit=0)"));
+    assert!(result.content.contains("ready"));
+    assert!(result.content.contains("done"));
+}
+
+#[test]
+fn monitor_tool_returns_early_when_until_matches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = MonitorTool.call(
+        serde_json::json!({
+            "command": monitor_until_command(),
+            "max_seconds": 10,
+            "until": "READY"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("(matched `READY`"));
+    assert!(result.content.contains("READY"));
+}
+
+#[test]
+fn monitor_tool_reports_stderr_and_failed_exit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = MonitorTool.call(
+        serde_json::json!({"command": stderr_failure_command(), "max_seconds": 5}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("exit=7"));
+    assert!(result.content.contains("--- stderr ---"));
+    assert!(result.content.contains("boom"));
+}
+
+#[test]
 fn todo_write_tool_updates_in_memory_list() {
+    let _guard = todo_test_guard();
     let result = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -192,6 +443,7 @@ fn todo_write_tool_updates_in_memory_list() {
 
 #[test]
 fn todo_write_tool_clears_when_all_tasks_complete() {
+    let _guard = todo_test_guard();
     let result = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -210,6 +462,7 @@ fn todo_write_tool_clears_when_all_tasks_complete() {
 
 #[test]
 fn todo_write_tool_rejects_missing_todos_array() {
+    let _guard = todo_test_guard();
     let result = TodoWriteTool.call(serde_json::json!({}), &ToolContext::new("."));
 
     assert!(result.is_error);
@@ -217,7 +470,43 @@ fn todo_write_tool_rejects_missing_todos_array() {
 }
 
 #[test]
+fn task_create_tool_adds_task_with_description() {
+    let _guard = todo_test_guard();
+    let _ = TodoWriteTool.call(serde_json::json!({"todos": []}), &ToolContext::new("."));
+
+    let created = TaskCreateTool.call(
+        serde_json::json!({
+            "subject": "Implement task parity",
+            "description": "Port TaskCreate, TaskStop, and TaskOutput"
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!created.is_error);
+    assert_eq!(created.content, "Task created: Implement task parity");
+
+    let detail = TaskGetTool.call(serde_json::json!({"taskId": "1"}), &ToolContext::new("."));
+    assert_eq!(
+        detail.content,
+        "Task: Implement task parity\nID: 1\nStatus: pending\nDescription: Port TaskCreate, TaskStop, and TaskOutput"
+    );
+}
+
+#[test]
+fn task_create_tool_requires_subject_and_description() {
+    let _guard = todo_test_guard();
+    let result = TaskCreateTool.call(
+        serde_json::json!({"subject": "Missing details"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(result.is_error);
+    assert_eq!(result.content, "Missing subject or description");
+}
+
+#[test]
 fn task_list_tool_lists_current_todos() {
+    let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -240,6 +529,7 @@ fn task_list_tool_lists_current_todos() {
 
 #[test]
 fn task_list_tool_reports_empty_list() {
+    let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(serde_json::json!({"todos": []}), &ToolContext::new("."));
 
     let result = TaskListTool.call(serde_json::json!({}), &ToolContext::new("."));
@@ -250,6 +540,7 @@ fn task_list_tool_reports_empty_list() {
 
 #[test]
 fn task_get_tool_returns_task_details() {
+    let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -271,6 +562,7 @@ fn task_get_tool_returns_task_details() {
 
 #[test]
 fn task_get_tool_reports_missing_and_unknown_ids() {
+    let _guard = todo_test_guard();
     let missing = TaskGetTool.call(serde_json::json!({}), &ToolContext::new("."));
     assert!(missing.is_error);
     assert_eq!(missing.content, "Missing taskId parameter");
@@ -282,6 +574,7 @@ fn task_get_tool_reports_missing_and_unknown_ids() {
 
 #[test]
 fn task_update_tool_updates_status_subject_and_description() {
+    let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -316,6 +609,7 @@ fn task_update_tool_updates_status_subject_and_description() {
 
 #[test]
 fn task_update_tool_deletes_tasks_and_reports_no_changes() {
+    let _guard = todo_test_guard();
     let _ = TodoWriteTool.call(
         serde_json::json!({
             "todos": [
@@ -338,6 +632,69 @@ fn task_update_tool_deletes_tasks_and_reports_no_changes() {
         unchanged.content,
         "Task #1: no changes (task may not exist)"
     );
+}
+
+#[test]
+fn task_stop_tool_marks_tasks_completed() {
+    let _guard = todo_test_guard();
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Run verification", "status": "in_progress", "activeForm": "Running cargo test"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let stopped = TaskStopTool.call(
+        serde_json::json!({"taskId": "1", "explanation": "Verification finished"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(!stopped.is_error);
+    assert_eq!(stopped.content, "Task stopped: Verification finished");
+
+    let detail = TaskGetTool.call(serde_json::json!({"taskId": "1"}), &ToolContext::new("."));
+    assert!(detail.content.contains("Status: completed"));
+}
+
+#[test]
+fn task_output_tool_returns_task_metadata_as_json() {
+    let _guard = todo_test_guard();
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Summarize work", "status": "completed", "activeForm": "Writing summary"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let output = TaskOutputTool.call(
+        serde_json::json!({"task_id": "1", "block": false}),
+        &ToolContext::new("."),
+    );
+
+    assert!(!output.is_error);
+    let value: serde_json::Value = serde_json::from_str(&output.content).expect("json");
+    assert_eq!(value["retrieval_status"], "success");
+    assert_eq!(value["task"]["task_id"], "1");
+    assert_eq!(value["task"]["status"], "completed");
+    assert_eq!(value["task"]["description"], "Writing summary");
+    assert_eq!(value["task"]["output"], "Summarize work");
+}
+
+#[test]
+fn task_output_tool_reports_missing_tasks_as_not_ready() {
+    let _guard = todo_test_guard();
+    let _ = TodoWriteTool.call(serde_json::json!({"todos": []}), &ToolContext::new("."));
+
+    let output = TaskOutputTool.call(serde_json::json!({"task_id": "99"}), &ToolContext::new("."));
+
+    assert!(output.is_error);
+    let value: serde_json::Value = serde_json::from_str(&output.content).expect("json");
+    assert_eq!(value["retrieval_status"], "not_ready");
+    assert!(value["note"].as_str().unwrap_or_default().contains("99"));
 }
 
 #[test]
@@ -392,6 +749,120 @@ fn grep_tool_content_mode_includes_line_numbers() {
     assert!(!result.is_error);
     assert!(result.content.contains("notes.txt:1:alpha"));
     assert!(result.content.contains("notes.txt:3:alphabet"));
+}
+
+#[test]
+fn grep_tool_applies_offset_after_head_limit_for_pagination() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("notes.txt"),
+        "alpha one\nalpha two\nalpha three\n",
+    )
+    .expect("write");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({
+            "pattern": "alpha",
+            "path": "notes.txt",
+            "output_mode": "content",
+            "offset": 1,
+            "head_limit": 1
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(!result.content.contains("alpha one"));
+    assert!(result.content.contains("notes.txt:2:alpha two"));
+    assert!(!result.content.contains("alpha three"));
+    assert!(result.content.contains("use offset to paginate"));
+}
+
+#[test]
+fn web_fetch_tool_fetches_html_and_preserves_response_context() {
+    let url = serve_once(
+        200,
+        "text/html; charset=utf-8",
+        r#"<!doctype html>
+        <html>
+          <head><title>Fixture</title><style>.hidden { color: red; }</style></head>
+          <body>
+            <h1>Hello &amp; welcome</h1>
+            <p>Read the <a href="/docs">docs</a>.</p>
+            <script>window.secret = true;</script>
+          </body>
+        </html>"#,
+    );
+
+    let result = WebFetchTool.call(
+        serde_json::json!({"url": url, "prompt": "Extract the page"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("HTTP 200 |"));
+    assert!(result.content.contains("Content-Type: text/html"));
+    assert!(result.content.contains("Hello & welcome"));
+    assert!(result.content.contains("docs ["));
+    assert!(result.content.contains("/docs]"));
+    assert!(!result.content.contains("window.secret"));
+}
+
+#[test]
+fn web_fetch_tool_reports_invalid_urls() {
+    let result = WebFetchTool.call(
+        serde_json::json!({"url": "file:///etc/passwd", "prompt": "read"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(result.is_error);
+    assert_eq!(result.content, "Invalid URL: file:///etc/passwd");
+}
+
+#[test]
+fn web_search_tool_reports_missing_api_keys_with_fetch_alternatives() {
+    let result = WebSearchTool.call_with_environment(
+        serde_json::json!({"query": "rust cli", "allowed_domains": ["example.com"]}),
+        &BTreeMap::new(),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("WebSearch requires an API key"));
+    assert!(result.content.contains("BRAVE_SEARCH_API_KEY"));
+    assert!(result.content.contains("SERPER_API_KEY"));
+    assert!(
+        result
+            .content
+            .contains("https://html.duckduckgo.com/html/?q=rust+cli")
+    );
+    assert!(
+        result
+            .content
+            .contains("https://www.google.com/search?q=rust+cli")
+    );
+}
+
+#[test]
+fn web_search_tool_validates_query_and_domain_filter_modes() {
+    let short =
+        WebSearchTool.call_with_environment(serde_json::json!({"query": "r"}), &BTreeMap::new());
+    assert!(short.is_error);
+    assert_eq!(short.content, "query must be at least 2 characters");
+
+    let conflicting = WebSearchTool.call_with_environment(
+        serde_json::json!({
+            "query": "rust",
+            "allowed_domains": ["example.com"],
+            "blocked_domains": ["example.org"]
+        }),
+        &BTreeMap::new(),
+    );
+    assert!(conflicting.is_error);
+    assert_eq!(
+        conflicting.content,
+        "Cannot specify both allowed_domains and blocked_domains"
+    );
 }
 
 #[test]
@@ -567,4 +1038,50 @@ fn stderr_failure_command() -> &'static str {
 #[cfg(not(windows))]
 fn stderr_failure_command() -> &'static str {
     "echo boom >&2; exit 7"
+}
+
+#[cfg(windows)]
+fn monitor_stdout_command() -> &'static str {
+    "echo ready && echo done"
+}
+
+#[cfg(not(windows))]
+fn monitor_stdout_command() -> &'static str {
+    "printf 'ready\\ndone\\n'"
+}
+
+#[cfg(windows)]
+fn monitor_until_command() -> &'static str {
+    "echo boot && echo READY && ping -n 6 127.0.0.1 > nul"
+}
+
+#[cfg(not(windows))]
+fn monitor_until_command() -> &'static str {
+    "printf 'boot\\nREADY\\n'; sleep 5"
+}
+
+fn serve_once(status: u16, content_type: &'static str, body: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local fixture server");
+    let addr = listener.local_addr().expect("fixture server address");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept fixture request");
+        let mut buffer = [0_u8; 1024];
+        let _ = stream.read(&mut buffer);
+        let reason = if status == 200 { "OK" } else { "ERROR" };
+        write!(
+            stream,
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write fixture response");
+    });
+    format!("http://{addr}/page")
+}
+
+fn todo_test_guard() -> MutexGuard<'static, ()> {
+    static TODO_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TODO_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("todo test lock")
 }

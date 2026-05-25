@@ -143,7 +143,21 @@ fn tool_schemas() -> Vec<WireTool> {
                 "properties": {
                     "file_path": {"type": "string", "description": "Path to the file to read."},
                     "offset": {"type": "integer", "description": "Line number to start reading from. Defaults to 1."},
-                    "limit": {"type": "integer", "description": "Number of lines to read."}
+                    "limit": {"type": "integer", "description": "Number of lines to read."},
+                    "pages": {"type": "string", "description": "Page range for PDF files, reserved for PDF-capable readers."}
+                },
+                "required": ["file_path"]
+            }),
+        },
+        WireTool {
+            name: "FileMetadata",
+            description: "Inspect file metadata without reading file contents.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file or directory. Relative paths resolve against the current workspace."},
+                    "include_xattrs": {"type": "boolean", "description": "Whether to include extended attribute names where supported."},
+                    "include_spotlight": {"type": "boolean", "description": "Whether to include Spotlight metadata where supported."}
                 },
                 "required": ["file_path"]
             }),
@@ -186,9 +200,94 @@ fn tool_schemas() -> Vec<WireTool> {
                     "glob": {"type": "string", "description": "Optional glob pattern to filter files."},
                     "output_mode": {"type": "string", "description": "files_with_matches, content, or count."},
                     "-i": {"type": "boolean", "description": "Case insensitive search."},
-                    "head_limit": {"type": "integer", "description": "Limit output to first N entries. Use 0 for unlimited."}
+                    "head_limit": {"type": "integer", "description": "Limit output to first N entries. Use 0 for unlimited."},
+                    "offset": {"type": "integer", "description": "Skip first N entries before applying head_limit for pagination. Defaults to 0."}
                 },
                 "required": ["pattern"]
+            }),
+        },
+        WireTool {
+            name: "WebFetch",
+            description: "Fetch web content over HTTP or HTTPS and return readable text with response diagnostics.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch content from."},
+                    "prompt": {"type": "string", "description": "The prompt describing what to extract from the page."}
+                },
+                "required": ["url", "prompt"]
+            }),
+        },
+        WireTool {
+            name: "WebSearch",
+            description: "Search the web using configured Brave Search or Serper credentials.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query to use.", "minLength": 2},
+                    "allowed_domains": {
+                        "type": "array",
+                        "description": "Only include search results from these domains.",
+                        "items": {"type": "string"}
+                    },
+                    "blocked_domains": {
+                        "type": "array",
+                        "description": "Exclude search results from these domains.",
+                        "items": {"type": "string"}
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+        WireTool {
+            name: "ToolSearch",
+            description: "Search available tools by name or capability. Use select:ToolA,ToolB for exact summaries.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search keywords, for example file edit or git commit. Use select:Read,Edit for exact tool summaries."},
+                    "max_results": {"type": "integer", "description": "Maximum results to return. Defaults to 10 and is clamped to 1..40."}
+                },
+                "required": ["query"]
+            }),
+        },
+        WireTool {
+            name: "AskUserQuestion",
+            description: "Ask the user clarifying questions when progress is blocked by missing information.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "description": "Questions to ask the user (1-4 questions).",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {"type": "string", "description": "The complete question to ask the user."},
+                                "header": {"type": "string", "description": "Very short label displayed as a chip/tag (max 12 chars)."},
+                                "options": {
+                                    "type": "array",
+                                    "description": "The available choices for this question (2-4 options).",
+                                    "minItems": 2,
+                                    "maxItems": 4,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {"type": "string", "description": "The display text for this option (1-5 words)."},
+                                            "description": {"type": "string", "description": "Explanation of what this option means."}
+                                        },
+                                        "required": ["label", "description"]
+                                    }
+                                },
+                                "multiSelect": {"type": "boolean", "description": "Set to true to allow multiple answers."}
+                            },
+                            "required": ["question", "header", "options", "multiSelect"]
+                        }
+                    }
+                },
+                "required": ["questions"]
             }),
         },
         WireTool {
@@ -232,6 +331,19 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "Monitor",
+            description: "Run a long command and return recent stdout/stderr after a timeout or regex match. Use for logs, watchers, and dev servers.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run."},
+                    "max_seconds": {"type": "integer", "description": "Max seconds to monitor before returning. Defaults to 30 and is clamped to 5..300."},
+                    "until": {"type": "string", "description": "Optional regular expression. Return early when a stdout line matches."}
+                },
+                "required": ["command"]
+            }),
+        },
+        WireTool {
             name: "TodoWrite",
             description: "Replace the complete todo list for the current task. Use this to track multi-step progress.",
             input_schema: serde_json::json!({
@@ -252,6 +364,20 @@ fn tool_schemas() -> Vec<WireTool> {
                     }
                 },
                 "required": ["todos"]
+            }),
+        },
+        WireTool {
+            name: "TaskCreate",
+            description: "Create one in-memory task with a subject and description.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "description": "A brief title for the task."},
+                    "description": {"type": "string", "description": "What needs to be done."},
+                    "activeForm": {"type": "string", "description": "Present continuous form shown while active."},
+                    "metadata": {"type": "object", "description": "Arbitrary metadata to attach to the task."}
+                },
+                "required": ["subject", "description"]
             }),
         },
         WireTool {
@@ -285,6 +411,31 @@ fn tool_schemas() -> Vec<WireTool> {
                     "description": {"type": "string", "description": "New description for the task."}
                 },
                 "required": ["taskId"]
+            }),
+        },
+        WireTool {
+            name: "TaskStop",
+            description: "Stop a task by marking it completed.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "The ID of the task to stop."},
+                    "explanation": {"type": "string", "description": "Brief explanation of why the task is being stopped."}
+                },
+                "required": ["taskId"]
+            }),
+        },
+        WireTool {
+            name: "TaskOutput",
+            description: "Retrieve recorded metadata and output for one task.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "ID of the task whose output to fetch."},
+                    "block": {"type": "boolean", "description": "Wait for completion. Currently accepted for forward compatibility."},
+                    "timeout": {"type": "integer", "description": "Maximum wait time in milliseconds."}
+                },
+                "required": ["task_id"]
             }),
         },
     ]
@@ -499,6 +650,16 @@ mod tests {
             serde_json::json!(["command"])
         );
 
+        let monitor = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "Monitor")
+            .expect("Monitor tool schema should be declared");
+        assert_eq!(
+            monitor.input_schema["required"],
+            serde_json::json!(["command"])
+        );
+
         let read_files = request
             .tools
             .iter()
@@ -509,6 +670,63 @@ mod tests {
             serde_json::json!(["paths"])
         );
 
+        let file_metadata = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "FileMetadata")
+            .expect("FileMetadata tool schema should be declared");
+        assert_eq!(
+            file_metadata.input_schema["required"],
+            serde_json::json!(["file_path"])
+        );
+
+        let grep = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "Grep")
+            .expect("Grep tool schema should be declared");
+        assert!(grep.input_schema["properties"].get("offset").is_some());
+
+        let web_fetch = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "WebFetch")
+            .expect("WebFetch tool schema should be declared");
+        assert_eq!(
+            web_fetch.input_schema["required"],
+            serde_json::json!(["url", "prompt"])
+        );
+
+        let web_search = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "WebSearch")
+            .expect("WebSearch tool schema should be declared");
+        assert_eq!(
+            web_search.input_schema["required"],
+            serde_json::json!(["query"])
+        );
+
+        let tool_search = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "ToolSearch")
+            .expect("ToolSearch tool schema should be declared");
+        assert_eq!(
+            tool_search.input_schema["required"],
+            serde_json::json!(["query"])
+        );
+
+        let ask_user = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "AskUserQuestion")
+            .expect("AskUserQuestion tool schema should be declared");
+        assert_eq!(
+            ask_user.input_schema["required"],
+            serde_json::json!(["questions"])
+        );
+
         let todo_write = request
             .tools
             .iter()
@@ -517,6 +735,16 @@ mod tests {
         assert_eq!(
             todo_write.input_schema["required"],
             serde_json::json!(["todos"])
+        );
+
+        let task_create = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TaskCreate")
+            .expect("TaskCreate tool schema should be declared");
+        assert_eq!(
+            task_create.input_schema["required"],
+            serde_json::json!(["subject", "description"])
         );
 
         assert!(
@@ -542,6 +770,26 @@ mod tests {
         assert_eq!(
             task_update.input_schema["required"],
             serde_json::json!(["taskId"])
+        );
+
+        let task_stop = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TaskStop")
+            .expect("TaskStop tool schema should be declared");
+        assert_eq!(
+            task_stop.input_schema["required"],
+            serde_json::json!(["taskId"])
+        );
+
+        let task_output = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TaskOutput")
+            .expect("TaskOutput tool schema should be declared");
+        assert_eq!(
+            task_output.input_schema["required"],
+            serde_json::json!(["task_id"])
         );
     }
 }
