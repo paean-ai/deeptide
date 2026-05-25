@@ -31,10 +31,10 @@ pub use permissions::{
 pub use repl::{ReplEvent, ReplSession};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
-    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CtxInspectTool, EditTool,
-    EnterPlanModeTool, ExitPlanModeTool, FileMetadataTool, GlobTool, GrepTool, ImagePreprocessTool,
-    LspTool, MemorySearchTool, MemoryWriteTool, MonitorTool, ReadFilesTool, ReadTool, SnipTool,
-    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, ToolSearchTool, WebFetchTool,
-    WebSearchTool, WriteTool,
+    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CtxInspectTool,
+    EditTool, EnterPlanModeTool, ExitPlanModeTool, FileMetadataTool, GlobTool, GrepTool,
+    ImagePreprocessTool, LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool, MemoryWriteTool,
+    MonitorTool, ReadFilesTool, ReadTool, SnipTool, TaskCreateTool, TaskGetTool, TaskListTool,
+    TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry,
+    ToolResult, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
 };

@@ -1,10 +1,10 @@
 use deeptide_core::{
-    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CtxInspectTool, EditTool,
-    EnterPlanModeTool, ExitPlanModeTool, FileMetadataTool, ImagePreprocessTool, LspTool,
-    MemorySearchTool, MemoryWriteTool, MonitorTool, ReadFilesTool, SnipTool, TaskCreateTool,
-    TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool,
-    ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
-    memory::MemorySystem,
+    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CtxInspectTool,
+    EditTool, EnterPlanModeTool, ExitPlanModeTool, FileMetadataTool, ImagePreprocessTool, LspTool,
+    MacDiagnoseTool, MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, ReadFilesTool,
+    SnipTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
+    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool,
+    WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -719,6 +719,35 @@ fn image_preprocess_tool_inspects_and_preprocesses_local_images() {
     assert!(preprocess.content.contains("steps: auto_trim"));
     assert!(preprocess.content.contains("format: image/png"));
     assert!(preprocess.content.contains("image_base64:"));
+}
+
+#[test]
+fn mac_diagnostic_tools_validate_inputs_and_render_guidance() {
+    let context = ToolContext::new(".");
+
+    let crash_missing_path = CrashLogTool.call(serde_json::json!({"operation": "read"}), &context);
+    assert!(crash_missing_path.is_error);
+    assert_eq!(
+        crash_missing_path.content,
+        "file_path is required for operation=read"
+    );
+
+    let invalid_log_level = MacLogTool.call(serde_json::json!({"level": "verbose"}), &context);
+    assert!(invalid_log_level.is_error);
+    assert!(invalid_log_level.content.contains("level must be"));
+
+    let diagnose = MacDiagnoseTool.call(
+        serde_json::json!({"scenario": "crash", "app_name": "Tide"}),
+        &context,
+    );
+    assert!(!diagnose.is_error);
+    assert!(
+        diagnose
+            .content
+            .contains("[MacDiagnose] scenario=crash app=Tide")
+    );
+    assert!(diagnose.content.contains("1. CrashLog list app_name: Tide"));
+    assert!(diagnose.content.contains("2. MacLog process: Tide"));
 }
 
 #[test]

@@ -422,6 +422,9 @@ fn is_read_only(tool_name: &str) -> bool {
             | "MemorySearch"
             | "LSP"
             | "ImagePreprocess"
+            | "CrashLog"
+            | "MacLog"
+            | "MacDiagnose"
     )
 }
 

@@ -434,6 +434,50 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "CrashLog",
+            description: "Inspect local macOS DiagnosticReports for crash, hang, spin, panic, and ips reports.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "description": "list, latest, or read.", "enum": ["list", "latest", "read"]},
+                    "app_name": {"type": "string", "description": "Optional app/process name filter."},
+                    "file_path": {"type": "string", "description": "Specific report path. Required for operation=read."},
+                    "limit": {"type": "integer", "description": "Maximum reports to list. Defaults to 20 and is clamped to 1..100."},
+                    "max_lines": {"type": "integer", "description": "Maximum lines to include when reading a report. Defaults to 160 and is clamped to 1..1000."}
+                },
+                "required": ["operation"]
+            }),
+        },
+        WireTool {
+            name: "MacLog",
+            description: "Search recent macOS Unified Logging entries using bounded filters.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "process": {"type": "string", "description": "Optional process name filter."},
+                    "subsystem": {"type": "string", "description": "Optional unified logging subsystem filter."},
+                    "category": {"type": "string", "description": "Optional unified logging category filter."},
+                    "contains": {"type": "string", "description": "Optional case-insensitive eventMessage filter."},
+                    "level": {"type": "string", "description": "Log level filter.", "enum": ["error_or_fault", "fault", "error", "default", "info", "debug", "all"]},
+                    "last_minutes": {"type": "integer", "description": "Lookback window in minutes. Defaults to 15 and is clamped to 1..1440."},
+                    "limit": {"type": "integer", "description": "Maximum output lines. Defaults to 80 and is clamped to 1..300."},
+                    "timeout_ms": {"type": "integer", "description": "Maximum time to wait for log show. Defaults to 8000 and is clamped to 1000..30000."}
+                }
+            }),
+        },
+        WireTool {
+            name: "MacDiagnose",
+            description: "Build a focused macOS-native diagnostic route for local failures.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scenario": {"type": "string", "description": "Problem class to diagnose.", "enum": ["general", "crash", "permission", "screen", "audio", "keychain", "network", "install", "performance"]},
+                    "app_name": {"type": "string", "description": "Optional app/process name to focus on. Defaults to deeptide."},
+                    "include_live_signals": {"type": "boolean", "description": "Accepted for Swift parity; Rust currently renders guidance without live native rows."}
+                }
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -899,6 +943,9 @@ mod tests {
             "Clipboard",
             "LSP",
             "ImagePreprocess",
+            "CrashLog",
+            "MacLog",
+            "MacDiagnose",
         ] {
             assert!(
                 request.tools.iter().any(|tool| tool.name == name),
