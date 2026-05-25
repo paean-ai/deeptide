@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, ClearCommand,
     CommandCompletionSource, CommandContext, CommandResult, CompactCommand, CostCommand,
-    HelpCommand, MemoryCommand, NewCommand, RememberCommand, SlashCommand,
+    HelpCommand, MemoryCommand, NewCommand, RememberCommand, SlashCommand, ToolContext,
+    ToolRegistry,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,8 @@ pub enum ReplEvent {
 pub struct ReplSession {
     agent_loop: AgentLoop,
     cost_display_enabled: Arc<AtomicBool>,
+    tool_registry: ToolRegistry,
+    tool_context: ToolContext,
 }
 
 impl ReplSession {
@@ -23,11 +26,20 @@ impl ReplSession {
         Self {
             agent_loop: AgentLoop::new(backend),
             cost_display_enabled: Arc::new(AtomicBool::new(false)),
+            tool_registry: ToolRegistry::with_builtin_tools(),
+            tool_context: ToolContext::new(
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            ),
         }
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.agent_loop = self.agent_loop.with_model(model);
+        self
+    }
+
+    pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
+        self.tool_context = ToolContext::new(cwd);
         self
     }
 
@@ -82,6 +94,7 @@ impl ReplSession {
             }
             "compact" | "compress" => CompactCommand.execute(args, &context),
             "cost" => CostCommand.execute(args, &context),
+            "read" => self.execute_read_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
             "remember" => RememberCommand.execute(args, &context),
             _ => CommandResult::Text(format!(
@@ -90,6 +103,30 @@ impl ReplSession {
         };
 
         command_result_to_repl_events(result)
+    }
+
+    fn execute_read_command(&self, args: &str) -> CommandResult {
+        let parsed = match parse_read_args(args) {
+            Ok(parsed) => parsed,
+            Err(message) => return CommandResult::Text(message),
+        };
+
+        let mut input = serde_json::Map::new();
+        input.insert(
+            String::from("file_path"),
+            serde_json::Value::String(parsed.file_path),
+        );
+        if let Some(offset) = parsed.offset {
+            input.insert(String::from("offset"), serde_json::json!(offset));
+        }
+        if let Some(limit) = parsed.limit {
+            input.insert(String::from("limit"), serde_json::json!(limit));
+        }
+
+        let result =
+            self.tool_registry
+                .call("Read", serde_json::Value::Object(input), &self.tool_context);
+        CommandResult::Text(result.content)
     }
 
     fn command_context(&self) -> CommandContext {
@@ -140,7 +177,102 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
         CommandCompletionSource::from_command(&NewCommand),
         CommandCompletionSource::from_command(&CompactCommand),
         CommandCompletionSource::from_command(&CostCommand),
+        CommandCompletionSource::new(
+            "read",
+            Vec::<&str>::new(),
+            "Read a text file with optional line range",
+            "/read <path> [--offset N] [--limit N]",
+        ),
         CommandCompletionSource::from_command(&MemoryCommand),
         CommandCompletionSource::from_command(&RememberCommand),
     ]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadArgs {
+    file_path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+fn parse_read_args(args: &str) -> Result<ReadArgs, String> {
+    let parts = split_shell_like(args);
+    if parts.is_empty() {
+        return Err(String::from("Usage: /read <path> [--offset N] [--limit N]"));
+    }
+
+    let mut file_path = None;
+    let mut offset = None;
+    let mut limit = None;
+    let mut index = 0;
+    while index < parts.len() {
+        match parts[index].as_str() {
+            "--offset" => {
+                index += 1;
+                let Some(raw) = parts.get(index) else {
+                    return Err(String::from("Usage: /read <path> [--offset N] [--limit N]"));
+                };
+                offset = Some(
+                    raw.parse::<usize>()
+                        .map_err(|_| String::from("--offset must be a positive number"))?,
+                );
+            }
+            "--limit" => {
+                index += 1;
+                let Some(raw) = parts.get(index) else {
+                    return Err(String::from("Usage: /read <path> [--offset N] [--limit N]"));
+                };
+                limit = Some(
+                    raw.parse::<usize>()
+                        .map_err(|_| String::from("--limit must be a positive number"))?,
+                );
+            }
+            value if value.starts_with("--") => {
+                return Err(format!("Unknown /read option: {value}"));
+            }
+            value => {
+                if file_path.is_some() {
+                    return Err(String::from("Usage: /read <path> [--offset N] [--limit N]"));
+                }
+                file_path = Some(value.to_owned());
+            }
+        }
+        index += 1;
+    }
+
+    let Some(file_path) = file_path else {
+        return Err(String::from("Usage: /read <path> [--offset N] [--limit N]"));
+    };
+
+    Ok(ReadArgs {
+        file_path,
+        offset,
+        limit,
+    })
+}
+
+fn split_shell_like(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+
+    for character in input.chars() {
+        if Some(character) == quote {
+            quote = None;
+        } else if quote.is_none() && matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if quote.is_none() && character.is_whitespace() {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(character);
+        }
+    }
+
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    parts
 }

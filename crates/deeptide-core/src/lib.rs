@@ -8,6 +8,7 @@ pub mod memory;
 pub mod permissions;
 pub mod repl;
 pub mod tool_result_summary;
+pub mod tools;
 
 pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
@@ -25,3 +26,4 @@ pub use completion::{
 pub use cost::{CacheHealth, CostSummary, CostTracker, ModelPricing, TurnRecord, TurnUsage};
 pub use repl::{ReplEvent, ReplSession};
 pub use tool_result_summary::ToolResultSummaryFormatter;
+pub use tools::{ReadTool, Tool, ToolContext, ToolRegistry, ToolResult};

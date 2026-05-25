@@ -25,6 +25,7 @@ fn repl_executes_help_command() {
     assert!(output.contains("Deeptide commands"));
     assert!(output.contains("/exit"));
     assert!(output.contains("/cost"));
+    assert!(output.contains("/read"));
 }
 
 #[test]
@@ -55,6 +56,17 @@ fn repl_clear_resets_agent_loop_state() {
 
     assert!(output.contains("Conversation cleared."));
     assert!(repl.agent_loop().messages().is_empty());
+}
+
+#[test]
+fn repl_read_command_reads_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\ngamma\n").expect("write fixture");
+
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+    let output = only_output(repl.submit("/read notes.txt --offset 2 --limit 1"));
+
+    assert_eq!(output, "2\tbeta");
 }
 
 fn only_output(events: Vec<ReplEvent>) -> String {
