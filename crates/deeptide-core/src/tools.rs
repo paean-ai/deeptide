@@ -69,6 +69,7 @@ impl ToolRegistry {
     pub fn with_builtin_tools() -> Self {
         let mut registry = Self::new();
         registry.register(Box::<ReadTool>::default());
+        registry.register(Box::<ReadFilesTool>::default());
         registry.register(Box::<GlobTool>::default());
         registry.register(Box::<GrepTool>::default());
         registry.register(Box::<WriteTool>::default());
@@ -132,6 +133,61 @@ impl Tool for ReadTool {
             .and_then(|value| usize::try_from(value).ok());
 
         read_text_file(&path, offset, limit)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReadFilesTool;
+
+impl Tool for ReadFilesTool {
+    fn name(&self) -> &'static str {
+        "ReadFiles"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read multiple text files in one ordered result."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(paths) = input.get("paths").and_then(serde_json::Value::as_array) else {
+            return ToolResult::error("paths must be an array");
+        };
+        if paths.is_empty() {
+            return ToolResult::error("No paths provided");
+        }
+        if paths.len() > 50 {
+            return ToolResult::error("paths array exceeds 50 entries; split into smaller batches");
+        }
+
+        let mut sections = Vec::new();
+        let mut estimated_tokens = 0usize;
+        for path_value in paths {
+            let Some(file_path) = path_value.as_str() else {
+                sections.push(String::from(
+                    "===== <invalid> =====\n[Error: path must be a string]",
+                ));
+                continue;
+            };
+            let path = context.resolve_path(file_path);
+            let section = match read_text_file_limited(&path, Some(2_000)) {
+                Ok(content) => format!("===== {file_path} =====\n{content}"),
+                Err(message) => format!("===== {file_path} =====\n[Error: {message}]"),
+            };
+            estimated_tokens += estimate_tokens(&section);
+            if estimated_tokens > 60_000 {
+                sections.push(format!(
+                    "===== {file_path} =====\n[Skipped: total output cap reached (60000 tokens)]"
+                ));
+                break;
+            }
+            sections.push(section);
+        }
+
+        ToolResult::text(sections.join("\n\n"))
     }
 }
 
@@ -463,6 +519,24 @@ impl Tool for EditTool {
 }
 
 fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> ToolResult {
+    let content = match read_text_file_limited(path, None) {
+        Ok(content) => content,
+        Err(message) => return ToolResult::error(message),
+    };
+
+    let start = offset.unwrap_or(1).saturating_sub(1);
+    let needed = limit.unwrap_or(usize::MAX);
+    let output = content
+        .lines()
+        .skip(start)
+        .take(needed)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    ToolResult::text(output)
+}
+
+fn read_text_file_limited(path: &Path, line_limit: Option<usize>) -> Result<String, String> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -470,18 +544,18 @@ fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> T
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
-            return ToolResult::error(format!(
+            return Err(format!(
                 "File does not exist: {}\nHint: the file may be at a different location. Use Glob(pattern: \"**/{filename}\") to locate it.",
                 path.display()
             ));
         }
         Err(error) => {
-            return ToolResult::error(format!("Failed to inspect {}: {error}", path.display()));
+            return Err(format!("Failed to inspect {}: {error}", path.display()));
         }
     };
 
     if metadata.is_dir() {
-        return ToolResult::error(format!(
+        return Err(format!(
             "Path is a directory: {}\nUse Glob to list files or Grep to search within it.",
             path.display()
         ));
@@ -490,12 +564,10 @@ fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> T
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) => {
-            return ToolResult::error(format!("Failed to open {}: {error}", path.display()));
+            return Err(format!("Failed to open {}: {error}", path.display()));
         }
     };
 
-    let start = offset.unwrap_or(1).saturating_sub(1);
-    let needed = limit.unwrap_or(usize::MAX);
     let mut selected = Vec::new();
     let mut total_lines = 0usize;
 
@@ -504,25 +576,30 @@ fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> T
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                return ToolResult::error(format!("Failed to read {}: {error}", path.display()));
+                return Err(format!("Failed to read {}: {error}", path.display()));
             }
         };
 
-        if total_lines > start && selected.len() < needed {
+        if line_limit.is_none_or(|limit| selected.len() < limit) {
             selected.push((total_lines, line));
         }
-        if selected.len() >= needed {
+        if line_limit.is_some_and(|limit| selected.len() >= limit) {
             break;
         }
     }
 
-    let output = selected
+    let mut output = selected
         .into_iter()
         .map(|(line_number, line)| format!("{line_number}\t{line}"))
         .collect::<Vec<_>>()
         .join("\n");
+    if let Some(limit) = line_limit
+        && total_lines >= limit
+    {
+        output.push_str(&format!("\n[File truncated at {limit} lines]"));
+    }
 
-    ToolResult::text(output)
+    Ok(output)
 }
 
 fn execute_shell_command(command: &str, context: &ToolContext, timeout: Duration) -> ToolResult {
@@ -672,6 +749,10 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         return value.to_owned();
     }
     value.chars().take(max_chars).collect()
+}
+
+fn estimate_tokens(value: &str) -> usize {
+    value.len().div_ceil(4)
 }
 
 fn normalize_line_endings(content: &str) -> String {

@@ -149,6 +149,21 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "ReadFiles",
+            description: "Read multiple text files in one ordered result. Use this when inspecting several known paths.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "description": "Ordered list of file paths to read. Relative paths resolve against the current workspace.",
+                        "items": {"type": "string"}
+                    }
+                },
+                "required": ["paths"]
+            }),
+        },
+        WireTool {
             name: "Glob",
             description: "Find files by glob pattern. Use this when you need to discover file paths before reading.",
             input_schema: serde_json::json!({
@@ -426,6 +441,16 @@ mod tests {
         assert_eq!(
             bash.input_schema["required"],
             serde_json::json!(["command"])
+        );
+
+        let read_files = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "ReadFiles")
+            .expect("ReadFiles tool schema should be declared");
+        assert_eq!(
+            read_files.input_schema["required"],
+            serde_json::json!(["paths"])
         );
     }
 }

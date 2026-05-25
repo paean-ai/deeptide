@@ -1,4 +1,6 @@
-use deeptide_core::{BashTool, EditTool, Tool, ToolContext, ToolRegistry, WriteTool};
+use deeptide_core::{
+    BashTool, EditTool, ReadFilesTool, Tool, ToolContext, ToolRegistry, WriteTool,
+};
 
 #[test]
 fn read_tool_reads_text_file_with_line_numbers() {
@@ -48,6 +50,73 @@ fn read_tool_reports_missing_files_with_hint() {
     assert!(result.is_error);
     assert!(result.content.contains("File does not exist"));
     assert!(result.content.contains("Glob"));
+}
+
+#[test]
+fn read_files_tool_reads_multiple_files_with_headers() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("a.txt"), "alpha\n").expect("write fixture");
+    std::fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    std::fs::write(temp.path().join("src/b.txt"), "bravo\ncharlie\n").expect("write fixture");
+
+    let result = ReadFilesTool.call(
+        serde_json::json!({"paths": ["a.txt", "src/b.txt"]}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("===== a.txt =====\n1\talpha"));
+    assert!(
+        result
+            .content
+            .contains("===== src/b.txt =====\n1\tbravo\n2\tcharlie")
+    );
+}
+
+#[test]
+fn read_files_tool_keeps_per_file_errors_in_result() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    std::fs::write(temp.path().join("ok.txt"), "alpha\n").expect("write fixture");
+
+    let result = ReadFilesTool.call(
+        serde_json::json!({"paths": ["ok.txt", "missing.txt", "src"]}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("===== ok.txt ====="));
+    assert!(
+        result
+            .content
+            .contains("===== missing.txt =====\n[Error: File does not exist")
+    );
+    assert!(
+        result
+            .content
+            .contains("===== src =====\n[Error: Path is a directory")
+    );
+}
+
+#[test]
+fn read_files_tool_rejects_empty_and_oversized_batches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let empty = ReadFilesTool.call(
+        serde_json::json!({"paths": []}),
+        &ToolContext::new(temp.path()),
+    );
+    assert!(empty.is_error);
+    assert_eq!(empty.content, "No paths provided");
+
+    let paths = (0..51)
+        .map(|index| format!("{index}.txt"))
+        .collect::<Vec<_>>();
+    let oversized = ReadFilesTool.call(
+        serde_json::json!({"paths": paths}),
+        &ToolContext::new(temp.path()),
+    );
+    assert!(oversized.is_error);
+    assert!(oversized.content.contains("exceeds 50 entries"));
 }
 
 #[test]
