@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod completion;
+pub mod cost;
 pub mod embedded_protocol;
 pub mod memory;
 pub mod permissions;
@@ -13,4 +14,5 @@ pub use completion::{
     CommandCompletionCandidate, CommandCompletionResult, CommandCompletionSource, CompletionEngine,
     Replacement,
 };
+pub use cost::{CacheHealth, CostSummary, CostTracker, ModelPricing, TurnRecord, TurnUsage};
 pub use tool_result_summary::ToolResultSummaryFormatter;
