@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+use crate::completion::CommandCompletionSource;
 use crate::memory::{
     MemoryResolveResult, MemoryScope, delete_memory, list_memory_blocks, remember_project_note,
     render_memory, resolve_memory,
@@ -31,6 +32,7 @@ pub struct CommandContext {
     local_warmup_estimate: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     context_tokens: Arc<dyn Fn() -> usize + Send + Sync>,
     prime_local_cache_branch: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+    all_commands: Arc<dyn Fn() -> Vec<CommandCompletionSource> + Send + Sync>,
     cwd: Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>,
     now_rfc3339: Arc<dyn Fn() -> String + Send + Sync>,
 }
@@ -45,6 +47,7 @@ impl Default for CommandContext {
             local_warmup_estimate: Arc::new(|| None),
             context_tokens: Arc::new(|| 0),
             prime_local_cache_branch: Arc::new(|| None),
+            all_commands: Arc::new(builtin_command_sources),
             cwd: Arc::new(|| {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
             }),
@@ -90,6 +93,10 @@ impl CommandContext {
         (self.prime_local_cache_branch)()
     }
 
+    pub fn all_commands(&self) -> Vec<CommandCompletionSource> {
+        (self.all_commands)()
+    }
+
     pub fn cwd(&self) -> std::path::PathBuf {
         (self.cwd)()
     }
@@ -108,6 +115,7 @@ pub struct CommandContextBuilder {
     local_warmup_estimate: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
     context_tokens: Option<Arc<dyn Fn() -> usize + Send + Sync>>,
     prime_local_cache_branch: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
+    all_commands: Option<Arc<dyn Fn() -> Vec<CommandCompletionSource> + Send + Sync>>,
     cwd: Option<Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>>,
     now_rfc3339: Option<Arc<dyn Fn() -> String + Send + Sync>>,
 }
@@ -169,6 +177,14 @@ impl CommandContextBuilder {
         self
     }
 
+    pub fn all_commands<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> Vec<CommandCompletionSource> + Send + Sync + 'static,
+    {
+        self.all_commands = Some(Arc::new(callback));
+        self
+    }
+
     pub fn cwd<F>(mut self, callback: F) -> Self
     where
         F: Fn() -> std::path::PathBuf + Send + Sync + 'static,
@@ -209,11 +225,49 @@ impl CommandContextBuilder {
             prime_local_cache_branch: self
                 .prime_local_cache_branch
                 .unwrap_or_else(|| defaults.prime_local_cache_branch.clone()),
+            all_commands: self
+                .all_commands
+                .unwrap_or_else(|| defaults.all_commands.clone()),
             cwd: self.cwd.unwrap_or_else(|| defaults.cwd.clone()),
             now_rfc3339: self
                 .now_rfc3339
                 .unwrap_or_else(|| defaults.now_rfc3339.clone()),
         }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct HelpCommand;
+
+impl SlashCommand for HelpCommand {
+    fn name(&self) -> &'static str {
+        "help"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["h", "?"]
+    }
+
+    fn description(&self) -> &'static str {
+        "Show available commands and keybindings"
+    }
+
+    fn usage(&self) -> &'static str {
+        "/help [command]"
+    }
+
+    fn execute(&self, args: &str, context: &CommandContext) -> CommandResult {
+        let registered = context.all_commands();
+        let needle = args.trim().trim_start_matches('/').to_ascii_lowercase();
+
+        if !needle.is_empty() {
+            if let Some(command) = find_command(&needle, &registered) {
+                return CommandResult::Text(render_help_detail(command));
+            }
+            return CommandResult::Text(render_unknown_command(&needle, &registered));
+        }
+
+        CommandResult::Text(render_help_index(&registered))
     }
 }
 
@@ -549,4 +603,190 @@ impl LocalBranchConfirmation {
 fn has_yes_flag(args: &str) -> bool {
     args.split_whitespace()
         .any(|flag| matches!(flag, "--yes" | "-y"))
+}
+
+fn builtin_command_sources() -> Vec<CommandCompletionSource> {
+    vec![
+        CommandCompletionSource::from_command(&HelpCommand),
+        CommandCompletionSource::from_command(&ClearCommand),
+        CommandCompletionSource::from_command(&NewCommand),
+        CommandCompletionSource::from_command(&CompactCommand),
+        CommandCompletionSource::from_command(&MemoryCommand),
+        CommandCompletionSource::from_command(&RememberCommand),
+    ]
+}
+
+fn render_help_index(registered: &[CommandCompletionSource]) -> String {
+    let mut by_name = std::collections::BTreeMap::new();
+    for command in registered {
+        by_name.insert(command.name.as_str(), command);
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut lines = vec![
+        String::new(),
+        format!("Deeptide commands ({}):", registered.len()),
+    ];
+
+    for (title, names) in help_categories() {
+        let commands = names
+            .iter()
+            .filter_map(|name| by_name.get(name).copied())
+            .collect::<Vec<_>>();
+        if commands.is_empty() {
+            continue;
+        }
+
+        lines.push(String::new());
+        lines.push((*title).to_owned());
+        for command in commands {
+            lines.push(format!(
+                "  {:<28} {}",
+                format_command_names(command),
+                command.description
+            ));
+            seen.insert(command.name.as_str());
+        }
+    }
+
+    let leftover = registered
+        .iter()
+        .filter(|command| !seen.contains(command.name.as_str()))
+        .collect::<Vec<_>>();
+    if !leftover.is_empty() {
+        lines.push(String::new());
+        lines.push(String::from("Other"));
+        for command in leftover {
+            lines.push(format!(
+                "  {:<28} {}",
+                format_command_names(command),
+                command.description
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(String::from(
+        "Keybindings: Enter=submit  Tab=autocomplete  Ctrl+C=interrupt  Ctrl+D=exit",
+    ));
+    lines.push(String::from(
+        "Type /help <command> for details on a single command.",
+    ));
+    lines.join("\n")
+}
+
+fn render_help_detail(command: &CommandCompletionSource) -> String {
+    let mut lines = vec![
+        String::new(),
+        format_command_names_with_separator(command, " \u{00b7} "),
+        command.description.clone(),
+        String::new(),
+        format!("Usage:   {}", command.usage),
+    ];
+
+    if !command.aliases.is_empty() {
+        lines.push(format!(
+            "Aliases: {}",
+            command
+                .aliases
+                .iter()
+                .map(|alias| format!("/{alias}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn render_unknown_command(needle: &str, registered: &[CommandCompletionSource]) -> String {
+    let mut prefix_hits = Vec::new();
+    let mut substring_hits = Vec::new();
+
+    for command in registered {
+        let candidates = std::iter::once(command.name.as_str())
+            .chain(command.aliases.iter().map(String::as_str))
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+
+        if candidates
+            .iter()
+            .any(|candidate| candidate.starts_with(needle))
+        {
+            prefix_hits.push(format!("/{}", command.name));
+        } else if candidates
+            .iter()
+            .any(|candidate| candidate.contains(needle))
+        {
+            substring_hits.push(format!("/{}", command.name));
+        }
+    }
+
+    let suggestions = prefix_hits
+        .into_iter()
+        .chain(substring_hits)
+        .take(3)
+        .collect::<Vec<_>>();
+
+    let mut lines = vec![format!("Unknown command: /{needle}")];
+    if suggestions.is_empty() {
+        lines.push(String::from("Type /help for the full list."));
+    } else {
+        lines.push(format!("Did you mean: {}?", suggestions.join(", ")));
+    }
+    lines.join("\n")
+}
+
+fn find_command<'a>(
+    needle: &str,
+    registered: &'a [CommandCompletionSource],
+) -> Option<&'a CommandCompletionSource> {
+    registered.iter().find(|command| {
+        command.name.eq_ignore_ascii_case(needle)
+            || command
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(needle))
+    })
+}
+
+fn format_command_names(command: &CommandCompletionSource) -> String {
+    format_command_names_with_separator(command, ", ")
+}
+
+fn format_command_names_with_separator(
+    command: &CommandCompletionSource,
+    separator: &str,
+) -> String {
+    std::iter::once(command.name.as_str())
+        .chain(command.aliases.iter().map(String::as_str))
+        .map(|name| format!("/{name}"))
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
+    &[
+        (
+            "Core",
+            &[
+                "help", "exit", "clear", "compact", "status", "cost", "reminder",
+            ],
+        ),
+        ("Model", &["model", "provider", "fast", "tps"]),
+        ("Memory", &["memory", "remember", "dream"]),
+        (
+            "Sessions",
+            &["resume", "retry", "sessions", "export", "copy", "paste"],
+        ),
+        ("Permissions", &["permission"]),
+        ("Hooks", &["hooks"]),
+        ("Cron", &["cron"]),
+        ("Files", &["diff", "add-dir", "open", "context", "init"]),
+        ("Git", &["branch", "commit"]),
+        ("Review", &["review"]),
+        ("Skills", &["skills", "simplify", "publish"]),
+        ("Config", &["config", "doctor", "update"]),
+        ("UX", &["keybindings", "debug", "vim"]),
+    ]
 }
