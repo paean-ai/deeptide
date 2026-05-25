@@ -2,6 +2,7 @@ use std::sync::Arc;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::completion::CommandCompletionSource;
+use crate::cost::{CostSummary, CostTracker, TurnRecord};
 use crate::memory::{
     MemoryResolveResult, MemoryScope, delete_memory, list_memory_blocks, remember_project_note,
     render_memory, resolve_memory,
@@ -33,6 +34,9 @@ pub struct CommandContext {
     context_tokens: Arc<dyn Fn() -> usize + Send + Sync>,
     prime_local_cache_branch: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     all_commands: Arc<dyn Fn() -> Vec<CommandCompletionSource> + Send + Sync>,
+    cost_summary: Arc<dyn Fn() -> CostSummary + Send + Sync>,
+    cost_display_enabled: Arc<dyn Fn() -> bool + Send + Sync>,
+    set_cost_display_enabled: Arc<dyn Fn(bool) + Send + Sync>,
     cwd: Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>,
     now_rfc3339: Arc<dyn Fn() -> String + Send + Sync>,
 }
@@ -48,6 +52,9 @@ impl Default for CommandContext {
             context_tokens: Arc::new(|| 0),
             prime_local_cache_branch: Arc::new(|| None),
             all_commands: Arc::new(builtin_command_sources),
+            cost_summary: Arc::new(CostSummary::default),
+            cost_display_enabled: Arc::new(|| false),
+            set_cost_display_enabled: Arc::new(|_| {}),
             cwd: Arc::new(|| {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
             }),
@@ -97,6 +104,18 @@ impl CommandContext {
         (self.all_commands)()
     }
 
+    pub fn cost_summary(&self) -> CostSummary {
+        (self.cost_summary)()
+    }
+
+    pub fn cost_display_enabled(&self) -> bool {
+        (self.cost_display_enabled)()
+    }
+
+    pub fn set_cost_display_enabled(&self, enabled: bool) {
+        (self.set_cost_display_enabled)(enabled);
+    }
+
     pub fn cwd(&self) -> std::path::PathBuf {
         (self.cwd)()
     }
@@ -116,6 +135,9 @@ pub struct CommandContextBuilder {
     context_tokens: Option<Arc<dyn Fn() -> usize + Send + Sync>>,
     prime_local_cache_branch: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
     all_commands: Option<Arc<dyn Fn() -> Vec<CommandCompletionSource> + Send + Sync>>,
+    cost_summary: Option<Arc<dyn Fn() -> CostSummary + Send + Sync>>,
+    cost_display_enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    set_cost_display_enabled: Option<Arc<dyn Fn(bool) + Send + Sync>>,
     cwd: Option<Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>>,
     now_rfc3339: Option<Arc<dyn Fn() -> String + Send + Sync>>,
 }
@@ -185,6 +207,30 @@ impl CommandContextBuilder {
         self
     }
 
+    pub fn cost_summary<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> CostSummary + Send + Sync + 'static,
+    {
+        self.cost_summary = Some(Arc::new(callback));
+        self
+    }
+
+    pub fn cost_display_enabled<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        self.cost_display_enabled = Some(Arc::new(callback));
+        self
+    }
+
+    pub fn set_cost_display_enabled<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(bool) + Send + Sync + 'static,
+    {
+        self.set_cost_display_enabled = Some(Arc::new(callback));
+        self
+    }
+
     pub fn cwd<F>(mut self, callback: F) -> Self
     where
         F: Fn() -> std::path::PathBuf + Send + Sync + 'static,
@@ -228,6 +274,15 @@ impl CommandContextBuilder {
             all_commands: self
                 .all_commands
                 .unwrap_or_else(|| defaults.all_commands.clone()),
+            cost_summary: self
+                .cost_summary
+                .unwrap_or_else(|| defaults.cost_summary.clone()),
+            cost_display_enabled: self
+                .cost_display_enabled
+                .unwrap_or_else(|| defaults.cost_display_enabled.clone()),
+            set_cost_display_enabled: self
+                .set_cost_display_enabled
+                .unwrap_or_else(|| defaults.set_cost_display_enabled.clone()),
             cwd: self.cwd.unwrap_or_else(|| defaults.cwd.clone()),
             now_rfc3339: self
                 .now_rfc3339
@@ -509,6 +564,59 @@ impl SlashCommand for RememberCommand {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CostCommand;
+
+impl SlashCommand for CostCommand {
+    fn name(&self) -> &'static str {
+        "cost"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn description(&self) -> &'static str {
+        "Detailed token/cost breakdown; use /cost show to display estimates in the status bar"
+    }
+
+    fn usage(&self) -> &'static str {
+        "/cost [show | hide | toggle]"
+    }
+
+    fn execute(&self, args: &str, context: &CommandContext) -> CommandResult {
+        match args.trim().to_ascii_lowercase().as_str() {
+            "show" | "on" | "enable" => {
+                context.set_cost_display_enabled(true);
+                return CommandResult::Text(String::from(
+                    "Estimated cost display enabled for this session. Values depend on provider pricing and cache billing semantics.",
+                ));
+            }
+            "hide" | "off" | "disable" => {
+                context.set_cost_display_enabled(false);
+                return CommandResult::Text(String::from(
+                    "Estimated cost display hidden. Token in/out and cache stats remain available.",
+                ));
+            }
+            "toggle" => {
+                let next = !context.cost_display_enabled();
+                context.set_cost_display_enabled(next);
+                let state = if next { "enabled" } else { "hidden" };
+                return CommandResult::Text(format!("Estimated cost display {state}."));
+            }
+            "" => {}
+            _ => return CommandResult::Text(format!("Usage: {}", self.usage())),
+        }
+
+        let summary = context.cost_summary();
+        if summary.turns.is_empty() {
+            return CommandResult::Text(String::from("No turns recorded yet."));
+        }
+
+        CommandResult::Text(render_cost_breakdown(&summary))
+    }
+}
+
 fn render_memory_list(cwd: &std::path::Path) -> String {
     let mut lines = vec![String::from("Memory files:")];
 
@@ -611,9 +719,122 @@ fn builtin_command_sources() -> Vec<CommandCompletionSource> {
         CommandCompletionSource::from_command(&ClearCommand),
         CommandCompletionSource::from_command(&NewCommand),
         CommandCompletionSource::from_command(&CompactCommand),
+        CommandCompletionSource::from_command(&CostCommand),
         CommandCompletionSource::from_command(&MemoryCommand),
         CommandCompletionSource::from_command(&RememberCommand),
     ]
+}
+
+fn render_cost_breakdown(summary: &CostSummary) -> String {
+    let mut lines = vec![
+        String::from("Cost breakdown"),
+        String::from("  turn   in       out     cache+    cache-r  cost     ms"),
+    ];
+
+    for turn in &summary.turns {
+        lines.push(format!(
+            "  {:<5}  {:<7}  {:<6}  {:<8}  {:<7}  {:<7}  {}",
+            turn.turn,
+            turn.input_tokens,
+            turn.output_tokens,
+            turn.cache_create,
+            turn.cache_read,
+            CostTracker::format_usd(turn.cost_usd),
+            turn.duration_ms
+        ));
+    }
+
+    lines.push(String::new());
+    lines.push(format!(
+        "  Total: {} ({} in, {} out)",
+        CostTracker::format_usd(summary.total_cost_usd),
+        CostTracker::format_tokens(summary.total_input),
+        CostTracker::format_tokens(summary.total_output)
+    ));
+    lines.push(String::from(
+        "  Estimate only: provider pricing and cache billing can differ. Use /cost show to display this estimate in the status bar.",
+    ));
+
+    let cache = summary.cache_health();
+    lines.push(String::new());
+    if let Some(hit_rate) = cache.hit_rate_percent {
+        let recent = cache
+            .recent_hit_rate_percent
+            .map(|recent| format!(", recent {recent}%"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "  Cache health: {hit_rate}% hit{recent} · {} ({created} created, {read} read)",
+            cache.label(),
+            created = CostTracker::format_tokens(cache.total_create_tokens),
+            read = CostTracker::format_tokens(cache.total_read_tokens)
+        ));
+    } else {
+        lines.push(format!(
+            "  Cache health: {} · no cache telemetry yet",
+            cache.label()
+        ));
+    }
+
+    if let Some(diagnostic) = cache.diagnostic() {
+        lines.push(format!("  Cache note: {diagnostic}"));
+    }
+
+    let by_model = group_turns_by_model(&summary.turns);
+    if by_model.len() > 1 {
+        lines.push(String::new());
+        lines.push(String::from("By model:"));
+        for model in by_model {
+            lines.push(render_model_rollup(&model));
+        }
+    }
+
+    lines.join("\n")
+}
+
+#[derive(Debug)]
+struct ModelRollup<'a> {
+    model: &'a str,
+    turns: Vec<&'a TurnRecord>,
+}
+
+fn group_turns_by_model(turns: &[TurnRecord]) -> Vec<ModelRollup<'_>> {
+    let mut grouped = std::collections::BTreeMap::<&str, Vec<&TurnRecord>>::new();
+    for turn in turns {
+        grouped.entry(&turn.model).or_default().push(turn);
+    }
+
+    let mut rollups = grouped
+        .into_iter()
+        .map(|(model, turns)| ModelRollup { model, turns })
+        .collect::<Vec<_>>();
+    rollups.sort_by(|left, right| {
+        let left_cost: f64 = left.turns.iter().map(|turn| turn.cost_usd).sum();
+        let right_cost: f64 = right.turns.iter().map(|turn| turn.cost_usd).sum();
+        right_cost
+            .total_cmp(&left_cost)
+            .then_with(|| left.model.cmp(right.model))
+    });
+    rollups
+}
+
+fn render_model_rollup(rollup: &ModelRollup<'_>) -> String {
+    let count = rollup.turns.len();
+    let total_cost: f64 = rollup.turns.iter().map(|turn| turn.cost_usd).sum();
+    let total_input: usize = rollup.turns.iter().map(|turn| turn.input_tokens).sum();
+    let total_output: usize = rollup.turns.iter().map(|turn| turn.output_tokens).sum();
+    let total_cache_create: usize = rollup.turns.iter().map(|turn| turn.cache_create).sum();
+    let total_cache_read: usize = rollup.turns.iter().map(|turn| turn.cache_read).sum();
+    let billed_input = (total_input + total_cache_create + total_cache_read).max(1);
+    let hit_percent = (total_cache_read * 100) / billed_input;
+    let turn_label = format!("{count} turn{}", if count == 1 { "" } else { "s" });
+
+    format!(
+        "  {model:<18} {turn_label:<9} {cost:<8} {input}/{output} tok · cache {hit_percent}% hit",
+        model = rollup.model,
+        cost = CostTracker::format_usd(total_cost),
+        input = CostTracker::format_tokens(total_input),
+        output = CostTracker::format_tokens(total_output)
+    )
 }
 
 fn render_help_index(registered: &[CommandCompletionSource]) -> String {

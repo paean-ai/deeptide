@@ -7,8 +7,8 @@ pub mod permissions;
 pub mod tool_result_summary;
 
 pub use commands::{
-    ClearCommand, CommandContext, CommandResult, CompactCommand, HelpCommand, MemoryCommand,
-    NewCommand, RememberCommand, SlashCommand,
+    ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, HelpCommand,
+    MemoryCommand, NewCommand, RememberCommand, SlashCommand,
 };
 pub use completion::{
     CommandCompletionCandidate, CommandCompletionResult, CommandCompletionSource, CompletionEngine,

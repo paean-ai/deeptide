@@ -42,6 +42,19 @@ pub struct CostSummary {
     pub total_cost_usd: f64,
 }
 
+impl Default for CostSummary {
+    fn default() -> Self {
+        Self {
+            turns: Vec::new(),
+            total_input: 0,
+            total_output: 0,
+            total_cache_create: 0,
+            total_cache_read: 0,
+            total_cost_usd: 0.0,
+        }
+    }
+}
+
 impl CostSummary {
     pub fn cache_health(&self) -> CacheHealth {
         self.cache_health_for_recent_turns(3)
