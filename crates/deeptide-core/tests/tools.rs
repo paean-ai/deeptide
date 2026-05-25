@@ -1,9 +1,10 @@
 use deeptide_core::{
     AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CtxInspectTool, EditTool,
-    EnterPlanModeTool, ExitPlanModeTool, FileMetadataTool, LspTool, MemorySearchTool,
-    MemoryWriteTool, MonitorTool, ReadFilesTool, SnipTool, TaskCreateTool, TaskGetTool,
-    TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext,
-    ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
+    EnterPlanModeTool, ExitPlanModeTool, FileMetadataTool, ImagePreprocessTool, LspTool,
+    MemorySearchTool, MemoryWriteTool, MonitorTool, ReadFilesTool, SnipTool, TaskCreateTool,
+    TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool,
+    ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
+    memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -670,6 +671,54 @@ fn lsp_tool_validates_operation_file_and_line_before_server_lookup() {
     );
     assert!(missing_line.is_error);
     assert_eq!(missing_line.content, "line is required");
+}
+
+#[test]
+fn image_preprocess_tool_inspects_and_preprocesses_local_images() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let image_path = temp.path().join("sample.png");
+    let mut image = image::RgbaImage::from_pixel(32, 24, image::Rgba([255, 255, 255, 255]));
+    for y in 8..16 {
+        for x in 10..22 {
+            image.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+        }
+    }
+    image.save(&image_path).expect("save fixture");
+
+    let context = ToolContext::new(temp.path());
+    let inspect = ImagePreprocessTool.call(
+        serde_json::json!({"file_path": "sample.png", "operation": "inspect"}),
+        &context,
+    );
+    assert!(!inspect.is_error);
+    assert!(
+        inspect
+            .content
+            .contains("[ImagePreprocess.inspect] sample.png")
+    );
+    assert!(inspect.content.contains("size: 32x24"));
+    assert!(inspect.content.contains("likely_blank: false"));
+    assert!(inspect.content.contains("content_box: x="));
+
+    let preprocess = ImagePreprocessTool.call(
+        serde_json::json!({
+            "file_path": "sample.png",
+            "operation": "preprocess",
+            "auto_trim": true,
+            "max_dimension": 16,
+            "format": "png"
+        }),
+        &context,
+    );
+    assert!(!preprocess.is_error);
+    assert!(
+        preprocess
+            .content
+            .contains("[ImagePreprocess.preprocess] sample.png")
+    );
+    assert!(preprocess.content.contains("steps: auto_trim"));
+    assert!(preprocess.content.contains("format: image/png"));
+    assert!(preprocess.content.contains("image_base64:"));
 }
 
 #[test]

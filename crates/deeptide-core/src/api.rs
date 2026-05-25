@@ -413,6 +413,27 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "ImagePreprocess",
+            description: "Inspect and preprocess local image files before visual analysis.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the image file. Relative paths resolve against the current workspace."},
+                    "operation": {
+                        "type": "string",
+                        "description": "inspect or preprocess.",
+                        "enum": ["inspect", "preprocess"]
+                    },
+                    "max_dimension": {"type": "integer", "description": "Largest output side in pixels for preprocess. Defaults to 1600 and is clamped to 256..4096."},
+                    "auto_trim": {"type": "boolean", "description": "Crop likely blank border/background before resize."},
+                    "enhance_text": {"type": "boolean", "description": "Grayscale, increase contrast, and sharpen for screenshots/text."},
+                    "crop": {"type": "object", "description": "Optional normalized crop rectangle with x, y, width, height in 0..1, origin at top-left."},
+                    "format": {"type": "string", "description": "Output image format for preprocess: png or jpeg.", "enum": ["png", "jpeg"]}
+                },
+                "required": ["file_path", "operation"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -877,6 +898,7 @@ mod tests {
             "ExitPlanMode",
             "Clipboard",
             "LSP",
+            "ImagePreprocess",
         ] {
             assert!(
                 request.tools.iter().any(|tool| tool.name == name),
