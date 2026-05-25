@@ -33,6 +33,6 @@ pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
     BashTool, EditTool, FileMetadataTool, GlobTool, GrepTool, ReadFilesTool, ReadTool,
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, WebFetchTool, WebSearchTool,
-    WriteTool,
+    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, ToolSearchTool, WebFetchTool,
+    WebSearchTool, WriteTool,
 };

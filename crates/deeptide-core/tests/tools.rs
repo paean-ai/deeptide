@@ -1,7 +1,7 @@
 use deeptide_core::{
     BashTool, EditTool, FileMetadataTool, ReadFilesTool, TaskCreateTool, TaskGetTool, TaskListTool,
     TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry,
-    WebFetchTool, WebSearchTool, WriteTool,
+    ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -194,6 +194,48 @@ fn registry_reports_unknown_tools() {
 
     assert!(result.is_error);
     assert_eq!(result.content, "Unknown tool: Nope");
+}
+
+#[test]
+fn tool_search_finds_tools_by_capability_synonyms() {
+    let result = ToolSearchTool.call(
+        serde_json::json!({"query": "file metadata quarantine"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert!(
+        result
+            .content
+            .lines()
+            .next()
+            .unwrap_or("")
+            .contains("FileMetadata")
+    );
+
+    let grep = ToolSearchTool.call(
+        serde_json::json!({"query": "regex search"}),
+        &ToolContext::new("."),
+    );
+    assert!(!grep.is_error);
+    assert!(grep.content.contains("Grep"));
+}
+
+#[test]
+fn tool_search_supports_exact_names_and_select_syntax() {
+    let exact = ToolSearchTool.call(serde_json::json!({"query": "Read"}), &ToolContext::new("."));
+    assert!(!exact.is_error);
+    assert_eq!(exact.content.lines().count(), 1);
+    assert!(exact.content.contains("- Read [read-only, parallel]"));
+
+    let selected = ToolSearchTool.call(
+        serde_json::json!({"query": "select:Read,Edit,MissingTool"}),
+        &ToolContext::new("."),
+    );
+    assert!(!selected.is_error);
+    assert!(selected.content.contains("- Read [read-only, parallel]"));
+    assert!(selected.content.contains("- Edit [writes]"));
+    assert!(selected.content.contains("- MissingTool - not found"));
 }
 
 #[test]

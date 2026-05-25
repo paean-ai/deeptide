@@ -79,6 +79,7 @@ impl ToolRegistry {
         registry.register(Box::<GrepTool>::default());
         registry.register(Box::<WebFetchTool>::default());
         registry.register(Box::<WebSearchTool>::default());
+        registry.register(Box::<ToolSearchTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
@@ -425,6 +426,315 @@ impl Tool for WebSearchTool {
     fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
         let env = std::env::vars().collect::<BTreeMap<_, _>>();
         self.call_with_environment(input, &env)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ToolSearchTool;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolSearchEntry {
+    name: &'static str,
+    summary: String,
+    is_read_only: bool,
+    is_concurrency_safe: bool,
+    keywords: Vec<&'static str>,
+}
+
+impl Tool for ToolSearchTool {
+    fn name(&self) -> &'static str {
+        "ToolSearch"
+    }
+
+    fn description(&self) -> &'static str {
+        "Search available tools by name or capability."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(raw_query) = input.get("query").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("query is required");
+        };
+        let query = raw_query.trim();
+        if query.is_empty() {
+            return ToolResult::error("query is required");
+        }
+
+        let max_results = input
+            .get("max_results")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(10)
+            .clamp(1, 40);
+        let entries = builtin_tool_search_entries();
+
+        if query.to_ascii_lowercase().starts_with("select:") {
+            return ToolResult::text(render_selected_tools(query, &entries));
+        }
+
+        let matches = search_tool_entries(query, &entries);
+        if matches.is_empty() {
+            return ToolResult::text(
+                "No matching tools. Try a tool name, an action, or `select:<ToolName>`.",
+            );
+        }
+
+        ToolResult::text(
+            matches
+                .into_iter()
+                .take(max_results)
+                .map(render_tool_search_entry)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+}
+
+fn builtin_tool_search_entries() -> Vec<ToolSearchEntry> {
+    ToolRegistry::with_builtin_tools()
+        .tools
+        .values()
+        .map(|tool| ToolSearchEntry {
+            name: tool.name(),
+            summary: tool.description().to_owned(),
+            is_read_only: tool.is_read_only(),
+            is_concurrency_safe: tool.is_read_only(),
+            keywords: tool_search_keywords(tool.name()),
+        })
+        .collect()
+}
+
+fn search_tool_entries(query: &str, entries: &[ToolSearchEntry]) -> Vec<ToolSearchEntry> {
+    let lower = query.trim().to_ascii_lowercase();
+    if let Some(exact) = entries
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(&lower))
+    {
+        return vec![exact.clone()];
+    }
+
+    let terms = lower.split_whitespace().collect::<Vec<_>>();
+    let required = terms
+        .iter()
+        .filter_map(|term| term.strip_prefix('+').filter(|term| !term.is_empty()))
+        .collect::<Vec<_>>();
+    let optional = terms
+        .iter()
+        .copied()
+        .filter(|term| !term.starts_with('+'))
+        .collect::<Vec<_>>();
+    let scoring_terms = if required.is_empty() {
+        optional
+    } else {
+        required
+            .iter()
+            .copied()
+            .chain(optional.iter().copied())
+            .collect()
+    };
+    if scoring_terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut scored = entries
+        .iter()
+        .filter_map(|entry| {
+            let searchable = SearchableToolEntry::new(entry);
+            if !required.iter().all(|term| searchable.matches(term)) {
+                return None;
+            }
+
+            let mut score = 0usize;
+            if searchable.name == lower {
+                score += 1_000;
+            }
+            if searchable.name.starts_with(&lower) {
+                score += 350;
+            }
+            if searchable.name.contains(&lower) {
+                score += 180;
+            }
+            if searchable.full_name_parts == lower {
+                score += 120;
+            }
+
+            for term in &scoring_terms {
+                if searchable.name_parts.iter().any(|part| part == term) {
+                    score += 90;
+                }
+                if searchable
+                    .name_parts
+                    .iter()
+                    .any(|part| part.starts_with(term))
+                {
+                    score += 55;
+                }
+                if searchable.name_parts.iter().any(|part| part.contains(term)) {
+                    score += 25;
+                }
+                if searchable
+                    .keyword_parts
+                    .iter()
+                    .any(|keyword| keyword == term)
+                {
+                    score += 45;
+                }
+                if searchable.summary_words.iter().any(|word| word == term) {
+                    score += 18;
+                }
+                if searchable.summary.contains(term) {
+                    score += 8;
+                }
+            }
+
+            (score > 0).then_some((entry.clone(), score))
+        })
+        .collect::<Vec<_>>();
+
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.name.cmp(right.0.name))
+    });
+    scored.into_iter().map(|(entry, _)| entry).collect()
+}
+
+fn render_tool_search_entry(entry: ToolSearchEntry) -> String {
+    let mut traits = Vec::new();
+    traits.push(if entry.is_read_only {
+        "read-only"
+    } else {
+        "writes"
+    });
+    if entry.is_concurrency_safe {
+        traits.push("parallel");
+    }
+    format!(
+        "- {} [{}] - {}",
+        entry.name,
+        traits.join(", "),
+        truncate_chars(&entry.summary, 160)
+    )
+}
+
+fn render_selected_tools(query: &str, entries: &[ToolSearchEntry]) -> String {
+    let selected = query
+        .get("select:".len()..)
+        .unwrap_or_default()
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return String::from("No tools selected. Use `select:Read,Edit,Grep`.");
+    }
+
+    selected
+        .into_iter()
+        .map(|name| {
+            entries
+                .iter()
+                .find(|entry| entry.name.eq_ignore_ascii_case(name))
+                .cloned()
+                .map(render_tool_search_entry)
+                .unwrap_or_else(|| format!("- {name} - not found"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchableToolEntry {
+    name: String,
+    name_parts: Vec<String>,
+    full_name_parts: String,
+    summary: String,
+    summary_words: Vec<String>,
+    keyword_parts: Vec<String>,
+}
+
+impl SearchableToolEntry {
+    fn new(entry: &ToolSearchEntry) -> Self {
+        let name_parts = split_search_words(entry.name);
+        let summary = entry.summary.to_ascii_lowercase();
+        Self {
+            name: entry.name.to_ascii_lowercase(),
+            full_name_parts: name_parts.join(" "),
+            name_parts,
+            summary_words: split_search_words(&entry.summary),
+            keyword_parts: entry
+                .keywords
+                .iter()
+                .flat_map(|keyword| split_search_words(keyword))
+                .collect(),
+            summary,
+        }
+    }
+
+    fn matches(&self, term: &str) -> bool {
+        self.name.contains(term)
+            || self.name_parts.iter().any(|part| part == term)
+            || self.name_parts.iter().any(|part| part.contains(term))
+            || self.keyword_parts.iter().any(|keyword| keyword == term)
+            || self.summary_words.iter().any(|word| word == term)
+            || self.summary.contains(term)
+    }
+}
+
+fn split_search_words(value: &str) -> Vec<String> {
+    let mut spaced = String::with_capacity(value.len());
+    let mut previous: Option<char> = None;
+    for character in value.chars() {
+        if matches!(character, '_' | '-') {
+            spaced.push(' ');
+        } else {
+            if let Some(prev) = previous
+                && (prev.is_ascii_lowercase() || prev.is_ascii_digit())
+                && character.is_ascii_uppercase()
+            {
+                spaced.push(' ');
+            }
+            spaced.push(character);
+        }
+        previous = Some(character);
+    }
+
+    spaced
+        .to_ascii_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn tool_search_keywords(name: &str) -> Vec<&'static str> {
+    match name {
+        "Bash" => vec![
+            "shell",
+            "command",
+            "terminal",
+            "build",
+            "test",
+            "git",
+            "package manager",
+        ],
+        "Edit" => vec!["replace", "patch", "modify", "string replacement"],
+        "FileMetadata" => vec!["xattr", "quarantine", "binary", "mime", "file type"],
+        "Glob" => vec!["find files", "discover", "pattern"],
+        "Grep" => vec!["search", "regex", "ripgrep", "content search"],
+        "Read" => vec!["open", "inspect", "file contents"],
+        "ReadFiles" => vec!["multi read", "batch read", "several files"],
+        "TaskCreate" | "TaskGet" | "TaskList" | "TaskOutput" | "TaskStop" | "TaskUpdate"
+        | "TodoWrite" => vec!["todo", "task", "plan", "progress"],
+        "ToolSearch" => vec!["tool", "capability", "search tools", "find tool", "select"],
+        "WebFetch" => vec!["url", "http", "fetch", "page"],
+        "WebSearch" => vec!["web", "internet", "search", "brave", "serper"],
+        "Write" => vec!["create", "overwrite", "new file"],
+        _ => Vec::new(),
     }
 }
 

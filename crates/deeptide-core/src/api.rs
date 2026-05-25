@@ -240,6 +240,18 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "ToolSearch",
+            description: "Search available tools by name or capability. Use select:ToolA,ToolB for exact summaries.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search keywords, for example file edit or git commit. Use select:Read,Edit for exact tool summaries."},
+                    "max_results": {"type": "integer", "description": "Maximum results to return. Defaults to 10 and is clamped to 1..40."}
+                },
+                "required": ["query"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -630,6 +642,16 @@ mod tests {
             .expect("WebSearch tool schema should be declared");
         assert_eq!(
             web_search.input_schema["required"],
+            serde_json::json!(["query"])
+        );
+
+        let tool_search = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "ToolSearch")
+            .expect("ToolSearch tool schema should be declared");
+        assert_eq!(
+            tool_search.input_schema["required"],
             serde_json::json!(["query"])
         );
 
