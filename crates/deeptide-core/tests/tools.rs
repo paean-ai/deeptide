@@ -1,4 +1,4 @@
-use deeptide_core::{ToolContext, ToolRegistry};
+use deeptide_core::{Tool, ToolContext, ToolRegistry, WriteTool};
 
 #[test]
 fn read_tool_reads_text_file_with_line_numbers() {
@@ -114,4 +114,52 @@ fn grep_tool_content_mode_includes_line_numbers() {
     assert!(!result.is_error);
     assert!(result.content.contains("notes.txt:1:alpha"));
     assert!(result.content.contains("notes.txt:3:alphabet"));
+}
+
+#[test]
+fn write_tool_creates_parent_directories_and_normalizes_line_endings() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = WriteTool.call(
+        serde_json::json!({"file_path": "src/notes.txt", "content": "alpha\r\nbeta\rgamma\n"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Created file: notes.txt"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("src/notes.txt")).expect("read written file"),
+        "alpha\nbeta\ngamma\n"
+    );
+}
+
+#[test]
+fn write_tool_reports_updated_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "old").expect("write fixture");
+
+    let result = WriteTool.call(
+        serde_json::json!({"file_path": "notes.txt", "content": "new"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Updated file: notes.txt"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("read written file"),
+        "new"
+    );
+}
+
+#[test]
+fn write_tool_reports_missing_content() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = WriteTool.call(
+        serde_json::json!({"file_path": "notes.txt"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("string `content` field"));
 }

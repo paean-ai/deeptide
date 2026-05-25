@@ -245,6 +245,69 @@ impl Tool for GrepTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WriteTool;
+
+impl Tool for WriteTool {
+    fn name(&self) -> &'static str {
+        "Write"
+    }
+
+    fn description(&self) -> &'static str {
+        "Write complete UTF-8 file contents, creating parent directories as needed."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error(
+                "Write requires JSON with both `file_path` and `content`. Example: {\"file_path\":\"roguelike.html\",\"content\":\"<complete file contents>\"}. Do not call Write with `{}`. Retry with the exact requested file path and complete content.",
+            );
+        };
+        if file_path.trim().is_empty() {
+            return ToolResult::error(
+                "Write requires JSON with both `file_path` and `content`. Example: {\"file_path\":\"roguelike.html\",\"content\":\"<complete file contents>\"}. Do not call Write with `{}`. Retry with the exact requested file path and complete content.",
+            );
+        }
+
+        let Some(content) = input.get("content").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error(
+                "Write requires a string `content` field containing the complete file contents. Retry with JSON keys exactly `file_path` and `content`.",
+            );
+        };
+
+        let path = context.resolve_path(file_path);
+        let existed = path.exists();
+        if let Some(parent) = path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            return ToolResult::error(format!(
+                "Failed to create parent directory {}: {error}",
+                parent.display()
+            ));
+        }
+
+        let normalized = normalize_line_endings(content);
+        if let Err(error) = fs::write(&path, normalized.as_bytes()) {
+            return ToolResult::error(format!("Failed to write {}: {error}", path.display()));
+        }
+
+        let action = if existed { "Updated" } else { "Created" };
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(file_path);
+        ToolResult::text(format!(
+            "{action} file: {name} ({})\nPath: {}",
+            format_byte_count(normalized.len()),
+            path.display()
+        ))
+    }
+}
+
 fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> ToolResult {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -306,6 +369,18 @@ fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> T
         .join("\n");
 
     ToolResult::text(output)
+}
+
+fn normalize_line_endings(content: &str) -> String {
+    content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn format_byte_count(bytes: usize) -> String {
+    if bytes == 1 {
+        String::from("1 byte")
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 fn grep_path(
