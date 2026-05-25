@@ -1,8 +1,9 @@
 use std::sync::Arc;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::memory::{
-    MemoryResolveResult, MemoryScope, delete_memory, list_memory_blocks, render_memory,
-    resolve_memory,
+    MemoryResolveResult, MemoryScope, delete_memory, list_memory_blocks, remember_project_note,
+    render_memory, resolve_memory,
 };
 
 pub trait SlashCommand {
@@ -31,6 +32,7 @@ pub struct CommandContext {
     context_tokens: Arc<dyn Fn() -> usize + Send + Sync>,
     prime_local_cache_branch: Arc<dyn Fn() -> Option<String> + Send + Sync>,
     cwd: Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>,
+    now_rfc3339: Arc<dyn Fn() -> String + Send + Sync>,
 }
 
 impl Default for CommandContext {
@@ -45,6 +47,11 @@ impl Default for CommandContext {
             prime_local_cache_branch: Arc::new(|| None),
             cwd: Arc::new(|| {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            }),
+            now_rfc3339: Arc::new(|| {
+                OffsetDateTime::now_utc()
+                    .format(&Rfc3339)
+                    .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z"))
             }),
         }
     }
@@ -86,6 +93,10 @@ impl CommandContext {
     pub fn cwd(&self) -> std::path::PathBuf {
         (self.cwd)()
     }
+
+    pub fn now_rfc3339(&self) -> String {
+        (self.now_rfc3339)()
+    }
 }
 
 #[derive(Default)]
@@ -98,6 +109,7 @@ pub struct CommandContextBuilder {
     context_tokens: Option<Arc<dyn Fn() -> usize + Send + Sync>>,
     prime_local_cache_branch: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
     cwd: Option<Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>>,
+    now_rfc3339: Option<Arc<dyn Fn() -> String + Send + Sync>>,
 }
 
 impl CommandContextBuilder {
@@ -165,6 +177,14 @@ impl CommandContextBuilder {
         self
     }
 
+    pub fn now_rfc3339<F>(mut self, callback: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.now_rfc3339 = Some(Arc::new(callback));
+        self
+    }
+
     pub fn build(self) -> CommandContext {
         let defaults = CommandContext::default();
         CommandContext {
@@ -190,6 +210,9 @@ impl CommandContextBuilder {
                 .prime_local_cache_branch
                 .unwrap_or_else(|| defaults.prime_local_cache_branch.clone()),
             cwd: self.cwd.unwrap_or_else(|| defaults.cwd.clone()),
+            now_rfc3339: self
+                .now_rfc3339
+                .unwrap_or_else(|| defaults.now_rfc3339.clone()),
         }
     }
 }
@@ -395,6 +418,39 @@ impl SlashCommand for MemoryCommand {
                 }
             }
             _ => CommandResult::Text(format!("Usage: {}", self.usage())),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RememberCommand;
+
+impl SlashCommand for RememberCommand {
+    fn name(&self) -> &'static str {
+        "remember"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn description(&self) -> &'static str {
+        "Save a note to project memory"
+    }
+
+    fn usage(&self) -> &'static str {
+        "/remember <text>"
+    }
+
+    fn execute(&self, args: &str, context: &CommandContext) -> CommandResult {
+        let body = args.trim();
+        if body.is_empty() {
+            return CommandResult::Text(format!("Usage: {}", self.usage()));
+        }
+
+        match remember_project_note(body, context.cwd(), &context.now_rfc3339()) {
+            Ok(path) => CommandResult::Text(format!("Saved to {}", path.display())),
+            Err(error) => CommandResult::Text(format!("Failed: {error}")),
         }
     }
 }

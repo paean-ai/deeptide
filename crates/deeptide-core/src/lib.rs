@@ -7,7 +7,7 @@ pub mod tool_result_summary;
 
 pub use commands::{
     ClearCommand, CommandContext, CommandResult, CompactCommand, MemoryCommand, NewCommand,
-    SlashCommand,
+    RememberCommand, SlashCommand,
 };
 pub use completion::{
     CommandCompletionCandidate, CommandCompletionResult, CommandCompletionSource, CompletionEngine,

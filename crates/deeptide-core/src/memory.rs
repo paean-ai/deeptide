@@ -158,6 +158,92 @@ impl MemoryScope {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryType {
+    User,
+    Feedback,
+    Project,
+    Reference,
+}
+
+impl MemoryType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Feedback => "feedback",
+            Self::Project => "project",
+            Self::Reference => "reference",
+        }
+    }
+}
+
+pub fn create_memory_file(
+    name: &str,
+    description: &str,
+    memory_type: MemoryType,
+    body: &str,
+) -> String {
+    format!(
+        "---\nname: {name}\ndescription: {description}\ntype: {}\n---\n\n{body}",
+        memory_type.as_str()
+    )
+}
+
+pub fn save_memory(
+    file_name: &str,
+    content: &str,
+    cwd: impl AsRef<Path>,
+    scope: MemoryScope,
+) -> io::Result<PathBuf> {
+    let dir = match scope {
+        MemoryScope::Project => MemorySystem::project_memory_dir(cwd.as_ref()),
+        MemoryScope::Global => MemorySystem::global_memory_dir(),
+    };
+    fs::create_dir_all(&dir)?;
+    let file_path = dir.join(file_name);
+    fs::write(&file_path, content)?;
+    Ok(file_path)
+}
+
+pub fn add_to_memory_index(
+    entry: &str,
+    cwd: impl AsRef<Path>,
+    scope: MemoryScope,
+) -> io::Result<PathBuf> {
+    let index_path = match scope {
+        MemoryScope::Project => MemorySystem::project_memory_index(cwd.as_ref()),
+        MemoryScope::Global => MemorySystem::global_memory_index(),
+    };
+    if let Some(dir) = index_path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    append_line(&index_path, entry)?;
+    Ok(index_path)
+}
+
+pub fn remember_project_note(
+    body: &str,
+    cwd: impl AsRef<Path>,
+    timestamp: &str,
+) -> io::Result<PathBuf> {
+    let body = body.trim();
+    let index_path = MemorySystem::project_memory_dir(cwd.as_ref()).join(MEMORY_INDEX_FILE);
+    if let Some(dir) = index_path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+
+    let line = format!("- [{timestamp}] {body}");
+    if index_path.exists() {
+        append_line(&index_path, &line)?;
+    } else {
+        fs::write(
+            &index_path,
+            format!("# Deeptide project memory\n\n{line}\n"),
+        )?;
+    }
+    Ok(index_path)
+}
+
 pub fn list_memory_blocks(cwd: impl AsRef<Path>) -> Vec<MemoryListBlock> {
     let project_index = MemorySystem::project_memory_index(cwd.as_ref());
     let global_index = MemorySystem::global_memory_index();
@@ -329,6 +415,16 @@ pub fn delete_memory(entry: &MemoryEntry) -> io::Result<()> {
         .collect::<Vec<_>>()
         .join("\n");
     fs::write(&entry.index_path, kept)
+}
+
+fn append_line(path: &Path, line: &str) -> io::Result<()> {
+    use std::io::Write;
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{line}")
 }
 
 pub fn extract_frontmatter(path: &Path) -> Vec<(String, String)> {

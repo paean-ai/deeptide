@@ -2,7 +2,10 @@ use std::fs;
 use std::sync::{Mutex, OnceLock};
 
 use deeptide_core::{
-    CommandContext, CommandResult, MemoryCommand, SlashCommand, memory::MemorySystem,
+    CommandContext, CommandResult, MemoryCommand, RememberCommand, SlashCommand,
+    memory::{
+        MemoryScope, MemorySystem, MemoryType, add_to_memory_index, create_memory_file, save_memory,
+    },
 };
 use tempfile::TempDir;
 
@@ -84,6 +87,78 @@ fn memory_ambiguous_name_requires_scope() {
     assert!(output.contains("Memory name is ambiguous"));
     assert!(output.contains("project: shared.md"));
     assert!(output.contains("global: shared.md"));
+}
+
+#[test]
+fn remember_command_appends_timestamped_project_note() {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = TestEnv::new();
+    temp.install();
+
+    let workspace = temp.root.path().join("remember-workspace");
+    fs::create_dir_all(&workspace).expect("workspace should be created");
+    let context = CommandContext::builder()
+        .cwd({
+            let workspace = workspace.clone();
+            move || workspace.clone()
+        })
+        .now_rfc3339(|| String::from("2026-05-25T01:23:45Z"))
+        .build();
+
+    let output = text(RememberCommand.execute("prefer cargo nextest when available", &context));
+
+    let index = MemorySystem::project_memory_dir(&workspace).join("MEMORY.md");
+    assert_eq!(output, format!("Saved to {}", index.display()));
+    let content = fs::read_to_string(index).expect("memory index should be readable");
+    assert_eq!(
+        content,
+        "# Deeptide project memory\n\n- [2026-05-25T01:23:45Z] prefer cargo nextest when available\n"
+    );
+}
+
+#[test]
+fn memory_shard_helpers_create_file_and_index_entry() {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = TestEnv::new();
+    temp.install();
+
+    let workspace = temp.root.path().join("write-tool-workspace");
+    fs::create_dir_all(&workspace).expect("workspace should be created");
+    let content = create_memory_file(
+        "Provider Policy",
+        "Keep API selection explicit",
+        MemoryType::Project,
+        "Use configured provider profiles instead of hard-coded endpoints.",
+    );
+
+    let file_path = save_memory(
+        "provider-policy.md",
+        &content,
+        &workspace,
+        MemoryScope::Project,
+    )
+    .expect("memory file should be saved");
+    let index_path = add_to_memory_index(
+        "- [Provider Policy](provider-policy.md) - Keep API selection explicit",
+        &workspace,
+        MemoryScope::Project,
+    )
+    .expect("memory index should be updated");
+
+    assert_eq!(
+        fs::read_to_string(file_path).expect("memory shard should be readable"),
+        "---\nname: Provider Policy\ndescription: Keep API selection explicit\ntype: project\n---\n\nUse configured provider profiles instead of hard-coded endpoints."
+    );
+    assert_eq!(
+        fs::read_to_string(index_path).expect("memory index should be readable"),
+        "- [Provider Policy](provider-policy.md) - Keep API selection explicit\n"
+    );
 }
 
 enum Scope {

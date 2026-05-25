@@ -12,6 +12,7 @@ description = "Core parity primitives for the Rust Deeptide CLI port."
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
