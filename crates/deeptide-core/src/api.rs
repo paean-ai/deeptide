@@ -291,6 +291,34 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "MemorySearch",
+            description: "Search Deeptide project/global memory files for durable preferences, decisions, and project facts.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keyword or phrase to search for in Deeptide memory files."},
+                    "scope": {"type": "string", "description": "Memory scope: project, global, or all. Defaults to all.", "enum": ["project", "global", "all"]},
+                    "max_results": {"type": "integer", "description": "Maximum memory files to return. Defaults to 10 and is clamped to 1..50."}
+                },
+                "required": ["query"]
+            }),
+        },
+        WireTool {
+            name: "MemoryWrite",
+            description: "Persist a concise auditable Deeptide memory shard for future sessions.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short stable title for the memory, 3-8 words.", "minLength": 3, "maxLength": 80},
+                    "body": {"type": "string", "description": "Concise, factual, durable memory content.", "minLength": 8, "maxLength": 2000},
+                    "scope": {"type": "string", "description": "Where to save the memory. Use project for repository facts and global for user preferences.", "enum": ["project", "global"], "default": "project"},
+                    "type": {"type": "string", "description": "Memory type.", "enum": ["user", "feedback", "project", "reference"], "default": "project"},
+                    "reason": {"type": "string", "description": "Why this is worth remembering, for auditability.", "minLength": 3, "maxLength": 240}
+                },
+                "required": ["title", "body", "reason"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -725,6 +753,26 @@ mod tests {
         assert_eq!(
             ask_user.input_schema["required"],
             serde_json::json!(["questions"])
+        );
+
+        let memory_search = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "MemorySearch")
+            .expect("MemorySearch tool schema should be declared");
+        assert_eq!(
+            memory_search.input_schema["required"],
+            serde_json::json!(["query"])
+        );
+
+        let memory_write = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "MemoryWrite")
+            .expect("MemoryWrite tool schema should be declared");
+        assert_eq!(
+            memory_write.input_schema["required"],
+            serde_json::json!(["title", "body", "reason"])
         );
 
         let todo_write = request

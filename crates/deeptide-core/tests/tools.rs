@@ -1,8 +1,8 @@
 use deeptide_core::{
-    AskUserQuestionTool, BashTool, EditTool, FileMetadataTool, MonitorTool, ReadFilesTool,
-    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool,
-    WriteTool,
+    AskUserQuestionTool, BashTool, EditTool, FileMetadataTool, MemorySearchTool, MemoryWriteTool,
+    MonitorTool, ReadFilesTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
+    TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool,
+    WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -419,6 +419,143 @@ fn monitor_tool_reports_stderr_and_failed_exit() {
     assert!(result.content.contains("exit=7"));
     assert!(result.content.contains("--- stderr ---"));
     assert!(result.content.contains("boom"));
+}
+
+#[test]
+fn memory_write_tool_writes_project_memory_shard_and_index() {
+    let _guard = memory_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    install_memory_env(temp.path());
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let result = MemoryWriteTool.call(
+        serde_json::json!({
+            "title": "Coding Style",
+            "body": "Keep tests narrow and deterministic.",
+            "reason": "User wants durable test guidance",
+            "type": "project"
+        }),
+        &ToolContext::new(&workspace),
+    );
+
+    assert!(!result.is_error);
+    assert!(
+        result
+            .content
+            .contains("Saved project memory: Coding Style")
+    );
+    let memory_dir = MemorySystem::project_memory_dir(&workspace);
+    let shard = memory_dir.join("coding-style.md");
+    let body = std::fs::read_to_string(&shard).expect("memory shard");
+    assert!(body.contains("name: Coding Style"));
+    assert!(body.contains("description: User wants durable test guidance"));
+    assert!(body.contains("type: project"));
+    assert!(body.contains("Keep tests narrow and deterministic."));
+
+    let index = std::fs::read_to_string(memory_dir.join("MEMORY.md")).expect("memory index");
+    assert!(index.contains("- [Coding Style](coding-style.md) - User wants durable test guidance"));
+}
+
+#[test]
+fn memory_write_tool_defaults_global_type_and_avoids_duplicate_names() {
+    let _guard = memory_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    install_memory_env(temp.path());
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let input = serde_json::json!({
+        "title": "Editor Preference",
+        "body": "Prefer concise code review findings first.",
+        "reason": "Durable user preference",
+        "scope": "global"
+    });
+
+    let first = MemoryWriteTool.call(input.clone(), &ToolContext::new(&workspace));
+    let second = MemoryWriteTool.call(input, &ToolContext::new(&workspace));
+
+    assert!(!first.is_error);
+    assert!(!second.is_error);
+    let memory_dir = MemorySystem::global_memory_dir();
+    assert!(memory_dir.join("editor-preference.md").exists());
+    assert!(memory_dir.join("editor-preference-2.md").exists());
+    let content =
+        std::fs::read_to_string(memory_dir.join("editor-preference.md")).expect("memory shard");
+    assert!(content.contains("type: user"));
+}
+
+#[test]
+fn memory_write_tool_rejects_invalid_inputs() {
+    let missing_reason = MemoryWriteTool.call(
+        serde_json::json!({
+            "title": "Valid Title",
+            "body": "Valid durable memory body."
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(missing_reason.is_error);
+    assert_eq!(missing_reason.content, "reason is required");
+
+    let bad_scope = MemoryWriteTool.call(
+        serde_json::json!({
+            "title": "Valid Title",
+            "body": "Valid durable memory body.",
+            "reason": "Useful later",
+            "scope": "team"
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(bad_scope.is_error);
+    assert_eq!(bad_scope.content, "scope must be project or global");
+}
+
+#[test]
+fn memory_search_tool_finds_project_and_global_memory() {
+    let _guard = memory_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    install_memory_env(temp.path());
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let project_input = serde_json::json!({
+        "title": "Provider Policy",
+        "body": "Use configured provider profiles instead of hard-coded endpoints.",
+        "reason": "Repository convention",
+        "scope": "project"
+    });
+    let global_input = serde_json::json!({
+        "title": "Review Preference",
+        "body": "Prefer concise code review findings first.",
+        "reason": "Durable user preference",
+        "scope": "global"
+    });
+    assert!(
+        !MemoryWriteTool
+            .call(project_input, &ToolContext::new(&workspace))
+            .is_error
+    );
+    assert!(
+        !MemoryWriteTool
+            .call(global_input, &ToolContext::new(&workspace))
+            .is_error
+    );
+
+    let all = MemorySearchTool.call(
+        serde_json::json!({"query": "preference", "scope": "all"}),
+        &ToolContext::new(&workspace),
+    );
+    assert!(!all.is_error);
+    assert!(all.content.contains("Review Preference"));
+    assert!(all.content.contains("scope: global"));
+
+    let project = MemorySearchTool.call(
+        serde_json::json!({"query": "provider", "scope": "project", "max_results": 5}),
+        &ToolContext::new(&workspace),
+    );
+    assert!(!project.is_error);
+    assert!(project.content.contains("Provider Policy"));
+    assert!(project.content.contains("scope: project"));
+    assert!(project.content.contains("configured provider profiles"));
 }
 
 #[test]
@@ -1084,4 +1221,19 @@ fn todo_test_guard() -> MutexGuard<'static, ()> {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .expect("todo test lock")
+}
+
+fn memory_env_guard() -> MutexGuard<'static, ()> {
+    static MEMORY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    MEMORY_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+fn install_memory_env(root: &std::path::Path) {
+    unsafe {
+        std::env::set_var("HOME", root.join("home"));
+        std::env::set_var("TIDE_CONFIG_DIR", root.join("tide-config"));
+    }
 }
