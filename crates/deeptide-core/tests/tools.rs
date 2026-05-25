@@ -1,7 +1,8 @@
 use deeptide_core::{
-    AskUserQuestionTool, BashTool, EditTool, FileMetadataTool, ReadFilesTool, TaskCreateTool,
-    TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool,
-    ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
+    AskUserQuestionTool, BashTool, EditTool, FileMetadataTool, MonitorTool, ReadFilesTool,
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
+    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool,
+    WriteTool,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -370,6 +371,54 @@ fn bash_tool_rejects_multiline_commands() {
 
     assert!(result.is_error);
     assert!(result.content.contains("command must be a single line"));
+}
+
+#[test]
+fn monitor_tool_returns_stdout_and_exit_status() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = MonitorTool.call(
+        serde_json::json!({"command": monitor_stdout_command(), "max_seconds": 5}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("(captured 2 lines, exit=0)"));
+    assert!(result.content.contains("ready"));
+    assert!(result.content.contains("done"));
+}
+
+#[test]
+fn monitor_tool_returns_early_when_until_matches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = MonitorTool.call(
+        serde_json::json!({
+            "command": monitor_until_command(),
+            "max_seconds": 10,
+            "until": "READY"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("(matched `READY`"));
+    assert!(result.content.contains("READY"));
+}
+
+#[test]
+fn monitor_tool_reports_stderr_and_failed_exit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = MonitorTool.call(
+        serde_json::json!({"command": stderr_failure_command(), "max_seconds": 5}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("exit=7"));
+    assert!(result.content.contains("--- stderr ---"));
+    assert!(result.content.contains("boom"));
 }
 
 #[test]
@@ -989,6 +1038,26 @@ fn stderr_failure_command() -> &'static str {
 #[cfg(not(windows))]
 fn stderr_failure_command() -> &'static str {
     "echo boom >&2; exit 7"
+}
+
+#[cfg(windows)]
+fn monitor_stdout_command() -> &'static str {
+    "echo ready && echo done"
+}
+
+#[cfg(not(windows))]
+fn monitor_stdout_command() -> &'static str {
+    "printf 'ready\\ndone\\n'"
+}
+
+#[cfg(windows)]
+fn monitor_until_command() -> &'static str {
+    "echo boot && echo READY && ping -n 6 127.0.0.1 > nul"
+}
+
+#[cfg(not(windows))]
+fn monitor_until_command() -> &'static str {
+    "printf 'boot\\nREADY\\n'; sleep 5"
 }
 
 fn serve_once(status: u16, content_type: &'static str, body: &'static str) -> String {

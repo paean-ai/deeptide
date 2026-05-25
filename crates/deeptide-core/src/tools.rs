@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -84,6 +84,7 @@ impl ToolRegistry {
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
+        registry.register(Box::<MonitorTool>::default());
         registry.register(Box::<TodoWriteTool>::default());
         registry.register(Box::<TaskCreateTool>::default());
         registry.register(Box::<TaskListTool>::default());
@@ -878,6 +879,15 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "git",
             "package manager",
         ],
+        "Monitor" => vec![
+            "long running",
+            "logs",
+            "watch",
+            "server",
+            "until",
+            "tail",
+            "process",
+        ],
         "AskUserQuestion" => vec![
             "ask user", "clarify", "question", "choice", "decision", "blocked",
         ],
@@ -1511,6 +1521,59 @@ impl Tool for BashTool {
         }
 
         execute_shell_command(command, context, Duration::from_millis(timeout_ms))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MonitorTool;
+
+impl Tool for MonitorTool {
+    fn name(&self) -> &'static str {
+        "Monitor"
+    }
+
+    fn description(&self) -> &'static str {
+        "Run a long command and return recent output after a timeout or regex match."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(command) = input.get("command").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("command is required");
+        };
+        if command.trim().is_empty() {
+            return ToolResult::error("command is required");
+        }
+
+        let max_seconds = input
+            .get("max_seconds")
+            .or_else(|| input.get("timeout"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(30)
+            .clamp(5, 300);
+        let until = input
+            .get("until")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let regex = match until {
+            Some(pattern) => match regex::Regex::new(pattern) {
+                Ok(regex) => Some(regex),
+                Err(error) => return ToolResult::error(format!("Invalid until regex: {error}")),
+            },
+            None => None,
+        };
+
+        monitor_shell_command(
+            command,
+            context,
+            Duration::from_secs(max_seconds),
+            regex,
+            until,
+        )
     }
 }
 
@@ -2480,6 +2543,207 @@ fn start_background_command(command: &str, context: &ToolContext) -> ToolResult 
             truncate_chars(command, 100)
         )),
         Err(error) => ToolResult::error(format!("Failed to execute command: {error}")),
+    }
+}
+
+#[derive(Debug)]
+enum MonitorEvent {
+    Stdout(String),
+    Stderr(String),
+}
+
+fn monitor_shell_command(
+    command: &str,
+    context: &ToolContext,
+    timeout: Duration,
+    until_regex: Option<regex::Regex>,
+    until_pattern: Option<&str>,
+) -> ToolResult {
+    let mut child = match shell_command(command)
+        .current_dir(&context.cwd)
+        .env_remove("TIDE_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("ZERO_CLI_API_KEY")
+        .env_remove("ZERO_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return ToolResult::error(format!("Failed to launch: {error}")),
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    if let Some(stdout) = stdout {
+        spawn_monitor_reader(stdout, sender.clone(), true);
+    }
+    if let Some(stderr) = stderr {
+        spawn_monitor_reader(stderr, sender, false);
+    }
+
+    let started = Instant::now();
+    let mut stdout_lines = Vec::new();
+    let mut stderr_lines = Vec::new();
+    let mut matched = false;
+    let mut timed_out = false;
+    let exit_code;
+
+    loop {
+        while let Ok(event) = receiver.try_recv() {
+            match event {
+                MonitorEvent::Stdout(line) => {
+                    if until_regex
+                        .as_ref()
+                        .is_some_and(|regex| regex.is_match(&line))
+                    {
+                        matched = true;
+                    }
+                    stdout_lines.push(line);
+                }
+                MonitorEvent::Stderr(line) => stderr_lines.push(line),
+            }
+        }
+
+        if matched {
+            let _ = child.kill();
+            exit_code = child.wait().ok().and_then(|status| status.code());
+            break;
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_code = status.code();
+                break;
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                timed_out = true;
+                let _ = child.kill();
+                exit_code = child.wait().ok().and_then(|status| status.code());
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(error) => return ToolResult::error(format!("Failed to monitor command: {error}")),
+        }
+    }
+
+    let drain_deadline = Instant::now() + Duration::from_millis(250);
+    while Instant::now() < drain_deadline {
+        match receiver.try_recv() {
+            Ok(MonitorEvent::Stdout(line)) => stdout_lines.push(line),
+            Ok(MonitorEvent::Stderr(line)) => stderr_lines.push(line),
+            Err(std::sync::mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+
+    render_monitor_output(
+        &stdout_lines,
+        &stderr_lines,
+        exit_code,
+        timed_out,
+        matched,
+        until_pattern,
+        timeout,
+    )
+}
+
+fn spawn_monitor_reader<R>(
+    reader: R,
+    sender: std::sync::mpsc::Sender<MonitorEvent>,
+    is_stdout: bool,
+) where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = io::BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                    let event = if is_stdout {
+                        MonitorEvent::Stdout(trimmed)
+                    } else {
+                        MonitorEvent::Stderr(trimmed)
+                    };
+                    if sender.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn render_monitor_output(
+    stdout_lines: &[String],
+    stderr_lines: &[String],
+    exit_code: Option<i32>,
+    timed_out: bool,
+    matched: bool,
+    until_pattern: Option<&str>,
+    timeout: Duration,
+) -> ToolResult {
+    let header = if matched {
+        format!(
+            "(matched `{}` after {} lines)",
+            until_pattern.unwrap_or_default(),
+            stdout_lines.len()
+        )
+    } else if timed_out {
+        format!(
+            "(captured {} lines, timed out after {}s)",
+            stdout_lines.len(),
+            timeout.as_secs()
+        )
+    } else {
+        format!(
+            "(captured {} lines, exit={})",
+            stdout_lines.len(),
+            exit_code.unwrap_or(-1)
+        )
+    };
+
+    let mut body = header;
+    let stdout_tail = stdout_lines
+        .iter()
+        .rev()
+        .take(200)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !stdout_tail.is_empty() {
+        body.push('\n');
+        body.push_str(&stdout_tail);
+    }
+    if !stderr_lines.is_empty() {
+        let stderr_tail = stderr_lines
+            .iter()
+            .rev()
+            .take(100)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        body.push_str("\n--- stderr ---\n");
+        body.push_str(&truncate_chars(&stderr_tail, 2_000));
+    }
+
+    if !matched && exit_code.unwrap_or(0) != 0 && !timed_out {
+        ToolResult::error(body)
+    } else {
+        ToolResult::text(body)
     }
 }
 

@@ -331,6 +331,19 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "Monitor",
+            description: "Run a long command and return recent stdout/stderr after a timeout or regex match. Use for logs, watchers, and dev servers.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run."},
+                    "max_seconds": {"type": "integer", "description": "Max seconds to monitor before returning. Defaults to 30 and is clamped to 5..300."},
+                    "until": {"type": "string", "description": "Optional regular expression. Return early when a stdout line matches."}
+                },
+                "required": ["command"]
+            }),
+        },
+        WireTool {
             name: "TodoWrite",
             description: "Replace the complete todo list for the current task. Use this to track multi-step progress.",
             input_schema: serde_json::json!({
@@ -634,6 +647,16 @@ mod tests {
             .expect("Bash tool schema should be declared");
         assert_eq!(
             bash.input_schema["required"],
+            serde_json::json!(["command"])
+        );
+
+        let monitor = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "Monitor")
+            .expect("Monitor tool schema should be declared");
+        assert_eq!(
+            monitor.input_schema["required"],
             serde_json::json!(["command"])
         );
 
