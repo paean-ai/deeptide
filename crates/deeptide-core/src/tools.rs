@@ -2,6 +2,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
@@ -66,8 +70,16 @@ impl ToolRegistry {
     pub fn with_builtin_tools() -> Self {
         let mut registry = Self::new();
         registry.register(Box::<ReadTool>::default());
+        registry.register(Box::<ReadFilesTool>::default());
         registry.register(Box::<GlobTool>::default());
         registry.register(Box::<GrepTool>::default());
+        registry.register(Box::<WriteTool>::default());
+        registry.register(Box::<EditTool>::default());
+        registry.register(Box::<BashTool>::default());
+        registry.register(Box::<TodoWriteTool>::default());
+        registry.register(Box::<TaskListTool>::default());
+        registry.register(Box::<TaskGetTool>::default());
+        registry.register(Box::<TaskUpdateTool>::default());
         registry
     }
 
@@ -126,6 +138,61 @@ impl Tool for ReadTool {
             .and_then(|value| usize::try_from(value).ok());
 
         read_text_file(&path, offset, limit)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReadFilesTool;
+
+impl Tool for ReadFilesTool {
+    fn name(&self) -> &'static str {
+        "ReadFiles"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read multiple text files in one ordered result."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(paths) = input.get("paths").and_then(serde_json::Value::as_array) else {
+            return ToolResult::error("paths must be an array");
+        };
+        if paths.is_empty() {
+            return ToolResult::error("No paths provided");
+        }
+        if paths.len() > 50 {
+            return ToolResult::error("paths array exceeds 50 entries; split into smaller batches");
+        }
+
+        let mut sections = Vec::new();
+        let mut estimated_tokens = 0usize;
+        for path_value in paths {
+            let Some(file_path) = path_value.as_str() else {
+                sections.push(String::from(
+                    "===== <invalid> =====\n[Error: path must be a string]",
+                ));
+                continue;
+            };
+            let path = context.resolve_path(file_path);
+            let section = match read_text_file_limited(&path, Some(2_000)) {
+                Ok(content) => format!("===== {file_path} =====\n{content}"),
+                Err(message) => format!("===== {file_path} =====\n[Error: {message}]"),
+            };
+            estimated_tokens += estimate_tokens(&section);
+            if estimated_tokens > 60_000 {
+                sections.push(format!(
+                    "===== {file_path} =====\n[Skipped: total output cap reached (60000 tokens)]"
+                ));
+                break;
+            }
+            sections.push(section);
+        }
+
+        ToolResult::text(sections.join("\n\n"))
     }
 }
 
@@ -245,7 +312,543 @@ impl Tool for GrepTool {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BashTool;
+
+impl Tool for BashTool {
+    fn name(&self) -> &'static str {
+        "Bash"
+    }
+
+    fn description(&self) -> &'static str {
+        "Execute a single-line shell command in the current workspace."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(command) = input.get("command").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing command parameter");
+        };
+        if command.trim().is_empty() {
+            return ToolResult::error("command is required and must be non-empty");
+        }
+        if command.contains('\n') || command.contains('\r') {
+            return ToolResult::error("command must be a single line; rewrite it with && or ;");
+        }
+
+        let timeout_ms = input
+            .get("timeout")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(120_000)
+            .min(600_000);
+        if input
+            .get("timeout")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|timeout| timeout > 600_000)
+        {
+            return ToolResult::error("timeout must be <= 600000ms (10 minutes)");
+        }
+
+        if input
+            .get("run_in_background")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            return start_background_command(command, context);
+        }
+
+        execute_shell_command(command, context, Duration::from_millis(timeout_ms))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TodoWriteTool;
+
+impl Tool for TodoWriteTool {
+    fn name(&self) -> &'static str {
+        "TodoWrite"
+    }
+
+    fn description(&self) -> &'static str {
+        "Replace the in-memory todo list in one call."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(raw_items) = input.get("todos").and_then(serde_json::Value::as_array) else {
+            return ToolResult::error("Missing or invalid todos array");
+        };
+
+        let parsed = raw_items
+            .iter()
+            .filter_map(parse_todo_item)
+            .collect::<Vec<_>>();
+        let all_done = !parsed.is_empty()
+            && parsed
+                .iter()
+                .all(|item| item.status == TodoStatus::Completed);
+        replace_todos(parsed.clone());
+
+        if all_done {
+            return ToolResult::text(
+                "Todo list cleared (all tasks completed). Proceed with your summary.",
+            );
+        }
+
+        ToolResult::text(format!(
+            "Todo list updated ({} items). Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable.",
+            parsed.len()
+        ))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskListTool;
+
+impl Tool for TaskListTool {
+    fn name(&self) -> &'static str {
+        "TaskList"
+    }
+
+    fn description(&self) -> &'static str {
+        "List the current in-memory todo tasks."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, _input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let todos = list_todos();
+        if todos.is_empty() {
+            return ToolResult::text("No tasks.");
+        }
+
+        let lines = todos
+            .iter()
+            .enumerate()
+            .map(|(index, item)| format!("#{} {} {}", index + 1, item.status.icon(), item.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ToolResult::text(lines)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskGetTool;
+
+impl Tool for TaskGetTool {
+    fn name(&self) -> &'static str {
+        "TaskGet"
+    }
+
+    fn description(&self) -> &'static str {
+        "Get full details for one in-memory todo task by ID."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(task_id) = input.get("taskId").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing taskId parameter");
+        };
+        let Some(task) = get_todo(task_id) else {
+            return ToolResult::error(format!("Task not found: {task_id}"));
+        };
+
+        let mut lines = vec![
+            format!("Task: {}", task.content),
+            format!("ID: {task_id}"),
+            format!("Status: {}", task.status.as_str()),
+        ];
+        if let Some(active_form) = task.active_form.filter(|value| !value.is_empty()) {
+            lines.push(format!("Description: {active_form}"));
+        }
+        ToolResult::text(lines.join("\n"))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskUpdateTool;
+
+impl Tool for TaskUpdateTool {
+    fn name(&self) -> &'static str {
+        "TaskUpdate"
+    }
+
+    fn description(&self) -> &'static str {
+        "Update an in-memory todo task by ID."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(task_id) = input.get("taskId").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing taskId");
+        };
+
+        if input.get("status").and_then(serde_json::Value::as_str) == Some("deleted") {
+            return if delete_todo(task_id) {
+                ToolResult::text(format!("Task #{task_id} deleted"))
+            } else {
+                ToolResult::error(format!("Task #{task_id} not found"))
+            };
+        }
+
+        let status = input
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(TodoStatus::parse);
+        let subject = input
+            .get("subject")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        let description = input
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+
+        let changes = update_todo(task_id, status, subject, description);
+        if changes.is_empty() {
+            return ToolResult::text(format!("Task #{task_id}: no changes (task may not exist)"));
+        }
+
+        ToolResult::text(format!("Task #{task_id} updated: {}", changes.join(", ")))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TodoItem {
+    content: String,
+    status: TodoStatus,
+    active_form: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Deleted,
+}
+
+fn parse_todo_item(value: &serde_json::Value) -> Option<TodoItem> {
+    let object = value.as_object()?;
+    let content = object.get("content")?.as_str()?.to_owned();
+    let status = object
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(TodoStatus::parse)
+        .unwrap_or(TodoStatus::Pending);
+    let active_form = object
+        .get("activeForm")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    Some(TodoItem {
+        content,
+        status,
+        active_form,
+    })
+}
+
+impl TodoStatus {
+    fn parse(value: &str) -> Self {
+        match value {
+            "in_progress" => Self::InProgress,
+            "completed" => Self::Completed,
+            "deleted" => Self::Deleted,
+            _ => Self::Pending,
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Pending => "○",
+            Self::InProgress => "◉",
+            Self::Completed => "⌬",
+            Self::Deleted => "✕",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+fn todo_storage() -> &'static Mutex<Vec<TodoItem>> {
+    static STORAGE: OnceLock<Mutex<Vec<TodoItem>>> = OnceLock::new();
+    STORAGE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn replace_todos(items: Vec<TodoItem>) {
+    if let Ok(mut todos) = todo_storage().lock() {
+        *todos = items;
+    }
+}
+
+fn list_todos() -> Vec<TodoItem> {
+    todo_storage()
+        .lock()
+        .map(|todos| todos.clone())
+        .unwrap_or_default()
+}
+
+fn get_todo(task_id: &str) -> Option<TodoItem> {
+    let index = task_id.parse::<usize>().ok()?.checked_sub(1)?;
+    todo_storage()
+        .lock()
+        .ok()
+        .and_then(|todos| todos.get(index).cloned())
+}
+
+fn update_todo(
+    task_id: &str,
+    status: Option<TodoStatus>,
+    subject: Option<String>,
+    description: Option<String>,
+) -> Vec<String> {
+    let Some(index) = task_id
+        .parse::<usize>()
+        .ok()
+        .and_then(|value| value.checked_sub(1))
+    else {
+        return Vec::new();
+    };
+
+    let Ok(mut todos) = todo_storage().lock() else {
+        return Vec::new();
+    };
+    let Some(todo) = todos.get_mut(index) else {
+        return Vec::new();
+    };
+
+    let mut changes = Vec::new();
+    if let Some(status) = status {
+        todo.status = status;
+        changes.push(format!("status -> {}", status.as_str()));
+    }
+    if let Some(subject) = subject {
+        todo.content = subject;
+        changes.push(String::from("subject updated"));
+    }
+    if let Some(description) = description {
+        todo.active_form = Some(description);
+        changes.push(String::from("description updated"));
+    }
+    changes
+}
+
+fn delete_todo(task_id: &str) -> bool {
+    let Some(index) = task_id
+        .parse::<usize>()
+        .ok()
+        .and_then(|value| value.checked_sub(1))
+    else {
+        return false;
+    };
+    let Ok(mut todos) = todo_storage().lock() else {
+        return false;
+    };
+    if index >= todos.len() {
+        return false;
+    }
+    todos.remove(index);
+    true
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WriteTool;
+
+impl Tool for WriteTool {
+    fn name(&self) -> &'static str {
+        "Write"
+    }
+
+    fn description(&self) -> &'static str {
+        "Write complete UTF-8 file contents, creating parent directories as needed."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error(
+                "Write requires JSON with both `file_path` and `content`. Example: {\"file_path\":\"roguelike.html\",\"content\":\"<complete file contents>\"}. Do not call Write with `{}`. Retry with the exact requested file path and complete content.",
+            );
+        };
+        if file_path.trim().is_empty() {
+            return ToolResult::error(
+                "Write requires JSON with both `file_path` and `content`. Example: {\"file_path\":\"roguelike.html\",\"content\":\"<complete file contents>\"}. Do not call Write with `{}`. Retry with the exact requested file path and complete content.",
+            );
+        }
+
+        let Some(content) = input.get("content").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error(
+                "Write requires a string `content` field containing the complete file contents. Retry with JSON keys exactly `file_path` and `content`.",
+            );
+        };
+
+        let path = context.resolve_path(file_path);
+        let existed = path.exists();
+        if let Some(parent) = path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            return ToolResult::error(format!(
+                "Failed to create parent directory {}: {error}",
+                parent.display()
+            ));
+        }
+
+        let normalized = normalize_line_endings(content);
+        if let Err(error) = fs::write(&path, normalized.as_bytes()) {
+            return ToolResult::error(format!("Failed to write {}: {error}", path.display()));
+        }
+
+        let action = if existed { "Updated" } else { "Created" };
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(file_path);
+        ToolResult::text(format!(
+            "{action} file: {name} ({})\nPath: {}",
+            format_byte_count(normalized.len()),
+            path.display()
+        ))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EditTool;
+
+impl Tool for EditTool {
+    fn name(&self) -> &'static str {
+        "Edit"
+    }
+
+    fn description(&self) -> &'static str {
+        "Perform exact string replacement in an existing UTF-8 file."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("file_path is required");
+        };
+        if file_path.trim().is_empty() {
+            return ToolResult::error("file_path is required");
+        }
+        let Some(old_string) = input.get("old_string").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("old_string is required");
+        };
+        let Some(new_string) = input.get("new_string").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("new_string is required");
+        };
+        if old_string == new_string {
+            return ToolResult::error("old_string and new_string must be different");
+        }
+
+        let path = context.resolve_path(file_path);
+        let replace_all = input
+            .get("replace_all")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        if !path.exists() && old_string.is_empty() {
+            if let Some(parent) = path.parent()
+                && let Err(error) = fs::create_dir_all(parent)
+            {
+                return ToolResult::error(format!(
+                    "Failed to create parent directory {}: {error}",
+                    parent.display()
+                ));
+            }
+            let normalized_new = normalize_line_endings(new_string);
+            if let Err(error) = fs::write(&path, normalized_new.as_bytes()) {
+                return ToolResult::error(format!("Failed to write {}: {error}", path.display()));
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(file_path);
+            return ToolResult::text(format!("Created new file: {name}"));
+        }
+
+        let original = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return ToolResult::error(format!("File does not exist: {file_path}"));
+            }
+            Err(error) => {
+                return ToolResult::error(format!("Failed to read {}: {error}", path.display()));
+            }
+        };
+        if old_string.is_empty() {
+            return ToolResult::error(
+                "old_string not found in file. The file may have been modified. Please re-read the file.",
+            );
+        }
+
+        let (edited, matches) =
+            match apply_exact_edit(&original, old_string, new_string, replace_all) {
+                Ok(result) => result,
+                Err(message) => return ToolResult::error(message),
+            };
+        if let Err(error) = fs::write(&path, edited.as_bytes()) {
+            return ToolResult::error(format!("Failed to write {}: {error}", path.display()));
+        }
+
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(file_path);
+        let occurrence = if replace_all && matches > 1 {
+            format!("all {matches} occurrences")
+        } else {
+            String::from("1 occurrence")
+        };
+        ToolResult::text(format!("File edited successfully: {name} ({occurrence})"))
+    }
+}
+
 fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> ToolResult {
+    let content = match read_text_file_limited(path, None) {
+        Ok(content) => content,
+        Err(message) => return ToolResult::error(message),
+    };
+
+    let start = offset.unwrap_or(1).saturating_sub(1);
+    let needed = limit.unwrap_or(usize::MAX);
+    let output = content
+        .lines()
+        .skip(start)
+        .take(needed)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    ToolResult::text(output)
+}
+
+fn read_text_file_limited(path: &Path, line_limit: Option<usize>) -> Result<String, String> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -253,18 +856,18 @@ fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> T
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
-            return ToolResult::error(format!(
+            return Err(format!(
                 "File does not exist: {}\nHint: the file may be at a different location. Use Glob(pattern: \"**/{filename}\") to locate it.",
                 path.display()
             ));
         }
         Err(error) => {
-            return ToolResult::error(format!("Failed to inspect {}: {error}", path.display()));
+            return Err(format!("Failed to inspect {}: {error}", path.display()));
         }
     };
 
     if metadata.is_dir() {
-        return ToolResult::error(format!(
+        return Err(format!(
             "Path is a directory: {}\nUse Glob to list files or Grep to search within it.",
             path.display()
         ));
@@ -273,12 +876,10 @@ fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> T
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) => {
-            return ToolResult::error(format!("Failed to open {}: {error}", path.display()));
+            return Err(format!("Failed to open {}: {error}", path.display()));
         }
     };
 
-    let start = offset.unwrap_or(1).saturating_sub(1);
-    let needed = limit.unwrap_or(usize::MAX);
     let mut selected = Vec::new();
     let mut total_lines = 0usize;
 
@@ -287,25 +888,246 @@ fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> T
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                return ToolResult::error(format!("Failed to read {}: {error}", path.display()));
+                return Err(format!("Failed to read {}: {error}", path.display()));
             }
         };
 
-        if total_lines > start && selected.len() < needed {
+        if line_limit.is_none_or(|limit| selected.len() < limit) {
             selected.push((total_lines, line));
         }
-        if selected.len() >= needed {
+        if line_limit.is_some_and(|limit| selected.len() >= limit) {
             break;
         }
     }
 
-    let output = selected
+    let mut output = selected
         .into_iter()
         .map(|(line_number, line)| format!("{line_number}\t{line}"))
         .collect::<Vec<_>>()
         .join("\n");
+    if let Some(limit) = line_limit
+        && total_lines >= limit
+    {
+        output.push_str(&format!("\n[File truncated at {limit} lines]"));
+    }
 
-    ToolResult::text(output)
+    Ok(output)
+}
+
+fn execute_shell_command(command: &str, context: &ToolContext, timeout: Duration) -> ToolResult {
+    let mut child = match shell_command(command)
+        .current_dir(&context.cwd)
+        .env_remove("TIDE_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("ZERO_CLI_API_KEY")
+        .env_remove("ZERO_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return ToolResult::error(format!("Failed to execute command: {error}"));
+        }
+    };
+
+    let started = Instant::now();
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) if started.elapsed() >= timeout => {
+                timed_out = true;
+                let _ = child.kill();
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(error) => return ToolResult::error(format!("Failed to wait for command: {error}")),
+        }
+    }
+
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(error) => {
+            return ToolResult::error(format!("Failed to collect command output: {error}"));
+        }
+    };
+
+    render_command_output(
+        command,
+        output.status.code(),
+        timed_out,
+        &output.stdout,
+        &output.stderr,
+    )
+}
+
+fn start_background_command(command: &str, context: &ToolContext) -> ToolResult {
+    match shell_command(command)
+        .current_dir(&context.cwd)
+        .env_remove("TIDE_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("ZERO_CLI_API_KEY")
+        .env_remove("ZERO_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_child) => ToolResult::text(format!(
+            "Command started in background: `{}`",
+            truncate_chars(command, 100)
+        )),
+        Err(error) => ToolResult::error(format!("Failed to execute command: {error}")),
+    }
+}
+
+fn shell_command(command: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut process = Command::new("cmd");
+        process.args(["/C", command]);
+        process
+    }
+    #[cfg(not(windows))]
+    {
+        let mut process = Command::new("sh");
+        process.args(["-c", command]);
+        process
+    }
+}
+
+fn render_command_output(
+    _command: &str,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> ToolResult {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let mut output = String::new();
+    if timed_out {
+        output.push_str("[Timed out after configured timeout - process killed]\n");
+    }
+    if !stdout.is_empty() {
+        output.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str("[stderr]\n");
+        output.push_str(&stderr);
+    }
+
+    let failed = timed_out || exit_code.unwrap_or(1) != 0;
+    if output.is_empty() && failed {
+        output = format!(
+            "Command exited with code {} (no output)",
+            exit_code.unwrap_or(-1)
+        );
+    }
+
+    let output = truncate_command_output(&output, 30_000, 500);
+    if failed {
+        ToolResult::error(output)
+    } else {
+        ToolResult::text(output)
+    }
+}
+
+fn truncate_command_output(output: &str, max_chars: usize, max_lines: usize) -> String {
+    let mut truncated = output
+        .lines()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if output.ends_with('\n') && output.lines().count() <= max_lines {
+        truncated.push('\n');
+    }
+    if truncated.chars().count() > max_chars {
+        truncated = truncate_chars(&truncated, max_chars);
+        truncated.push_str("\n[Output truncated]");
+    } else if output.lines().count() > max_lines {
+        truncated.push_str("\n[Output truncated]");
+    }
+    truncated
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    value.chars().take(max_chars).collect()
+}
+
+fn estimate_tokens(value: &str) -> usize {
+    value.len().div_ceil(4)
+}
+
+fn normalize_line_endings(content: &str) -> String {
+    content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn format_byte_count(bytes: usize) -> String {
+    if bytes == 1 {
+        String::from("1 byte")
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+fn apply_exact_edit(
+    content: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> Result<(String, usize), String> {
+    let matches = content.matches(old_string).count();
+    if matches == 0 {
+        let normalized_content = normalize_quotes(content);
+        let normalized_old = normalize_quotes(old_string);
+        let normalized_matches = normalized_content.matches(&normalized_old).count();
+        if normalized_matches == 0 {
+            return Err(String::from(
+                "old_string not found in file. The file may have been modified. Please re-read the file.",
+            ));
+        }
+        if normalized_matches > 1 && !replace_all {
+            return Err(format!(
+                "old_string matches {normalized_matches} locations. Use replace_all=true or provide a more specific string."
+            ));
+        }
+
+        let normalized_new = normalize_quotes(new_string);
+        let edited = if replace_all {
+            normalized_content.replace(&normalized_old, &normalized_new)
+        } else {
+            normalized_content.replacen(&normalized_old, &normalized_new, 1)
+        };
+        return Ok((edited, normalized_matches));
+    }
+
+    if matches > 1 && !replace_all {
+        return Err(format!(
+            "old_string matches {matches} locations. Use replace_all=true or provide a more specific string."
+        ));
+    }
+
+    let edited = if replace_all {
+        content.replace(old_string, new_string)
+    } else {
+        content.replacen(old_string, new_string, 1)
+    };
+    Ok((edited, matches))
+}
+
+fn normalize_quotes(content: &str) -> String {
+    content
+        .replace(['\u{201c}', '\u{201d}'], "\"")
+        .replace(['\u{2018}', '\u{2019}'], "'")
 }
 
 fn grep_path(

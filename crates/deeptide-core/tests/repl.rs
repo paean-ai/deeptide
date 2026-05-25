@@ -69,6 +69,20 @@ fn repl_read_command_reads_files() {
     assert_eq!(output, "2\tbeta");
 }
 
+#[test]
+fn repl_write_command_writes_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+    let output = only_output(repl.submit("/write notes.txt hello from repl"));
+
+    assert!(output.contains("Created file: notes.txt"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("read written file"),
+        "hello from repl"
+    );
+}
+
 fn only_output(events: Vec<ReplEvent>) -> String {
     match events.as_slice() {
         [ReplEvent::Output(output)] => output.clone(),

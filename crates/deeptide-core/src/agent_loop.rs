@@ -1,4 +1,7 @@
-use crate::{CostTracker, ToolContext, ToolRegistry, TurnUsage};
+use crate::{
+    CostTracker, PermissionDecision, PermissionManager, PermissionMode, PermissionRules,
+    ToolContext, ToolRegistry, TurnUsage,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRole {
@@ -129,10 +132,12 @@ pub struct AgentLoop {
     current_run_step: usize,
     tool_registry: ToolRegistry,
     tool_context: ToolContext,
+    permission_manager: PermissionManager,
 }
 
 impl AgentLoop {
     pub fn new(backend: Box<dyn AgentBackend>) -> Self {
+        let rules = PermissionRules::load(None).unwrap_or_else(|_| PermissionRules::in_memory());
         Self {
             backend,
             messages: Vec::new(),
@@ -144,6 +149,7 @@ impl AgentLoop {
             tool_context: ToolContext::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
+            permission_manager: PermissionManager::new(PermissionMode::Default, rules),
         }
     }
 
@@ -159,6 +165,16 @@ impl AgentLoop {
 
     pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
         self.tool_context = ToolContext::new(cwd);
+        self
+    }
+
+    pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.permission_manager.set_mode(mode);
+        self
+    }
+
+    pub fn with_permission_manager(mut self, permission_manager: PermissionManager) -> Self {
+        self.permission_manager = permission_manager;
         self
     }
 
@@ -209,11 +225,7 @@ impl AgentLoop {
                     }
 
                     for tool_call in response.tool_calls {
-                        let result = self.tool_registry.call(
-                            &tool_call.name,
-                            tool_call.input.clone(),
-                            &self.tool_context,
-                        );
+                        let result = self.execute_tool_call(&tool_call);
                         let content = result.content;
                         let is_error = result.is_error;
                         events.push(AgentLoopEvent::ToolResult {
@@ -261,6 +273,33 @@ impl AgentLoop {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    fn execute_tool_call(&self, tool_call: &ToolCall) -> crate::ToolResult {
+        let permission = tool_call
+            .input
+            .as_object()
+            .map(|input| self.permission_manager.check_json(&tool_call.name, input))
+            .unwrap_or_else(|| {
+                self.permission_manager
+                    .check(&tool_call.name, &crate::permissions::ToolInput::default())
+            });
+
+        match permission {
+            PermissionDecision::Allow => self.tool_registry.call(
+                &tool_call.name,
+                tool_call.input.clone(),
+                &self.tool_context,
+            ),
+            PermissionDecision::Deny { reason } => crate::ToolResult::error(format!(
+                "Permission denied for {}: {reason}",
+                tool_call.name
+            )),
+            PermissionDecision::Ask => crate::ToolResult::error(format!(
+                "Permission required for {}. Re-run with --permission-mode accept-edits or add an allow rule to approve this tool call.",
+                tool_call.name
+            )),
+        }
     }
 }
 

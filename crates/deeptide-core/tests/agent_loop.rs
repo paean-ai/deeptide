@@ -1,6 +1,6 @@
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
-    AgentUsage, MessageRole, ToolCall,
+    AgentUsage, MessageRole, PermissionMode, ToolCall,
 };
 
 #[test]
@@ -86,6 +86,124 @@ fn agent_loop_executes_tool_calls_and_continues() {
     );
 }
 
+#[test]
+fn agent_loop_blocks_write_tool_calls_without_edit_permission() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(WriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3);
+
+    let events = loop_.run("write notes");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: true,
+            } if tool_call.name == "Write" && content.contains("Permission required")
+        )
+    }));
+    assert!(!temp.path().join("notes.txt").exists());
+}
+
+#[test]
+fn agent_loop_allows_write_tool_calls_in_accept_edits_mode() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(WriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_permission_mode(PermissionMode::AcceptEdits)
+        .with_max_turns(3);
+
+    let events = loop_.run("write notes");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "Write" && content.contains("Created file: notes.txt")
+        )
+    }));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("written file"),
+        "hello from agent"
+    );
+}
+
+#[test]
+fn agent_loop_allows_edit_tool_calls_in_accept_edits_mode() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\n").expect("write fixture");
+    let mut loop_ = AgentLoop::new(Box::new(EditCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_permission_mode(PermissionMode::AcceptEdits)
+        .with_max_turns(3);
+
+    let events = loop_.run("edit notes");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "Edit" && content.contains("File edited successfully")
+        )
+    }));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("edited file"),
+        "bravo\n"
+    );
+}
+
+#[test]
+fn agent_loop_blocks_bash_tool_calls_without_permission() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(BashCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3);
+
+    let events = loop_.run("run shell");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: true,
+            } if tool_call.name == "Bash" && content.contains("Permission required")
+        )
+    }));
+}
+
+#[test]
+fn agent_loop_allows_bash_tool_calls_in_bypass_mode() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(BashCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_permission_mode(PermissionMode::Bypass)
+        .with_max_turns(3);
+
+    let events = loop_.run("run shell");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "Bash" && content.contains("shell-ok")
+        )
+    }));
+}
+
 struct StaticBackend {
     content: String,
     usage: Option<AgentUsage>,
@@ -145,4 +263,95 @@ impl AgentBackend for ToolCallingBackend {
             Ok(AgentResponse::text("done after tool"))
         }
     }
+}
+
+#[derive(Default)]
+struct WriteCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for WriteCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will write the file."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_write",
+                    "Write",
+                    serde_json::json!({
+                        "file_path": "notes.txt",
+                        "content": "hello from agent",
+                    }),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after write"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct EditCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for EditCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will edit the file."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_edit",
+                    "Edit",
+                    serde_json::json!({
+                        "file_path": "notes.txt",
+                        "old_string": "alpha",
+                        "new_string": "bravo",
+                    }),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after edit"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct BashCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for BashCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will run a shell command."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_bash",
+                    "Bash",
+                    serde_json::json!({
+                        "command": echo_ok_command(),
+                    }),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after bash"))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn echo_ok_command() -> &'static str {
+    "echo shell-ok"
+}
+
+#[cfg(not(windows))]
+fn echo_ok_command() -> &'static str {
+    "printf shell-ok"
 }

@@ -149,6 +149,21 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "ReadFiles",
+            description: "Read multiple text files in one ordered result. Use this when inspecting several known paths.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "description": "Ordered list of file paths to read. Relative paths resolve against the current workspace.",
+                        "items": {"type": "string"}
+                    }
+                },
+                "required": ["paths"]
+            }),
+        },
+        WireTool {
             name: "Glob",
             description: "Find files by glob pattern. Use this when you need to discover file paths before reading.",
             input_schema: serde_json::json!({
@@ -174,6 +189,102 @@ fn tool_schemas() -> Vec<WireTool> {
                     "head_limit": {"type": "integer", "description": "Limit output to first N entries. Use 0 for unlimited."}
                 },
                 "required": ["pattern"]
+            }),
+        },
+        WireTool {
+            name: "Write",
+            description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file to create or replace."},
+                    "content": {"type": "string", "description": "Complete file contents to write."}
+                },
+                "required": ["file_path", "content"]
+            }),
+        },
+        WireTool {
+            name: "Edit",
+            description: "Perform an exact string replacement in an existing file. Read the file first; old_string must match current contents exactly and be unique unless replace_all is true.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file to modify."},
+                    "old_string": {"type": "string", "description": "Exact text to replace."},
+                    "new_string": {"type": "string", "description": "Replacement text."},
+                    "replace_all": {"type": "boolean", "description": "Replace all occurrences. Defaults to false."}
+                },
+                "required": ["file_path", "old_string", "new_string"]
+            }),
+        },
+        WireTool {
+            name: "Bash",
+            description: "Execute a single-line shell command in the current workspace. Prefer Read/Edit/Write/Glob/Grep for file work; use Bash for builds, tests, git, package managers, and shell-only operations.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Single-line shell command to execute."},
+                    "timeout": {"type": "integer", "description": "Optional timeout in milliseconds, maximum 600000."},
+                    "description": {"type": "string", "description": "Short description of what the command does."},
+                    "run_in_background": {"type": "boolean", "description": "Start command and return immediately."}
+                },
+                "required": ["command"]
+            }),
+        },
+        WireTool {
+            name: "TodoWrite",
+            description: "Replace the complete todo list for the current task. Use this to track multi-step progress.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "The complete todo list to write. Replaces the previous list entirely.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string", "description": "Todo item content."},
+                                "status": {"type": "string", "description": "pending, in_progress, completed, or deleted."},
+                                "activeForm": {"type": "string", "description": "Optional active phrasing for the current work."}
+                            },
+                            "required": ["content"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }),
+        },
+        WireTool {
+            name: "TaskList",
+            description: "List the current in-memory todo tasks with status icons.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        WireTool {
+            name: "TaskGet",
+            description: "Get full details for one in-memory todo task by ID. Use TaskList first to discover IDs.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "The ID of the task to retrieve."}
+                },
+                "required": ["taskId"]
+            }),
+        },
+        WireTool {
+            name: "TaskUpdate",
+            description: "Update an in-memory todo task by ID. Supports status, subject, description, and status=deleted.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "The ID of the task to update."},
+                    "status": {"type": "string", "description": "pending, in_progress, completed, or deleted."},
+                    "subject": {"type": "string", "description": "New subject for the task."},
+                    "description": {"type": "string", "description": "New description for the task."}
+                },
+                "required": ["taskId"]
             }),
         },
     ]
@@ -266,7 +377,7 @@ fn classify_error(status: u16, body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{messages_url, parse_messages_response};
+    use super::{WireMessage, build_messages_request, messages_url, parse_messages_response};
     use std::time::Duration;
 
     #[test]
@@ -345,5 +456,92 @@ mod tests {
         assert_eq!(response.tool_calls[0].name, "Read");
         assert_eq!(response.tool_calls[0].input["file_path"], "README.md");
         assert_eq!(response.tool_calls[0].input["limit"], 5);
+    }
+
+    #[test]
+    fn messages_request_declares_core_mutating_tool_schemas() {
+        let request = build_messages_request(
+            "test-model",
+            [WireMessage {
+                role: "user",
+                content: vec![super::WireContentBlock::text("write a file")],
+            }],
+            100,
+        );
+
+        let write = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "Write")
+            .expect("Write tool schema should be declared");
+        assert_eq!(
+            write.input_schema["required"],
+            serde_json::json!(["file_path", "content"])
+        );
+
+        let edit = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "Edit")
+            .expect("Edit tool schema should be declared");
+        assert_eq!(
+            edit.input_schema["required"],
+            serde_json::json!(["file_path", "old_string", "new_string"])
+        );
+
+        let bash = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "Bash")
+            .expect("Bash tool schema should be declared");
+        assert_eq!(
+            bash.input_schema["required"],
+            serde_json::json!(["command"])
+        );
+
+        let read_files = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "ReadFiles")
+            .expect("ReadFiles tool schema should be declared");
+        assert_eq!(
+            read_files.input_schema["required"],
+            serde_json::json!(["paths"])
+        );
+
+        let todo_write = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TodoWrite")
+            .expect("TodoWrite tool schema should be declared");
+        assert_eq!(
+            todo_write.input_schema["required"],
+            serde_json::json!(["todos"])
+        );
+
+        assert!(
+            request.tools.iter().any(|tool| tool.name == "TaskList"),
+            "TaskList tool schema should be declared"
+        );
+
+        let task_get = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TaskGet")
+            .expect("TaskGet tool schema should be declared");
+        assert_eq!(
+            task_get.input_schema["required"],
+            serde_json::json!(["taskId"])
+        );
+
+        let task_update = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TaskUpdate")
+            .expect("TaskUpdate tool schema should be declared");
+        assert_eq!(
+            task_update.input_schema["required"],
+            serde_json::json!(["taskId"])
+        );
     }
 }

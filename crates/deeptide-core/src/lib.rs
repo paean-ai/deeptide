@@ -24,6 +24,13 @@ pub use completion::{
     Replacement,
 };
 pub use cost::{CacheHealth, CostSummary, CostTracker, ModelPricing, TurnRecord, TurnUsage};
+pub use permissions::{
+    PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
+    ToolInput,
+};
 pub use repl::{ReplEvent, ReplSession};
 pub use tool_result_summary::ToolResultSummaryFormatter;
-pub use tools::{GlobTool, GrepTool, ReadTool, Tool, ToolContext, ToolRegistry, ToolResult};
+pub use tools::{
+    BashTool, EditTool, GlobTool, GrepTool, ReadFilesTool, ReadTool, TaskGetTool, TaskListTool,
+    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, WriteTool,
+};

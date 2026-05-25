@@ -1,4 +1,7 @@
-use deeptide_core::{ToolContext, ToolRegistry};
+use deeptide_core::{
+    BashTool, EditTool, ReadFilesTool, TaskGetTool, TaskListTool, TaskUpdateTool, TodoWriteTool,
+    Tool, ToolContext, ToolRegistry, WriteTool,
+};
 
 #[test]
 fn read_tool_reads_text_file_with_line_numbers() {
@@ -51,6 +54,73 @@ fn read_tool_reports_missing_files_with_hint() {
 }
 
 #[test]
+fn read_files_tool_reads_multiple_files_with_headers() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("a.txt"), "alpha\n").expect("write fixture");
+    std::fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    std::fs::write(temp.path().join("src/b.txt"), "bravo\ncharlie\n").expect("write fixture");
+
+    let result = ReadFilesTool.call(
+        serde_json::json!({"paths": ["a.txt", "src/b.txt"]}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("===== a.txt =====\n1\talpha"));
+    assert!(
+        result
+            .content
+            .contains("===== src/b.txt =====\n1\tbravo\n2\tcharlie")
+    );
+}
+
+#[test]
+fn read_files_tool_keeps_per_file_errors_in_result() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("src")).expect("mkdir");
+    std::fs::write(temp.path().join("ok.txt"), "alpha\n").expect("write fixture");
+
+    let result = ReadFilesTool.call(
+        serde_json::json!({"paths": ["ok.txt", "missing.txt", "src"]}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("===== ok.txt ====="));
+    assert!(
+        result
+            .content
+            .contains("===== missing.txt =====\n[Error: File does not exist")
+    );
+    assert!(
+        result
+            .content
+            .contains("===== src =====\n[Error: Path is a directory")
+    );
+}
+
+#[test]
+fn read_files_tool_rejects_empty_and_oversized_batches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let empty = ReadFilesTool.call(
+        serde_json::json!({"paths": []}),
+        &ToolContext::new(temp.path()),
+    );
+    assert!(empty.is_error);
+    assert_eq!(empty.content, "No paths provided");
+
+    let paths = (0..51)
+        .map(|index| format!("{index}.txt"))
+        .collect::<Vec<_>>();
+    let oversized = ReadFilesTool.call(
+        serde_json::json!({"paths": paths}),
+        &ToolContext::new(temp.path()),
+    );
+    assert!(oversized.is_error);
+    assert!(oversized.content.contains("exceeds 50 entries"));
+}
+
+#[test]
 fn registry_reports_unknown_tools() {
     let result = ToolRegistry::with_builtin_tools().call(
         "Nope",
@@ -60,6 +130,214 @@ fn registry_reports_unknown_tools() {
 
     assert!(result.is_error);
     assert_eq!(result.content, "Unknown tool: Nope");
+}
+
+#[test]
+fn bash_tool_executes_commands_in_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\n").expect("write fixture");
+
+    let result = BashTool.call(
+        serde_json::json!({"command": list_workspace_command()}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("notes.txt"));
+}
+
+#[test]
+fn bash_tool_reports_stderr_and_exit_status_as_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = BashTool.call(
+        serde_json::json!({"command": stderr_failure_command()}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("[stderr]"));
+    assert!(result.content.contains("boom"));
+}
+
+#[test]
+fn bash_tool_rejects_multiline_commands() {
+    let result = BashTool.call(
+        serde_json::json!({"command": "echo one\necho two"}),
+        &ToolContext::new("."),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("command must be a single line"));
+}
+
+#[test]
+fn todo_write_tool_updates_in_memory_list() {
+    let result = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Inspect Swift behavior", "status": "completed"},
+                {"content": "Port Rust behavior", "status": "in_progress", "activeForm": "Porting"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "Todo list updated (2 items). Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable."
+    );
+}
+
+#[test]
+fn todo_write_tool_clears_when_all_tasks_complete() {
+    let result = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Finish", "status": "completed"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "Todo list cleared (all tasks completed). Proceed with your summary."
+    );
+}
+
+#[test]
+fn todo_write_tool_rejects_missing_todos_array() {
+    let result = TodoWriteTool.call(serde_json::json!({}), &ToolContext::new("."));
+
+    assert!(result.is_error);
+    assert_eq!(result.content, "Missing or invalid todos array");
+}
+
+#[test]
+fn task_list_tool_lists_current_todos() {
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Plan work", "status": "completed"},
+                {"content": "Implement work", "status": "in_progress"},
+                {"content": "Verify work", "status": "pending"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let result = TaskListTool.call(serde_json::json!({}), &ToolContext::new("."));
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "#1 ⌬ Plan work\n#2 ◉ Implement work\n#3 ○ Verify work"
+    );
+}
+
+#[test]
+fn task_list_tool_reports_empty_list() {
+    let _ = TodoWriteTool.call(serde_json::json!({"todos": []}), &ToolContext::new("."));
+
+    let result = TaskListTool.call(serde_json::json!({}), &ToolContext::new("."));
+
+    assert!(!result.is_error);
+    assert_eq!(result.content, "No tasks.");
+}
+
+#[test]
+fn task_get_tool_returns_task_details() {
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Plan work", "status": "completed"},
+                {"content": "Implement work", "status": "in_progress", "activeForm": "Porting the task"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let result = TaskGetTool.call(serde_json::json!({"taskId": "2"}), &ToolContext::new("."));
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "Task: Implement work\nID: 2\nStatus: in_progress\nDescription: Porting the task"
+    );
+}
+
+#[test]
+fn task_get_tool_reports_missing_and_unknown_ids() {
+    let missing = TaskGetTool.call(serde_json::json!({}), &ToolContext::new("."));
+    assert!(missing.is_error);
+    assert_eq!(missing.content, "Missing taskId parameter");
+
+    let unknown = TaskGetTool.call(serde_json::json!({"taskId": "99"}), &ToolContext::new("."));
+    assert!(unknown.is_error);
+    assert_eq!(unknown.content, "Task not found: 99");
+}
+
+#[test]
+fn task_update_tool_updates_status_subject_and_description() {
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Implement work", "status": "pending"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let result = TaskUpdateTool.call(
+        serde_json::json!({
+            "taskId": "1",
+            "status": "in_progress",
+            "subject": "Implement Rust task update",
+            "description": "Updating task metadata"
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.content,
+        "Task #1 updated: status -> in_progress, subject updated, description updated"
+    );
+
+    let detail = TaskGetTool.call(serde_json::json!({"taskId": "1"}), &ToolContext::new("."));
+    assert_eq!(
+        detail.content,
+        "Task: Implement Rust task update\nID: 1\nStatus: in_progress\nDescription: Updating task metadata"
+    );
+}
+
+#[test]
+fn task_update_tool_deletes_tasks_and_reports_no_changes() {
+    let _ = TodoWriteTool.call(
+        serde_json::json!({
+            "todos": [
+                {"content": "Remove me", "status": "pending"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    let deleted = TaskUpdateTool.call(
+        serde_json::json!({"taskId": "1", "status": "deleted"}),
+        &ToolContext::new("."),
+    );
+    assert!(!deleted.is_error);
+    assert_eq!(deleted.content, "Task #1 deleted");
+
+    let unchanged = TaskUpdateTool.call(serde_json::json!({"taskId": "1"}), &ToolContext::new("."));
+    assert!(!unchanged.is_error);
+    assert_eq!(
+        unchanged.content,
+        "Task #1: no changes (task may not exist)"
+    );
 }
 
 #[test]
@@ -114,4 +392,179 @@ fn grep_tool_content_mode_includes_line_numbers() {
     assert!(!result.is_error);
     assert!(result.content.contains("notes.txt:1:alpha"));
     assert!(result.content.contains("notes.txt:3:alphabet"));
+}
+
+#[test]
+fn write_tool_creates_parent_directories_and_normalizes_line_endings() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = WriteTool.call(
+        serde_json::json!({"file_path": "src/notes.txt", "content": "alpha\r\nbeta\rgamma\n"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Created file: notes.txt"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("src/notes.txt")).expect("read written file"),
+        "alpha\nbeta\ngamma\n"
+    );
+}
+
+#[test]
+fn write_tool_reports_updated_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "old").expect("write fixture");
+
+    let result = WriteTool.call(
+        serde_json::json!({"file_path": "notes.txt", "content": "new"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Updated file: notes.txt"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("read written file"),
+        "new"
+    );
+}
+
+#[test]
+fn write_tool_reports_missing_content() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = WriteTool.call(
+        serde_json::json!({"file_path": "notes.txt"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("string `content` field"));
+}
+
+#[test]
+fn edit_tool_replaces_one_exact_match() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\ngamma\n").expect("write fixture");
+
+    let result = EditTool.call(
+        serde_json::json!({
+            "file_path": "notes.txt",
+            "old_string": "beta",
+            "new_string": "bravo"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(
+        result
+            .content
+            .contains("File edited successfully: notes.txt")
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("read edited file"),
+        "alpha\nbravo\ngamma\n"
+    );
+}
+
+#[test]
+fn edit_tool_requires_replace_all_for_multiple_matches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha alpha\n").expect("write fixture");
+
+    let result = EditTool.call(
+        serde_json::json!({
+            "file_path": "notes.txt",
+            "old_string": "alpha",
+            "new_string": "bravo"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("old_string matches 2 locations"));
+}
+
+#[test]
+fn edit_tool_replace_all_updates_every_match() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha alpha\n").expect("write fixture");
+
+    let result = EditTool.call(
+        serde_json::json!({
+            "file_path": "notes.txt",
+            "old_string": "alpha",
+            "new_string": "bravo",
+            "replace_all": true
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("all 2 occurrences"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("read edited file"),
+        "bravo bravo\n"
+    );
+}
+
+#[test]
+fn edit_tool_can_create_file_when_old_string_is_empty() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = EditTool.call(
+        serde_json::json!({
+            "file_path": "src/new.txt",
+            "old_string": "",
+            "new_string": "created\n"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(result.content, "Created new file: new.txt");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("src/new.txt")).expect("read created file"),
+        "created\n"
+    );
+}
+
+#[test]
+fn edit_tool_reports_missing_old_string_with_reread_guidance() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\n").expect("write fixture");
+
+    let result = EditTool.call(
+        serde_json::json!({
+            "file_path": "notes.txt",
+            "old_string": "beta",
+            "new_string": "bravo"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("old_string not found in file"));
+    assert!(result.content.contains("Please re-read the file"));
+}
+
+#[cfg(windows)]
+fn list_workspace_command() -> &'static str {
+    "dir /b"
+}
+
+#[cfg(not(windows))]
+fn list_workspace_command() -> &'static str {
+    "ls"
+}
+
+#[cfg(windows)]
+fn stderr_failure_command() -> &'static str {
+    "echo boom 1>&2 && exit /b 7"
+}
+
+#[cfg(not(windows))]
+fn stderr_failure_command() -> &'static str {
+    "echo boom >&2; exit 7"
 }

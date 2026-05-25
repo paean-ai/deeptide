@@ -172,7 +172,9 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let (backend, model, is_configured) = configured_backend(cli)?;
-    let mut repl = ReplSession::new(backend).with_model(model);
+    let mut repl = ReplSession::new(backend)
+        .with_model(model)
+        .with_permission_mode(permission_mode);
 
     writeln!(stdout, "{}", repl.banner()).map_err(|error| error.to_string())?;
     writeln!(
@@ -214,7 +216,7 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
 }
 
 fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Result<(), String> {
-    let response = run_prompt(cli, prompt)?;
+    let response = run_prompt(cli, prompt, permission_mode)?;
 
     match cli.output_format {
         OutputFormat::Text => {
@@ -261,9 +263,11 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
     Ok(())
 }
 
-fn run_prompt(cli: &Cli, prompt: &str) -> Result<String, String> {
+fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Result<String, String> {
     let (backend, model, _) = configured_backend(cli)?;
-    let mut loop_ = AgentLoop::new(backend).with_model(model);
+    let mut loop_ = AgentLoop::new(backend)
+        .with_model(model)
+        .with_permission_mode(permission_mode);
 
     let events = loop_.run(prompt);
     let mut assistant = None;

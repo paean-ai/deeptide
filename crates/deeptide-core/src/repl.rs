@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, ClearCommand,
     CommandCompletionSource, CommandContext, CommandResult, CompactCommand, CostCommand,
-    HelpCommand, MemoryCommand, NewCommand, RememberCommand, SlashCommand, ToolContext,
-    ToolRegistry,
+    HelpCommand, MemoryCommand, NewCommand, PermissionMode, RememberCommand, SlashCommand, Tool,
+    ToolContext, ToolRegistry, WriteTool,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +40,12 @@ impl ReplSession {
 
     pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
         self.tool_context = ToolContext::new(cwd);
+        self.agent_loop = self.agent_loop.with_cwd(self.tool_context.cwd.clone());
+        self
+    }
+
+    pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.agent_loop = self.agent_loop.with_permission_mode(mode);
         self
     }
 
@@ -95,6 +101,7 @@ impl ReplSession {
             "compact" | "compress" => CompactCommand.execute(args, &context),
             "cost" => CostCommand.execute(args, &context),
             "read" => self.execute_read_command(args),
+            "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
             "remember" => RememberCommand.execute(args, &context),
             _ => CommandResult::Text(format!(
@@ -126,6 +133,22 @@ impl ReplSession {
         let result =
             self.tool_registry
                 .call("Read", serde_json::Value::Object(input), &self.tool_context);
+        CommandResult::Text(result.content)
+    }
+
+    fn execute_write_command(&self, args: &str) -> CommandResult {
+        let parsed = match parse_write_args(args) {
+            Ok(parsed) => parsed,
+            Err(message) => return CommandResult::Text(message),
+        };
+
+        let result = WriteTool.call(
+            serde_json::json!({
+                "file_path": parsed.file_path,
+                "content": parsed.content,
+            }),
+            &self.tool_context,
+        );
         CommandResult::Text(result.content)
     }
 
@@ -194,6 +217,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "Read a text file with optional line range",
             "/read <path> [--offset N] [--limit N]",
         ),
+        CommandCompletionSource::new(
+            "write",
+            Vec::<&str>::new(),
+            "Write complete text to a file",
+            "/write <path> <content>",
+        ),
         CommandCompletionSource::from_command(&MemoryCommand),
         CommandCompletionSource::from_command(&RememberCommand),
     ]
@@ -204,6 +233,12 @@ struct ReadArgs {
     file_path: String,
     offset: Option<usize>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WriteArgs {
+    file_path: String,
+    content: String,
 }
 
 fn parse_read_args(args: &str) -> Result<ReadArgs, String> {
@@ -260,6 +295,32 @@ fn parse_read_args(args: &str) -> Result<ReadArgs, String> {
         offset,
         limit,
     })
+}
+
+fn parse_write_args(args: &str) -> Result<WriteArgs, String> {
+    let trimmed = args.trim_start();
+    if trimmed.is_empty() {
+        return Err(String::from("Usage: /write <path> <content>"));
+    }
+
+    let mut split_at = None;
+    for (index, character) in trimmed.char_indices() {
+        if character.is_whitespace() {
+            split_at = Some(index);
+            break;
+        }
+    }
+
+    let Some(split_at) = split_at else {
+        return Err(String::from("Usage: /write <path> <content>"));
+    };
+    let file_path = trimmed[..split_at].to_owned();
+    let content = trimmed[split_at..].trim_start().to_owned();
+    if content.is_empty() {
+        return Err(String::from("Usage: /write <path> <content>"));
+    }
+
+    Ok(WriteArgs { file_path, content })
 }
 
 fn split_shell_like(input: &str) -> Vec<String> {
