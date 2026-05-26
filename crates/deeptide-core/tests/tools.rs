@@ -2,10 +2,10 @@ use deeptide_core::{
     AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
     CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
     FileMetadataTool, ImagePreprocessTool, LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool,
-    MemoryWriteTool, MonitorTool, ReadFilesTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool,
-    SnipTool, SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
-    TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool,
-    WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
+    MemoryWriteTool, MonitorTool, PublishTool, ReadFilesTool, ReviewArtifactTool,
+    ScreenCaptureTool, SkillTool, SnipTool, SpotlightSearchTool, TaskCreateTool, TaskGetTool,
+    TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext,
+    ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -898,6 +898,98 @@ fn skill_tool_expands_builtin_skill_prompts_and_reports_unknown_names() {
     assert!(unknown.content.contains("Unknown skill: missing"));
     assert!(unknown.content.contains("commit"));
     assert!(unknown.content.contains("publish"));
+}
+
+#[test]
+fn publish_tool_renders_status_and_validates_option_conflicts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temp.path());
+
+    let status = PublishTool.call(serde_json::json!({"status": true}), &context);
+    assert!(!status.is_error);
+    assert!(
+        status
+            .content
+            .contains("No saved clide.app publish state at .clide/publish.json")
+    );
+
+    let conflict = PublishTool.call(
+        serde_json::json!({"status": true, "dry_run": true}),
+        &context,
+    );
+    assert!(conflict.is_error);
+    assert_eq!(
+        conflict.content,
+        "status cannot be combined with publish/delete options."
+    );
+
+    let handle_conflict = PublishTool.call(
+        serde_json::json!({"random": true, "handle": "demo"}),
+        &context,
+    );
+    assert!(handle_conflict.is_error);
+    assert_eq!(
+        handle_conflict.content,
+        "Use either random or handle, not both."
+    );
+}
+
+#[test]
+fn publish_tool_dry_run_detects_static_output_and_writes_safety_ignore() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dist = temp.path().join("dist");
+    std::fs::create_dir_all(&dist).expect("mkdir");
+    std::fs::write(dist.join("index.html"), "<h1>Hello</h1>").expect("index");
+    std::fs::write(dist.join("app.js"), "console.log('ok');").expect("asset");
+    std::fs::write(dist.join("app.js.map"), "{}").expect("sourcemap");
+    std::fs::create_dir_all(dist.join("node_modules/pkg")).expect("node_modules");
+    std::fs::write(dist.join("node_modules/pkg/private.js"), "ignored").expect("ignored");
+
+    let result = PublishTool.call(
+        serde_json::json!({"dry_run": true, "handle": "demo"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("Publish dry run: ready"));
+    assert!(result.content.contains("Directory:  dist"));
+    assert!(result.content.contains("Handle:     demo"));
+    assert!(result.content.contains("Index:      yes"));
+    assert!(!result.content.contains("app.js.map"));
+    assert!(!result.content.contains("Source maps are included"));
+    assert!(!result.content.contains("private.js"));
+
+    let ignore = std::fs::read_to_string(temp.path().join(".clideignore")).expect("ignore");
+    assert!(ignore.contains("# Added by Clide publish safety defaults"));
+    assert!(ignore.contains(".env"));
+    assert!(ignore.contains("node_modules/"));
+}
+
+#[test]
+fn publish_tool_reports_missing_output_and_upload_not_implemented() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = PublishTool.call(
+        serde_json::json!({"dry_run": true}),
+        &ToolContext::new(temp.path()),
+    );
+    assert!(missing.is_error);
+    assert!(
+        missing
+            .content
+            .contains("No publishable static directory found")
+    );
+
+    let public = temp.path().join("public");
+    std::fs::create_dir_all(&public).expect("mkdir public");
+    std::fs::write(public.join("index.html"), "<html></html>").expect("index");
+    let upload = PublishTool.call(serde_json::json!({}), &ToolContext::new(temp.path()));
+    assert!(upload.is_error);
+    assert!(upload.content.contains("Publish dry run: ready"));
+    assert!(
+        upload
+            .content
+            .contains("Publish upload requires Paean publish API support")
+    );
 }
 
 #[test]

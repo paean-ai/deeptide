@@ -110,6 +110,7 @@ impl ToolRegistry {
         registry.register(Box::<CronDeleteTool>::default());
         registry.register(Box::<ReviewArtifactTool>::default());
         registry.register(Box::<SkillTool>::default());
+        registry.register(Box::<PublishTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
@@ -1405,6 +1406,9 @@ pub struct ReviewArtifactTool;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SkillTool;
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PublishTool;
+
 #[derive(Debug, Clone, Copy)]
 struct BuiltinSkill {
     name: &'static str,
@@ -1751,6 +1755,85 @@ impl Tool for SkillTool {
         let expanded = expand_skill_prompt(skill.prompt, args);
         ToolResult::text(format!(
             "Skill invoked: {skill_name}\n\n[SKILL PROMPT START]\n{expanded}\n[SKILL PROMPT END]\n\nFollow the instructions above. The skill specifies what to do and how to do it."
+        ))
+    }
+}
+
+impl Tool for PublishTool {
+    fn name(&self) -> &'static str {
+        "Publish"
+    }
+
+    fn description(&self) -> &'static str {
+        "Prepare, inspect, or delete a static frontend publish on clide.app."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let options = match PublishOptions::from_input(&input) {
+            Ok(options) => options,
+            Err(message) => return ToolResult::error(message),
+        };
+        if options.status {
+            return ToolResult::text(render_publish_status(context));
+        }
+        if options.delete {
+            let handle = options
+                .handle
+                .clone()
+                .or_else(|| load_publish_state(context).and_then(|state| state.handle));
+            let Some(handle) = handle.filter(|value| !value.trim().is_empty()) else {
+                return ToolResult::error(
+                    "No handle specified and no saved `.clide/publish.json` handle found.",
+                );
+            };
+            return ToolResult::error(format!(
+                "Publish delete for {handle}.clide.app requires Paean publish API support, which is not implemented in this Rust port yet. Use `tide publish --delete --handle {handle}` from the Swift CLI for remote deletion."
+            ));
+        }
+
+        let publish_dir = match resolve_publish_dir(context, options.dir.as_deref()) {
+            Ok(path) => path,
+            Err(message) => return ToolResult::error(message),
+        };
+        if let Err(message) = ensure_clideignore_safety_defaults(&context.cwd) {
+            return ToolResult::error(message);
+        }
+        let patterns = load_clideignore_patterns(&context.cwd);
+        let files = match collect_publish_files(&context.cwd, &publish_dir, &patterns) {
+            Ok(files) => files,
+            Err(message) => return ToolResult::error(message),
+        };
+        if !files.iter().any(|file| file == "index.html") {
+            return ToolResult::error(
+                "Publish archive must include top-level `index.html` after `.clideignore` filtering.",
+            );
+        }
+        if files.is_empty() {
+            return ToolResult::error("Publish archive would contain no files.");
+        }
+
+        let state_handle = load_publish_state(context).and_then(|state| state.handle);
+        let handle = if options.random {
+            None
+        } else {
+            options.handle.clone().or(state_handle)
+        };
+        let plan =
+            match build_publish_plan(&context.cwd, &publish_dir, &files, handle, options.random) {
+                Ok(plan) => plan,
+                Err(message) => return ToolResult::error(message),
+            };
+        if options.dry_run {
+            return ToolResult::text(render_publish_dry_run(&plan));
+        }
+
+        ToolResult::error(format!(
+            "{}\n\nPublish upload requires Paean publish API support, which is not implemented in this Rust port yet. Re-run with dry_run:true to inspect the archive, or use the Swift CLI for the final upload.",
+            render_publish_dry_run(&plan)
         ))
     }
 }
@@ -3793,6 +3876,442 @@ fn expand_skill_prompt(prompt: &str, args: Option<&str>) -> String {
     expanded
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishOptions {
+    dir: Option<String>,
+    handle: Option<String>,
+    random: bool,
+    delete: bool,
+    dry_run: bool,
+    status: bool,
+}
+
+impl PublishOptions {
+    fn from_input(input: &serde_json::Value) -> Result<Self, String> {
+        let option = |key: &str| {
+            input
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        };
+        let options = Self {
+            dir: option("dir"),
+            handle: option("handle"),
+            random: input
+                .get("random")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            delete: input
+                .get("delete")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            dry_run: input
+                .get("dry_run")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            status: input
+                .get("status")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        };
+        if options.random && options.handle.is_some() {
+            return Err(String::from("Use either random or handle, not both."));
+        }
+        if options.delete && options.random {
+            return Err(String::from("Use either delete or random, not both."));
+        }
+        if options.delete && options.dir.is_some() {
+            return Err(String::from(
+                "dir is only valid when publishing, not deleting.",
+            ));
+        }
+        if options.status
+            && (options.delete
+                || options.dry_run
+                || options.dir.is_some()
+                || options.handle.is_some()
+                || options.random)
+        {
+            return Err(String::from(
+                "status cannot be combined with publish/delete options.",
+            ));
+        }
+        Ok(options)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PublishState {
+    handle: Option<String>,
+    url: Option<String>,
+    #[serde(rename = "publishDir")]
+    publish_dir: Option<String>,
+    #[serde(rename = "fileCount")]
+    file_count: Option<u64>,
+    #[serde(rename = "totalBytes")]
+    total_bytes: Option<u64>,
+    #[serde(rename = "publishedAt")]
+    published_at: Option<String>,
+    #[serde(rename = "deletedAt")]
+    deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishPlan {
+    publish_dir_relative: String,
+    handle_description: String,
+    file_count: usize,
+    total_bytes: u64,
+    has_index: bool,
+    sample_files: Vec<String>,
+    notes: Vec<String>,
+}
+
+const CLIDEIGNORE_FILE: &str = ".clideignore";
+const CLIDEIGNORE_HEADER: &str = "# Added by Clide publish safety defaults";
+const CLIDEIGNORE_SAFETY_PATTERNS: &[&str] = &[
+    ".clide/",
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "id_rsa*",
+    ".npmrc",
+    ".aws/",
+    ".gcloud/",
+    "service-account*.json",
+    "secrets/",
+    "private/",
+    "node_modules/",
+    ".git/",
+    ".next/cache/",
+    "dist/*.map",
+    ".vscode/",
+    ".idea/",
+    "coverage/",
+    "*.log",
+    ".DS_Store",
+    "Thumbs.db",
+    "*.tmp",
+];
+
+fn render_publish_status(context: &ToolContext) -> String {
+    let Some(state) = load_publish_state(context) else {
+        return String::from("No saved clide.app publish state at .clide/publish.json");
+    };
+    let mut lines = vec![String::from("Clide publish status")];
+    if let Some(handle) = state.handle {
+        lines.push(format!("  Handle:      {handle}"));
+    }
+    if let Some(url) = state.url {
+        lines.push(format!("  URL:         {url}"));
+    }
+    if let Some(dir) = state.publish_dir {
+        lines.push(format!("  Directory:   {dir}"));
+    }
+    if let Some(file_count) = state.file_count {
+        lines.push(format!("  Files:       {file_count}"));
+    }
+    if let Some(total_bytes) = state.total_bytes {
+        lines.push(format!("  Bytes:       {total_bytes}"));
+    }
+    if let Some(published_at) = state.published_at {
+        lines.push(format!("  Published:   {published_at}"));
+    }
+    if let Some(deleted_at) = state.deleted_at {
+        lines.push(format!("  Deleted:     {deleted_at}"));
+    }
+    lines.push(String::from("  State:       .clide/publish.json"));
+    lines.join("\n")
+}
+
+fn load_publish_state(context: &ToolContext) -> Option<PublishState> {
+    let path = context.cwd.join(".clide").join("publish.json");
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn resolve_publish_dir(
+    context: &ToolContext,
+    explicit_dir: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(dir) = explicit_dir {
+        let path = context.resolve_path(dir);
+        if !path.is_dir() {
+            return Err(format!("Publish directory does not exist: {dir}"));
+        }
+        if !path.join("index.html").is_file() {
+            return Err(format!(
+                "Publish directory must contain a top-level `index.html`: {dir}"
+            ));
+        }
+        return Ok(path);
+    }
+
+    for candidate in ["dist", "build", "out", ".output/public", "public"] {
+        let path = context.cwd.join(candidate);
+        if path.is_dir() && path.join("index.html").is_file() {
+            return Ok(normalize_path(path));
+        }
+    }
+    if context.cwd.join("index.html").is_file() {
+        return Ok(normalize_path(context.cwd.clone()));
+    }
+    if package_json_has_build_script(&context.cwd) {
+        return Err(String::from(
+            "No built output with top-level `index.html` found. This project has a package.json build script; run the build first, then publish dist, build, out, .output/public, public, or project root.",
+        ));
+    }
+    Err(String::from(
+        "No publishable static directory found. Expected top-level `index.html` in `dist`, `build`, `out`, `.output/public`, `public`, or project root.",
+    ))
+}
+
+fn package_json_has_build_script(project_root: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(project_root.join("package.json")) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| value.get("scripts").cloned())
+        .and_then(|scripts| scripts.get("build").cloned())
+        .is_some()
+}
+
+fn ensure_clideignore_safety_defaults(project_root: &Path) -> Result<(), String> {
+    let path = project_root.join(CLIDEIGNORE_FILE);
+    let exists = path.exists();
+    let mut text = if exists {
+        fs::read_to_string(&path)
+            .map_err(|error| format!("Failed to read .clideignore: {error}"))?
+    } else {
+        String::from(
+            "# .clideignore - files and folders excluded from Clide publish.\n# Gitignore-style: one pattern per line, # for comments.\n# The .clideignore file itself is never published.\n\n",
+        )
+    };
+    let existing = load_clideignore_patterns_from_text(&text)
+        .into_iter()
+        .map(|pattern| normalize_publish_ignore_pattern(&pattern))
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing = CLIDEIGNORE_SAFETY_PATTERNS
+        .iter()
+        .filter(|pattern| !existing.contains(normalize_publish_ignore_pattern(pattern).as_str()))
+        .copied()
+        .collect::<Vec<_>>();
+    if exists && missing.is_empty() {
+        return Ok(());
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !text.contains(CLIDEIGNORE_HEADER) {
+        if !text.ends_with("\n\n") {
+            text.push('\n');
+        }
+        text.push_str(CLIDEIGNORE_HEADER);
+        text.push('\n');
+    }
+    for pattern in missing {
+        text.push_str(pattern);
+        text.push('\n');
+    }
+    fs::write(&path, text).map_err(|error| format!("Failed to write .clideignore: {error}"))
+}
+
+fn load_clideignore_patterns(project_root: &Path) -> Vec<String> {
+    fs::read_to_string(project_root.join(CLIDEIGNORE_FILE))
+        .map(|text| load_clideignore_patterns_from_text(&text))
+        .unwrap_or_default()
+}
+
+fn load_clideignore_patterns_from_text(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(normalize_publish_ignore_pattern)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn normalize_publish_ignore_pattern(pattern: &str) -> String {
+    pattern.trim().trim_end_matches('/').to_owned()
+}
+
+fn collect_publish_files(
+    project_root: &Path,
+    publish_dir: &Path,
+    patterns: &[String],
+) -> Result<Vec<String>, String> {
+    let mut files = Vec::new();
+    collect_publish_files_inner(project_root, publish_dir, publish_dir, patterns, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_publish_files_inner(
+    project_root: &Path,
+    publish_root: &Path,
+    dir: &Path,
+    patterns: &[String],
+    files: &mut Vec<String>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|error| {
+        format!(
+            "Failed to read publish directory {}: {error}",
+            dir.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("Failed to read directory entry: {error}"))?;
+        let path = entry.path();
+        let rel_publish = relative_path_string(publish_root, &path);
+        let rel_project = relative_path_string(project_root, &path);
+        if rel_publish.contains('\n') {
+            return Err(format!(
+                "Cannot publish files with newline in path: {rel_publish}"
+            ));
+        }
+        if publish_path_is_ignored(&rel_project, &rel_publish, patterns) {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("Failed to inspect {}: {error}", path.display()))?;
+        if metadata.is_dir() {
+            collect_publish_files_inner(project_root, publish_root, &path, patterns, files)?;
+        } else if metadata.is_file() {
+            files.push(rel_publish);
+        }
+    }
+    Ok(())
+}
+
+fn publish_path_is_ignored(rel_project: &str, rel_publish: &str, patterns: &[String]) -> bool {
+    if rel_project == CLIDEIGNORE_FILE || rel_publish == CLIDEIGNORE_FILE {
+        return true;
+    }
+    if rel_project == ".clide" || rel_project.starts_with(".clide/") {
+        return true;
+    }
+    patterns.iter().any(|pattern| {
+        publish_pattern_matches(pattern, rel_project)
+            || publish_pattern_matches(pattern, rel_publish)
+    })
+}
+
+fn publish_pattern_matches(pattern: &str, relative_path: &str) -> bool {
+    let pattern = normalize_publish_ignore_pattern(pattern)
+        .trim_matches('/')
+        .to_owned();
+    let relative_path = relative_path
+        .replace('\\', "/")
+        .trim_matches('/')
+        .to_owned();
+    if pattern.is_empty() || relative_path.is_empty() {
+        return false;
+    }
+    if pattern.contains('/') {
+        return GlobMatcher::new(&pattern).matches(Path::new(&relative_path))
+            || relative_path.starts_with(&(pattern.clone() + "/"))
+            || GlobMatcher::new(&(pattern + "/*")).matches(Path::new(&relative_path));
+    }
+    relative_path
+        .split('/')
+        .any(|part| matches_glob_segment(part, &pattern))
+        || matches_glob_segment(&relative_path, &pattern)
+        || relative_path.starts_with(&(pattern + "/"))
+}
+
+fn build_publish_plan(
+    project_root: &Path,
+    publish_dir: &Path,
+    files: &[String],
+    handle: Option<String>,
+    random: bool,
+) -> Result<PublishPlan, String> {
+    let mut total_bytes = 0u64;
+    for file in files {
+        let metadata = fs::metadata(publish_dir.join(file))
+            .map_err(|error| format!("Failed to inspect {file}: {error}"))?;
+        total_bytes = total_bytes.saturating_add(metadata.len());
+    }
+    let mut notes = Vec::new();
+    if random {
+        notes.push(String::from(
+            "A new random handle will be assigned by the server.",
+        ));
+    } else if handle.is_none() {
+        notes.push(String::from(
+            "No saved or explicit handle; server will assign a handle.",
+        ));
+    } else {
+        notes.push(String::from(
+            "Existing or explicit handle will be overwritten if it already exists.",
+        ));
+    }
+    if files.iter().any(|file| file.ends_with(".map")) {
+        notes.push(String::from(
+            "Source maps are included; add a .clideignore rule if they should stay private.",
+        ));
+    }
+    Ok(PublishPlan {
+        publish_dir_relative: relative_path_string(project_root, publish_dir),
+        handle_description: if random {
+            String::from("(random)")
+        } else {
+            handle.unwrap_or_else(|| String::from("(server assigned)"))
+        },
+        file_count: files.len(),
+        total_bytes,
+        has_index: files.iter().any(|file| file == "index.html"),
+        sample_files: files.iter().take(6).cloned().collect(),
+        notes,
+    })
+}
+
+fn render_publish_dry_run(plan: &PublishPlan) -> String {
+    let rel_dir = if plan.publish_dir_relative.is_empty() {
+        "."
+    } else {
+        &plan.publish_dir_relative
+    };
+    let mut lines = vec![
+        String::from("Publish dry run: ready"),
+        format!("  Directory:  {rel_dir}"),
+        format!("  Handle:     {}", plan.handle_description),
+        format!("  Files:      {}", plan.file_count),
+        format!("  Bytes:      {}", plan.total_bytes),
+        format!(
+            "  Index:      {}",
+            if plan.has_index { "yes" } else { "no" }
+        ),
+        String::from("  Ignore:     .clideignore safety defaults present"),
+    ];
+    if !plan.sample_files.is_empty() {
+        lines.push(format!("  Sample:     {}", plan.sample_files.join(", ")));
+    }
+    if !plan.notes.is_empty() {
+        lines.push(String::from("  Notes:"));
+        lines.extend(plan.notes.iter().map(|note| format!("    - {note}")));
+    }
+    lines.join("\n")
+}
+
+fn relative_path_string(base: &Path, child: &Path) -> String {
+    let base = normalize_path(base.to_path_buf());
+    let child = normalize_path(child.to_path_buf());
+    child
+        .strip_prefix(&base)
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| child.to_string_lossy().replace('\\', "/"))
+        .trim_start_matches('/')
+        .to_owned()
+}
+
 fn run_spotlight_search(
     query: &str,
     scope: &Path,
@@ -4480,6 +4999,14 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
         "ReviewArtifact" => vec!["review", "human review", "flag", "artifact", "edited file"],
         "Skill" => vec![
             "skill", "prompt", "template", "workflow", "publish", "commit",
+        ],
+        "Publish" => vec![
+            "publish",
+            "deploy",
+            "clide.app",
+            "static site",
+            "dry run",
+            "unpublish",
         ],
         "Edit" => vec!["replace", "patch", "modify", "string replacement"],
         "FileMetadata" => vec!["xattr", "quarantine", "binary", "mime", "file type"],

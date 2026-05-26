@@ -565,6 +565,21 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "Publish",
+            description: "Prepare, inspect, or delete a static frontend publish on clide.app.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "dir": {"type": "string", "description": "Optional publish directory. Omit to auto-detect dist/build/out/.output/public/public/root."},
+                    "handle": {"type": "string", "description": "Optional custom clide.app handle or remote publish handle."},
+                    "random": {"type": "boolean", "description": "Set true only when the user explicitly asks for a new random handle."},
+                    "delete": {"type": "boolean", "description": "Set true to delete/unpublish the saved or specified remote publish."},
+                    "dry_run": {"type": "boolean", "description": "Inspect publish directory, handle, files, bytes, and ignore rules without uploading."},
+                    "status": {"type": "boolean", "description": "Show saved .clide/publish.json state without contacting the publish API."}
+                }
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -1040,6 +1055,7 @@ mod tests {
             "CronDelete",
             "ReviewArtifact",
             "Skill",
+            "Publish",
         ] {
             assert!(
                 request.tools.iter().any(|tool| tool.name == name),
