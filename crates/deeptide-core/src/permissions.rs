@@ -424,6 +424,7 @@ fn is_read_only(tool_name: &str) -> bool {
             | "SpotlightSearch"
             | "ScreenCapture"
             | "ImagePreprocess"
+            | "Vision"
             | "CrashLog"
             | "MacLog"
             | "MacDiagnose"

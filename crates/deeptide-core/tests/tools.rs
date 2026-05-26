@@ -5,7 +5,8 @@ use deeptide_core::{
     MemoryWriteTool, MonitorTool, PublishTool, ReadFilesTool, ReviewArtifactTool,
     ScreenCaptureTool, SkillTool, SnipTool, SpotlightSearchTool, TaskCreateTool, TaskGetTool,
     TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext,
-    ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
+    ToolRegistry, ToolSearchTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool,
+    memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -780,6 +781,62 @@ fn image_preprocess_tool_inspects_and_preprocesses_local_images() {
     assert!(preprocess.content.contains("steps: auto_trim"));
     assert!(preprocess.content.contains("format: image/png"));
     assert!(preprocess.content.contains("image_base64:"));
+}
+
+#[test]
+fn vision_tool_classifies_local_images_and_validates_input() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let image_path = temp.path().join("sample.png");
+    let mut image = image::RgbaImage::from_pixel(32, 24, image::Rgba([255, 255, 255, 255]));
+    for y in 8..16 {
+        for x in 10..22 {
+            image.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+        }
+    }
+    image.save(&image_path).expect("save fixture");
+
+    let context = ToolContext::new(temp.path());
+    let classify = VisionTool.call(
+        serde_json::json!({"file_path": "sample.png", "operation": "classify"}),
+        &context,
+    );
+    assert!(!classify.is_error);
+    assert!(classify.content.contains("[Vision.classify] sample.png"));
+    assert!(classify.content.contains("size: 32x24"));
+    assert!(classify.content.contains("labels: image"));
+    assert!(classify.content.contains("likely_blank: false"));
+    assert!(classify.content.contains("content_box: x="));
+
+    let invalid_operation = VisionTool.call(
+        serde_json::json!({"file_path": "sample.png", "operation": "inspect"}),
+        &context,
+    );
+    assert!(invalid_operation.is_error);
+    assert_eq!(
+        invalid_operation.content,
+        "operation must be one of: ocr, layout, classify"
+    );
+
+    let invalid_languages = VisionTool.call(
+        serde_json::json!({
+            "file_path": "sample.png",
+            "operation": "classify",
+            "language_hints": "eng"
+        }),
+        &context,
+    );
+    assert!(invalid_languages.is_error);
+    assert_eq!(
+        invalid_languages.content,
+        "language_hints must be an array of strings"
+    );
+
+    let missing = VisionTool.call(
+        serde_json::json!({"file_path": "missing.png", "operation": "classify"}),
+        &context,
+    );
+    assert!(missing.is_error);
+    assert!(missing.content.contains("File not found:"));
 }
 
 #[test]

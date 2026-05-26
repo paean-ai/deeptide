@@ -37,6 +37,6 @@ pub use tools::{
     MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, PublishTool, ReadFilesTool,
     ReadTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool, SnipTool, SpotlightSearchTool,
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, ToolSearchTool, WebFetchTool,
-    WebSearchTool, WriteTool,
+    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, ToolSearchTool, VisionTool,
+    WebFetchTool, WebSearchTool, WriteTool,
 };

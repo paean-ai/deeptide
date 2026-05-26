@@ -465,6 +465,25 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "Vision",
+            description: "Analyze local images and PDFs with OCR, layout extraction, or classification.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to an image or PDF file. Relative paths resolve against the current workspace."},
+                    "operation": {
+                        "type": "string",
+                        "description": "ocr, layout, or classify.",
+                        "enum": ["ocr", "layout", "classify"]
+                    },
+                    "pages": {"description": "PDF page number or range like 1-3. Defaults to the first page and caps ranges to five pages."},
+                    "language_hints": {"type": "array", "items": {"type": "string"}, "description": "Optional OCR language hints such as eng or jpn. Passed to local OCR backends when available."},
+                    "min_confidence": {"type": "number", "description": "Minimum OCR layout confidence from 0.0 to 1.0. Defaults to 0.5."}
+                },
+                "required": ["file_path", "operation"]
+            }),
+        },
+        WireTool {
             name: "CrashLog",
             description: "Inspect local macOS DiagnosticReports for crash, hang, spin, panic, and ips reports.",
             input_schema: serde_json::json!({
@@ -1047,6 +1066,7 @@ mod tests {
             "ScreenCapture",
             "LSP",
             "ImagePreprocess",
+            "Vision",
             "CrashLog",
             "MacLog",
             "MacDiagnose",
