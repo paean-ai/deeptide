@@ -6318,7 +6318,14 @@ struct McpServerConfig {
     command: Option<String>,
     args: Vec<String>,
     env: BTreeMap<String, String>,
+    framing: McpFraming,
     url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpFraming {
+    ContentLength,
+    NewlineJson,
 }
 
 fn render_mcp_list(kind: &str, target: Option<&str>, cwd: &Path) -> ToolResult {
@@ -6501,12 +6508,19 @@ fn collect_mcp_servers(
                     .collect::<BTreeMap<_, _>>()
             })
             .unwrap_or_default();
+        let framing = config
+            .get("framing")
+            .or_else(|| config.get("message_framing"))
+            .and_then(serde_json::Value::as_str)
+            .map(parse_mcp_framing)
+            .unwrap_or(McpFraming::ContentLength);
         servers.push(McpServerConfig {
             name: name.to_owned(),
             source: source.to_path_buf(),
             command,
             args,
             env,
+            framing,
             url,
         });
     }
@@ -6549,10 +6563,11 @@ fn call_mcp_server(
         .ok_or_else(|| format!("Failed to open stdout for MCP server {}", config.name))?;
     let stderr = child.stderr.take();
     let (tx, rx) = mpsc::channel();
+    let framing = config.framing;
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
-            match read_mcp_frame(&mut reader) {
+            match read_mcp_frame(&mut reader, framing) {
                 Ok(message) => {
                     if tx.send(Ok(message)).is_err() {
                         break;
@@ -6586,9 +6601,9 @@ fn call_mcp_server(
         "method": method,
         "params": params
     });
-    write_mcp_frame(&mut stdin, &initialize)
-        .and_then(|_| write_mcp_frame(&mut stdin, &initialized))
-        .and_then(|_| write_mcp_frame(&mut stdin, &request))
+    write_mcp_frame(&mut stdin, &initialize, config.framing)
+        .and_then(|_| write_mcp_frame(&mut stdin, &initialized, config.framing))
+        .and_then(|_| write_mcp_frame(&mut stdin, &request, config.framing))
         .map_err(|error| format!("Failed to write MCP request to {}: {error}", config.name))?;
     drop(stdin);
 
@@ -6653,14 +6668,58 @@ fn read_child_stderr(stderr: Option<std::process::ChildStderr>) -> String {
     }
 }
 
-fn write_mcp_frame(writer: &mut impl IoWrite, message: &serde_json::Value) -> io::Result<()> {
+fn parse_mcp_framing(raw: &str) -> McpFraming {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "newline" | "json-lines" | "jsonl" | "ndjson" => McpFraming::NewlineJson,
+        _ => McpFraming::ContentLength,
+    }
+}
+
+fn write_mcp_frame(
+    writer: &mut impl IoWrite,
+    message: &serde_json::Value,
+    framing: McpFraming,
+) -> io::Result<()> {
     let body = serde_json::to_vec(message).map_err(io::Error::other)?;
-    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
-    writer.write_all(&body)?;
+    match framing {
+        McpFraming::ContentLength => {
+            write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+            writer.write_all(&body)?;
+        }
+        McpFraming::NewlineJson => {
+            writer.write_all(&body)?;
+            writer.write_all(b"\n")?;
+        }
+    }
     writer.flush()
 }
 
-fn read_mcp_frame(reader: &mut impl BufRead) -> io::Result<serde_json::Value> {
+fn read_mcp_frame(reader: &mut impl BufRead, framing: McpFraming) -> io::Result<serde_json::Value> {
+    match framing {
+        McpFraming::ContentLength => read_mcp_content_length_frame(reader),
+        McpFraming::NewlineJson => read_mcp_newline_json_frame(reader),
+    }
+}
+
+fn read_mcp_newline_json_frame(reader: &mut impl BufRead) -> io::Result<serde_json::Value> {
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected EOF while reading MCP JSON line",
+            ));
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        return serde_json::from_str(trimmed).map_err(io::Error::other);
+    }
+}
+
+fn read_mcp_content_length_frame(reader: &mut impl BufRead) -> io::Result<serde_json::Value> {
     let mut content_length = None;
     loop {
         let mut line = String::new();

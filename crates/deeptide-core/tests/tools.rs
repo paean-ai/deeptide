@@ -406,6 +406,50 @@ printf 'Content-Length: %s\r\n\r\n%s' "${#body2}" "$body2"
     assert!(forward.content.contains("\"resources\""));
 }
 
+#[cfg(unix)]
+#[test]
+fn mcp_tools_support_swift_style_newline_json_framing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let server = temp.path().join("fake-mcp-newline.sh");
+    std::fs::write(
+        &server,
+        r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake-newline","version":"1"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"triage","description":"Triage issue"}]}}'
+"#,
+    )
+    .expect("write fake newline server");
+    let mut permissions = std::fs::metadata(&server)
+        .expect("fake newline server metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&server, permissions).expect("chmod fake newline server");
+
+    std::fs::write(
+        temp.path().join(".mcp.json"),
+        serde_json::json!({
+            "mcpServers": {
+                "swiftish": {
+                    "command": server.display().to_string(),
+                    "framing": "newline"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write mcp fixture");
+
+    let prompts = ListMcpPromptsTool.call(
+        serde_json::json!({"server": "swiftish"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!prompts.is_error);
+    assert!(prompts.content.contains("[swiftish]"));
+    assert!(prompts.content.contains("triage - Triage issue"));
+}
+
 #[test]
 fn mcp_tools_report_missing_configuration_and_required_inputs() {
     let temp = tempfile::tempdir().expect("tempdir");
