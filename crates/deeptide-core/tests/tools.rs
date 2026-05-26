@@ -966,7 +966,9 @@ fn publish_tool_dry_run_detects_static_output_and_writes_safety_ignore() {
 }
 
 #[test]
-fn publish_tool_reports_missing_output_and_upload_not_implemented() {
+fn publish_tool_reports_missing_output_and_missing_auth() {
+    let _guard = publish_env_guard();
+    clear_publish_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let missing = PublishTool.call(
         serde_json::json!({"dry_run": true}),
@@ -984,12 +986,74 @@ fn publish_tool_reports_missing_output_and_upload_not_implemented() {
     std::fs::write(public.join("index.html"), "<html></html>").expect("index");
     let upload = PublishTool.call(serde_json::json!({}), &ToolContext::new(temp.path()));
     assert!(upload.is_error);
-    assert!(upload.content.contains("Publish dry run: ready"));
-    assert!(
-        upload
-            .content
-            .contains("Publish upload requires Paean publish API support")
+    assert!(upload.content.contains("Paean login is missing or expired"));
+}
+
+#[test]
+fn publish_tool_uploads_archive_and_saves_state() {
+    let _guard = publish_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let public = temp.path().join("public");
+    std::fs::create_dir_all(&public).expect("mkdir public");
+    std::fs::write(public.join("index.html"), "<html></html>").expect("index");
+    std::fs::write(public.join("app.js"), "console.log('ok');").expect("asset");
+
+    let base_url = serve_publish_sequence(vec![
+        (200, r#"{"success":true}"#),
+        (
+            200,
+            r#"{"success":true,"data":{"handle":"demo","assignedHandle":null,"url":"https://demo.clide.app","shortUrl":"https://demo.clide.app","fileCount":2,"totalBytes":31,"overwritten":false,"archiveUrl":"https://example.com/site.zip"}}"#,
+        ),
+    ]);
+    install_publish_env(&base_url);
+
+    let result = PublishTool.call(
+        serde_json::json!({"handle": "demo"}),
+        &ToolContext::new(temp.path()),
     );
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("Published: https://demo.clide.app"));
+    assert!(result.content.contains("Handle:     demo"));
+    let state = std::fs::read_to_string(temp.path().join(".clide/publish.json")).expect("state");
+    assert!(state.contains("\"handle\": \"demo\""));
+    assert!(state.contains("\"url\": \"https://demo.clide.app\""));
+}
+
+#[test]
+fn publish_tool_deletes_saved_handle_and_marks_state() {
+    let _guard = publish_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".clide")).expect("mkdir .clide");
+    std::fs::write(
+        temp.path().join(".clide/publish.json"),
+        r#"{"handle":"demo","url":"https://demo.clide.app"}"#,
+    )
+    .expect("state");
+    let base_url = serve_publish_sequence(vec![
+        (200, r#"{"success":true}"#),
+        (
+            200,
+            r#"{"success":true,"handle":"demo","deletedObjects":3}"#,
+        ),
+    ]);
+    install_publish_env(&base_url);
+
+    let result = PublishTool.call(
+        serde_json::json!({"delete": true}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(
+        result
+            .content
+            .contains("Deleted remote publish: demo.clide.app")
+    );
+    assert!(result.content.contains("Deleted objects: 3"));
+    let state = std::fs::read_to_string(temp.path().join(".clide/publish.json")).expect("state");
+    assert!(state.contains("\"lastDeletedHandle\": \"demo\""));
+    assert!(!state.contains("\"handle\": \"demo\""));
 }
 
 #[test]
@@ -1649,12 +1713,92 @@ fn serve_once(status: u16, content_type: &'static str, body: &'static str) -> St
     format!("http://{addr}/page")
 }
 
+fn serve_publish_sequence(responses: Vec<(u16, &'static str)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local publish server");
+    let addr = listener.local_addr().expect("publish server address");
+    thread::spawn(move || {
+        for (status, body) in responses {
+            let (mut stream, _) = listener.accept().expect("accept publish request");
+            read_http_request(&mut stream);
+            let reason = if status == 200 { "OK" } else { "ERROR" };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write publish response");
+        }
+    });
+    format!("http://{addr}")
+}
+
+fn read_http_request(stream: &mut impl Read) {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let mut header_end = None;
+    while header_end.is_none() {
+        let read = stream.read(&mut chunk).expect("read request");
+        if read == 0 {
+            return;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+    }
+    let header_end = header_end.expect("header end") + 4;
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    let mut remaining = content_length.saturating_sub(buffer.len().saturating_sub(header_end));
+    while remaining > 0 {
+        let read = stream.read(&mut chunk).expect("read request body");
+        if read == 0 {
+            return;
+        }
+        remaining = remaining.saturating_sub(read);
+    }
+}
+
 fn todo_test_guard() -> MutexGuard<'static, ()> {
     static TODO_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     TODO_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .expect("todo test lock")
+}
+
+fn publish_env_guard() -> MutexGuard<'static, ()> {
+    static PUBLISH_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    PUBLISH_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+fn install_publish_env(base_url: &str) {
+    unsafe {
+        std::env::set_var("PAEAN_API_TOKEN", "fixture-credential");
+        std::env::set_var("PAEAN_API_BASE_URL", base_url);
+        std::env::remove_var("PAEAN_TOKEN");
+        std::env::remove_var("CLIDE_API_TOKEN");
+        std::env::remove_var("CLIDE_API_BASE_URL");
+    }
+}
+
+fn clear_publish_env() {
+    unsafe {
+        std::env::remove_var("PAEAN_API_TOKEN");
+        std::env::remove_var("PAEAN_TOKEN");
+        std::env::remove_var("CLIDE_API_TOKEN");
+        std::env::remove_var("PAEAN_API_BASE_URL");
+        std::env::remove_var("CLIDE_API_BASE_URL");
+    }
 }
 
 fn memory_env_guard() -> MutexGuard<'static, ()> {

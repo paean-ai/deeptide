@@ -12,7 +12,7 @@ use image::codecs::png::PngEncoder;
 use image::imageops::{self, FilterType};
 use image::{ColorType, DynamicImage, ImageEncoder, RgbaImage};
 use reqwest::Url;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::memory::{
     MemoryScope, MemorySystem, MemoryType, add_to_memory_index, create_memory_file,
@@ -1790,9 +1790,10 @@ impl Tool for PublishTool {
                     "No handle specified and no saved `.clide/publish.json` handle found.",
                 );
             };
-            return ToolResult::error(format!(
-                "Publish delete for {handle}.clide.app requires Paean publish API support, which is not implemented in this Rust port yet. Use `tide publish --delete --handle {handle}` from the Swift CLI for remote deletion."
-            ));
+            return match delete_publish(context, &handle) {
+                Ok(result) => ToolResult::text(result),
+                Err(message) => ToolResult::error(message),
+            };
         }
 
         let publish_dir = match resolve_publish_dir(context, options.dir.as_deref()) {
@@ -1831,10 +1832,10 @@ impl Tool for PublishTool {
             return ToolResult::text(render_publish_dry_run(&plan));
         }
 
-        ToolResult::error(format!(
-            "{}\n\nPublish upload requires Paean publish API support, which is not implemented in this Rust port yet. Re-run with dry_run:true to inspect the archive, or use the Swift CLI for the final upload.",
-            render_publish_dry_run(&plan)
-        ))
+        match upload_publish(context, &publish_dir, &files, &plan) {
+            Ok(result) => ToolResult::text(result),
+            Err(message) => ToolResult::error(message),
+        }
     }
 }
 
@@ -3942,26 +3943,38 @@ impl PublishOptions {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct PublishState {
+    #[serde(skip_serializing_if = "Option::is_none")]
     handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
     #[serde(rename = "publishDir")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     publish_dir: Option<String>,
     #[serde(rename = "fileCount")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     file_count: Option<u64>,
     #[serde(rename = "totalBytes")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     total_bytes: Option<u64>,
     #[serde(rename = "publishedAt")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     published_at: Option<String>,
     #[serde(rename = "deletedAt")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     deleted_at: Option<String>,
+    #[serde(rename = "lastDeletedHandle")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_deleted_handle: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PublishPlan {
     publish_dir_relative: String,
     handle_description: String,
+    handle: Option<String>,
+    random: bool,
     file_count: usize,
     total_bytes: u64,
     has_index: bool,
@@ -4024,6 +4037,9 @@ fn render_publish_status(context: &ToolContext) -> String {
     }
     if let Some(deleted_at) = state.deleted_at {
         lines.push(format!("  Deleted:     {deleted_at}"));
+    }
+    if let Some(handle) = state.last_deleted_handle {
+        lines.push(format!("  Last deleted handle: {handle}"));
     }
     lines.push(String::from("  State:       .clide/publish.json"));
     lines.join("\n")
@@ -4263,8 +4279,12 @@ fn build_publish_plan(
         handle_description: if random {
             String::from("(random)")
         } else {
-            handle.unwrap_or_else(|| String::from("(server assigned)"))
+            handle
+                .clone()
+                .unwrap_or_else(|| String::from("(server assigned)"))
         },
+        handle,
+        random,
         file_count: files.len(),
         total_bytes,
         has_index: files.iter().any(|file| file == "index.html"),
@@ -4310,6 +4330,398 @@ fn relative_path_string(base: &Path, child: &Path) -> String {
         .unwrap_or_else(|_| child.to_string_lossy().replace('\\', "/"))
         .trim_start_matches('/')
         .to_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishAuth {
+    base_url: String,
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishUploadResponse {
+    success: bool,
+    data: Option<PublishResult>,
+    error: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PublishResult {
+    handle: String,
+    #[serde(rename = "assignedHandle")]
+    assigned_handle: Option<String>,
+    url: String,
+    #[serde(rename = "shortUrl")]
+    short_url: Option<String>,
+    #[serde(rename = "fileCount")]
+    file_count: u64,
+    #[serde(rename = "totalBytes")]
+    total_bytes: u64,
+    #[serde(default)]
+    overwritten: bool,
+    #[serde(rename = "archiveUrl")]
+    archive_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeletePublishResult {
+    success: bool,
+    handle: Option<String>,
+    #[serde(rename = "deletedObjects")]
+    deleted_objects: Option<u64>,
+    error: Option<String>,
+    reason: Option<String>,
+}
+
+fn upload_publish(
+    context: &ToolContext,
+    publish_dir: &Path,
+    files: &[String],
+    plan: &PublishPlan,
+) -> Result<String, String> {
+    let auth = resolve_publish_auth()?;
+    let zip_path = create_publish_zip(publish_dir, files)?;
+    let result = (|| {
+        validate_publish_login(&auth)?;
+        let response = publish_zip(&auth, &zip_path, publish_dir, plan)?;
+        save_publish_state(context, &response, publish_dir)?;
+        Ok(render_publish_success(&response, context, publish_dir))
+    })();
+    let _ = fs::remove_file(&zip_path);
+    result
+}
+
+fn delete_publish(context: &ToolContext, handle: &str) -> Result<String, String> {
+    let auth = resolve_publish_auth()?;
+    validate_publish_login(&auth)?;
+    let result = unpublish_handle(&auth, handle)?;
+    mark_publish_deleted(context, handle)?;
+    Ok(render_delete_success(&result, handle))
+}
+
+fn resolve_publish_auth() -> Result<PublishAuth, String> {
+    let token = ["PAEAN_API_TOKEN", "PAEAN_TOKEN", "CLIDE_API_TOKEN"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            String::from(
+                "Paean login is missing or expired. Set PAEAN_API_TOKEN, PAEAN_TOKEN, or CLIDE_API_TOKEN, then retry Publish.",
+            )
+        })?;
+    let base_url = std::env::var("PAEAN_API_BASE_URL")
+        .or_else(|_| std::env::var("CLIDE_API_BASE_URL"))
+        .unwrap_or_else(|_| String::from("https://api.paean.ai"));
+    Ok(PublishAuth {
+        base_url: normalize_publish_base_url(&base_url),
+        token,
+    })
+}
+
+fn normalize_publish_base_url(raw: &str) -> String {
+    let mut base = raw.trim().trim_end_matches('/').to_owned();
+    if base.ends_with("/zero") {
+        base.truncate(base.len() - "/zero".len());
+    }
+    if base.is_empty() {
+        String::from("https://api.paean.ai")
+    } else {
+        base
+    }
+}
+
+fn validate_publish_login(auth: &PublishAuth) -> Result<(), String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| format!("Failed to build publish HTTP client: {error}"))?;
+    let url = format!("{}/publish/clide/check?handle=", auth.base_url);
+    let response = client
+        .get(url)
+        .bearer_auth(&auth.token)
+        .send()
+        .map_err(|error| format!("Publish login check failed: {error}"))?;
+    if matches!(response.status().as_u16(), 401 | 403) {
+        return Err(String::from(
+            "Paean login is missing or expired. Refresh the publish token, then retry Publish.",
+        ));
+    }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let message = publish_response_message(response);
+        return Err(format!(
+            "Publish API {status}: {}",
+            message.unwrap_or_else(|| String::from("login check failed"))
+        ));
+    }
+    Ok(())
+}
+
+fn publish_zip(
+    auth: &PublishAuth,
+    zip_path: &Path,
+    publish_dir: &Path,
+    plan: &PublishPlan,
+) -> Result<PublishResult, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("Failed to build publish HTTP client: {error}"))?;
+    let file = fs::File::open(zip_path)
+        .map_err(|error| format!("Failed to open publish archive: {error}"))?;
+    let file_name = publish_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("site");
+    let part = reqwest::blocking::multipart::Part::reader(file)
+        .file_name(format!("{file_name}.zip"))
+        .mime_str("application/zip")
+        .map_err(|error| format!("Failed to prepare publish archive part: {error}"))?;
+    let mut form = reqwest::blocking::multipart::Form::new().part("archive", part);
+    if !plan.random
+        && let Some(handle) = plan.handle.as_ref().filter(|value| !value.is_empty())
+    {
+        form = form.text("handle", handle.clone());
+    }
+    let response = client
+        .post(format!("{}/publish/clide", auth.base_url))
+        .bearer_auth(&auth.token)
+        .multipart(form)
+        .send()
+        .map_err(|error| format!("Publish upload failed: {error}"))?;
+    if matches!(response.status().as_u16(), 401 | 403) {
+        return Err(String::from(
+            "Paean login is missing or expired. Refresh the publish token, then retry Publish.",
+        ));
+    }
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .map_err(|error| format!("Failed to read publish response: {error}"))?;
+    if !(200..=299).contains(&status) {
+        return Err(format!(
+            "Publish API {status}: {}",
+            parse_publish_error_message(&body).unwrap_or_else(|| body.trim().to_owned())
+        ));
+    }
+    let decoded: PublishUploadResponse = serde_json::from_str(&body)
+        .map_err(|error| format!("Unexpected publish response: {error}"))?;
+    if !decoded.success {
+        return Err(format!(
+            "Publish API {status}: {}",
+            decoded
+                .error
+                .or(decoded.reason)
+                .unwrap_or_else(|| String::from("Publish failed"))
+        ));
+    }
+    decoded
+        .data
+        .ok_or_else(|| String::from("Unexpected publish response: missing data"))
+}
+
+fn unpublish_handle(auth: &PublishAuth, handle: &str) -> Result<DeletePublishResult, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("Failed to build publish HTTP client: {error}"))?;
+    let encoded = percent_encode_path_segment(handle);
+    let response = client
+        .delete(format!("{}/publish/{encoded}", auth.base_url))
+        .bearer_auth(&auth.token)
+        .send()
+        .map_err(|error| format!("Publish delete failed: {error}"))?;
+    if matches!(response.status().as_u16(), 401 | 403) {
+        return Err(String::from(
+            "Paean login is missing or expired. Refresh the publish token, then retry Publish.",
+        ));
+    }
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .map_err(|error| format!("Failed to read publish delete response: {error}"))?;
+    if !(200..=299).contains(&status) {
+        return Err(format!(
+            "Publish API {status}: {}",
+            parse_publish_error_message(&body).unwrap_or_else(|| body.trim().to_owned())
+        ));
+    }
+    let decoded: DeletePublishResult = serde_json::from_str(&body)
+        .map_err(|error| format!("Unexpected publish delete response: {error}"))?;
+    if !decoded.success {
+        return Err(format!(
+            "Publish API {status}: {}",
+            decoded
+                .error
+                .or(decoded.reason)
+                .unwrap_or_else(|| String::from("Delete failed"))
+        ));
+    }
+    Ok(decoded)
+}
+
+fn create_publish_zip(publish_dir: &Path, files: &[String]) -> Result<PathBuf, String> {
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "deeptide-publish-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&tmp_dir)
+        .map_err(|error| format!("Failed to create publish archive directory: {error}"))?;
+    let zip_path = tmp_dir.join("site.zip");
+    let file = fs::File::create(&zip_path)
+        .map_err(|error| format!("Failed to create publish archive: {error}"))?;
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    for relative in files {
+        let path = publish_dir.join(relative);
+        writer
+            .start_file(relative.replace('\\', "/"), options)
+            .map_err(|error| format!("Failed to add {relative} to publish archive: {error}"))?;
+        let mut input = fs::File::open(&path)
+            .map_err(|error| format!("Failed to read publish file {relative}: {error}"))?;
+        io::copy(&mut input, &mut writer)
+            .map_err(|error| format!("Failed to write {relative} to publish archive: {error}"))?;
+    }
+    writer
+        .finish()
+        .map_err(|error| format!("Failed to finalize publish archive: {error}"))?;
+    Ok(zip_path)
+}
+
+fn save_publish_state(
+    context: &ToolContext,
+    result: &PublishResult,
+    publish_dir: &Path,
+) -> Result<(), String> {
+    let handle = result
+        .assigned_handle
+        .clone()
+        .unwrap_or_else(|| result.handle.clone());
+    let state = PublishState {
+        handle: Some(handle),
+        url: Some(result.url.clone()),
+        publish_dir: Some({
+            let rel = relative_path_string(&context.cwd, publish_dir);
+            if rel.is_empty() {
+                String::from(".")
+            } else {
+                rel
+            }
+        }),
+        file_count: Some(result.file_count),
+        total_bytes: Some(result.total_bytes),
+        published_at: Some(format_cron_datetime(std::time::SystemTime::now())),
+        deleted_at: None,
+        last_deleted_handle: None,
+    };
+    write_publish_state(context, &state)
+}
+
+fn mark_publish_deleted(context: &ToolContext, handle: &str) -> Result<(), String> {
+    let Some(mut state) = load_publish_state(context) else {
+        return Ok(());
+    };
+    if state.handle.as_deref() != Some(handle) {
+        return Ok(());
+    }
+    state.last_deleted_handle = Some(handle.to_owned());
+    state.deleted_at = Some(format_cron_datetime(std::time::SystemTime::now()));
+    state.handle = None;
+    write_publish_state(context, &state)
+}
+
+fn write_publish_state(context: &ToolContext, state: &PublishState) -> Result<(), String> {
+    let dir = context.cwd.join(".clide");
+    fs::create_dir_all(&dir).map_err(|error| format!("Failed to create .clide: {error}"))?;
+    let data = serde_json::to_string_pretty(state)
+        .map_err(|error| format!("Failed to encode publish state: {error}"))?;
+    fs::write(dir.join("publish.json"), format!("{data}\n"))
+        .map_err(|error| format!("Failed to write .clide/publish.json: {error}"))
+}
+
+fn render_publish_success(
+    result: &PublishResult,
+    context: &ToolContext,
+    publish_dir: &Path,
+) -> String {
+    let handle = result
+        .assigned_handle
+        .as_deref()
+        .unwrap_or(result.handle.as_str());
+    let rel_dir = {
+        let rel = relative_path_string(&context.cwd, publish_dir);
+        if rel.is_empty() {
+            String::from(".")
+        } else {
+            rel
+        }
+    };
+    [
+        format!("Published: {}", result.url),
+        format!("  Handle:     {handle}"),
+        format!("  Directory:  {rel_dir}"),
+        format!("  Files:      {}", result.file_count),
+        format!("  Bytes:      {}", result.total_bytes),
+        format!(
+            "  Overwrote:  {}",
+            if result.overwritten { "yes" } else { "no" }
+        ),
+        String::from("  State:      .clide/publish.json"),
+    ]
+    .join("\n")
+}
+
+fn render_delete_success(result: &DeletePublishResult, fallback_handle: &str) -> String {
+    let handle = result.handle.as_deref().unwrap_or(fallback_handle);
+    let mut lines = vec![format!("Deleted remote publish: {handle}.clide.app")];
+    if let Some(count) = result.deleted_objects {
+        lines.push(format!("  Deleted objects: {count}"));
+    }
+    lines.push(String::from("  State: .clide/publish.json"));
+    lines.join("\n")
+}
+
+fn publish_response_message(response: reqwest::blocking::Response) -> Option<String> {
+    response
+        .text()
+        .ok()
+        .and_then(|body| {
+            parse_publish_error_message(&body).or_else(|| Some(body.trim().to_owned()))
+        })
+        .filter(|message| !message.is_empty())
+}
+
+fn parse_publish_error_message(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .or_else(|| value.get("reason"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(*byte));
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 fn run_spotlight_search(
