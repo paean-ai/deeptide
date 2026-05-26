@@ -99,6 +99,8 @@ impl ToolRegistry {
         registry.register(Box::<ExitPlanModeTool>::default());
         registry.register(Box::<LspTool>::default());
         registry.register(Box::<ClipboardTool>::default());
+        registry.register(Box::<SpotlightSearchTool>::default());
+        registry.register(Box::<ScreenCaptureTool>::default());
         registry.register(Box::<ImagePreprocessTool>::default());
         registry.register(Box::<CrashLogTool>::default());
         registry.register(Box::<MacLogTool>::default());
@@ -1014,6 +1016,12 @@ impl Tool for LspTool {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClipboardTool;
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SpotlightSearchTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScreenCaptureTool;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClipboardSnapshot {
     type_names: Vec<String>,
@@ -1154,6 +1162,96 @@ impl ClipboardSnapshot {
             );
         }
         String::from("[Clipboard is empty or contains unsupported content]")
+    }
+}
+
+impl Tool for SpotlightSearchTool {
+    fn name(&self) -> &'static str {
+        "SpotlightSearch"
+    }
+
+    fn description(&self) -> &'static str {
+        "Search files using the macOS Spotlight metadata index."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(query) = input.get("query").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("query is required");
+        };
+        if query.trim().is_empty() {
+            return ToolResult::error("query is required");
+        }
+
+        let max_results = input
+            .get("max_results")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(30);
+        if max_results == 0 {
+            return ToolResult::error("max_results must be >= 1");
+        }
+
+        let names_only = input
+            .get("names_only")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let scope = input
+            .get("scope")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| context.resolve_path(value))
+            .unwrap_or_else(|| normalize_path(context.cwd.clone()));
+
+        run_spotlight_search(query.trim(), &scope, names_only, max_results.min(200))
+    }
+}
+
+impl Tool for ScreenCaptureTool {
+    fn name(&self) -> &'static str {
+        "ScreenCapture"
+    }
+
+    fn description(&self) -> &'static str {
+        "List visible apps or capture a macOS window screenshot."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(operation) = input.get("operation").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("operation must be \"list\" or \"capture\"");
+        };
+
+        match operation {
+            "list" => list_screen_windows(),
+            "capture" => {
+                let app_name = input.get("app_name").and_then(serde_json::Value::as_str);
+                let window_id = input.get("window_id").and_then(serde_json::Value::as_u64);
+                if app_name
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                    && window_id.is_none()
+                {
+                    return ToolResult::error("capture requires app_name or window_id");
+                }
+
+                let max_dimension = input
+                    .get("max_dimension")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(1600)
+                    .clamp(256, 4096);
+                capture_screen_window(window_id, app_name, max_dimension)
+            }
+            _ => ToolResult::error("operation must be \"list\" or \"capture\""),
+        }
     }
 }
 
@@ -3695,6 +3793,171 @@ fn expand_skill_prompt(prompt: &str, args: Option<&str>) -> String {
     expanded
 }
 
+fn run_spotlight_search(
+    query: &str,
+    scope: &Path,
+    names_only: bool,
+    max_results: usize,
+) -> ToolResult {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("/usr/bin/mdfind");
+        if names_only {
+            command.arg("-name");
+        }
+        let scope = scope.to_string_lossy().into_owned();
+        command.args(["-onlyin", scope.as_str(), query]);
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                let raw = String::from_utf8_lossy(&output.stdout);
+                let mut paths = raw
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                let total = paths.len();
+                paths.truncate(max_results);
+                if paths.is_empty() {
+                    return ToolResult::text(
+                        "[SpotlightSearch] No results. The index may be building or the query may need adjustment.",
+                    );
+                }
+                if total > max_results {
+                    paths.push(format!(
+                        "... ({} more results - narrow the query or increase max_results)",
+                        total - max_results
+                    ));
+                }
+                ToolResult::text(paths.join("\n"))
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                ToolResult::error(format!(
+                    "[SpotlightSearch] mdfind error: {}",
+                    if stderr.is_empty() {
+                        format!("exit status {}", output.status)
+                    } else {
+                        stderr
+                    }
+                ))
+            }
+            Err(error) => {
+                ToolResult::error(format!("[SpotlightSearch] failed to run mdfind: {error}"))
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (query, scope, names_only, max_results);
+        ToolResult::error(
+            "SpotlightSearch is only available on macOS because it uses mdfind. Use Glob or Grep for cross-platform file discovery.",
+        )
+    }
+}
+
+fn list_screen_windows() -> ToolResult {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("osascript");
+        command.args([
+            "-e",
+            "tell application \"System Events\" to get the name of every process whose visible is true",
+        ]);
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                let apps = String::from_utf8_lossy(&output.stdout);
+                let lines = apps
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|app| !app.is_empty())
+                    .map(|app| format!("app:{app}"))
+                    .collect::<Vec<_>>();
+                if lines.is_empty() {
+                    ToolResult::text("Visible apps:\n(no visible apps found)")
+                } else {
+                    ToolResult::text(format!("Visible apps:\n{}", lines.join("\n")))
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                ToolResult::error(format!(
+                    "[ScreenCapture] window listing failed: {}",
+                    if stderr.is_empty() {
+                        format!("exit status {}", output.status)
+                    } else {
+                        stderr
+                    }
+                ))
+            }
+            Err(error) => {
+                ToolResult::error(format!("[ScreenCapture] failed to run osascript: {error}"))
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ToolResult::error(
+            "ScreenCapture is only available on macOS in this Rust build. Attach a screenshot manually or use platform-native screenshot tooling.",
+        )
+    }
+}
+
+fn capture_screen_window(
+    window_id: Option<u64>,
+    app_name: Option<&str>,
+    max_dimension: u32,
+) -> ToolResult {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(window_id) = window_id else {
+            let app = app_name.unwrap_or("the requested app").trim();
+            return ToolResult::error(format!(
+                "ScreenCapture.capture by app_name ({app}) requires native ScreenCaptureKit parity that is not implemented in this Rust fallback yet. Pass window_id to capture with screencapture."
+            ));
+        };
+        let destination = std::env::temp_dir().join(format!(
+            "deeptide-screen-{window_id}-{}.png",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0)
+        ));
+        let mut command = Command::new("/usr/sbin/screencapture");
+        let window_arg = format!("-l{window_id}");
+        let destination_arg = destination.to_string_lossy().into_owned();
+        command.args(["-x", window_arg.as_str(), destination_arg.as_str()]);
+        match command.output() {
+            Ok(output) if output.status.success() && destination.exists() => {
+                ToolResult::text(format!(
+                    "[ScreenCapture.capture]\nfile_path: {}\nmax_dimension: {max_dimension}\nUse ImagePreprocess with this file_path if resizing, trimming, or text enhancement is needed.",
+                    destination.display()
+                ))
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                ToolResult::error(format!(
+                    "[ScreenCapture] capture failed: {}",
+                    if stderr.is_empty() {
+                        format!("exit status {}", output.status)
+                    } else {
+                        stderr
+                    }
+                ))
+            }
+            Err(error) => ToolResult::error(format!(
+                "[ScreenCapture] failed to run screencapture: {error}"
+            )),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window_id, app_name, max_dimension);
+        ToolResult::error(
+            "ScreenCapture is only available on macOS in this Rust build. Attach a screenshot manually or use platform-native screenshot tooling.",
+        )
+    }
+}
+
 fn clipboard_read_text() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
@@ -4175,6 +4438,21 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "paste",
             "finder",
             "selection",
+        ],
+        "SpotlightSearch" => vec![
+            "spotlight",
+            "mdfind",
+            "metadata",
+            "file discovery",
+            "macos search",
+        ],
+        "ScreenCapture" => vec![
+            "screen",
+            "screenshot",
+            "window",
+            "capture",
+            "visible apps",
+            "ui inspection",
         ],
         "LSP" => vec![
             "language server",

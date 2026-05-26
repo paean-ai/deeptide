@@ -395,6 +395,37 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "SpotlightSearch",
+            description: "Fast macOS file discovery using the Spotlight metadata index.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keyword or mdfind predicate to search for in file names, content, and metadata."},
+                    "scope": {"type": "string", "description": "Directory scope. Relative paths resolve against the current workspace. Defaults to the workspace root."},
+                    "names_only": {"type": "boolean", "description": "Search by filename only using mdfind -name. Defaults to false."},
+                    "max_results": {"type": "integer", "description": "Maximum results to return. Defaults to 30 and is clamped to 1..200."}
+                },
+                "required": ["query"]
+            }),
+        },
+        WireTool {
+            name: "ScreenCapture",
+            description: "List visible apps or capture a macOS window screenshot.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "description": "list or capture.", "enum": ["list", "capture"]},
+                    "app_name": {"type": "string", "description": "For capture: partial app name to match. The Rust fallback currently requires window_id for capture."},
+                    "window_id": {"type": "integer", "description": "For capture: exact window ID from a list operation or platform tool."},
+                    "include_ocr": {"type": "boolean", "description": "Accepted for Swift schema parity. OCR is not implemented in the Rust fallback."},
+                    "auto_trim": {"type": "boolean", "description": "Accepted for Swift schema parity. Use ImagePreprocess on the returned file for trimming."},
+                    "enhance_text": {"type": "boolean", "description": "Accepted for Swift schema parity. Use ImagePreprocess on the returned file for text enhancement."},
+                    "max_dimension": {"type": "integer", "description": "Accepted for Swift schema parity and clamped to 256..4096."}
+                },
+                "required": ["operation"]
+            }),
+        },
+        WireTool {
             name: "LSP",
             description: "Code intelligence through a local Language Server Protocol server.",
             input_schema: serde_json::json!({
@@ -997,6 +1028,8 @@ mod tests {
             "EnterPlanMode",
             "ExitPlanMode",
             "Clipboard",
+            "SpotlightSearch",
+            "ScreenCapture",
             "LSP",
             "ImagePreprocess",
             "CrashLog",

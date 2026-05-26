@@ -2,10 +2,10 @@ use deeptide_core::{
     AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
     CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
     FileMetadataTool, ImagePreprocessTool, LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool,
-    MemoryWriteTool, MonitorTool, ReadFilesTool, ReviewArtifactTool, SkillTool, SnipTool,
-    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool,
-    WriteTool, memory::MemorySystem,
+    MemoryWriteTool, MonitorTool, ReadFilesTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool,
+    SnipTool, SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
+    TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool,
+    WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -646,6 +646,66 @@ fn clipboard_tool_validates_operation_and_write_content() {
     );
     assert!(missing_content.is_error);
     assert_eq!(missing_content.content, "write operation requires content");
+}
+
+#[test]
+fn spotlight_search_tool_validates_inputs_and_platform_fallback() {
+    let context = ToolContext::new(".");
+    let missing_query = SpotlightSearchTool.call(serde_json::json!({}), &context);
+    assert!(missing_query.is_error);
+    assert_eq!(missing_query.content, "query is required");
+
+    let empty_query = SpotlightSearchTool.call(serde_json::json!({"query": "   "}), &context);
+    assert!(empty_query.is_error);
+    assert_eq!(empty_query.content, "query is required");
+
+    let invalid_limit = SpotlightSearchTool.call(
+        serde_json::json!({"query": "Package", "max_results": 0}),
+        &context,
+    );
+    assert!(invalid_limit.is_error);
+    assert_eq!(invalid_limit.content, "max_results must be >= 1");
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let result = SpotlightSearchTool.call(serde_json::json!({"query": "Package"}), &context);
+        assert!(result.is_error);
+        assert!(result.content.contains("only available on macOS"));
+    }
+}
+
+#[test]
+fn screen_capture_tool_validates_swift_shape_and_platform_fallback() {
+    let context = ToolContext::new(".");
+    let missing_operation = ScreenCaptureTool.call(serde_json::json!({}), &context);
+    assert!(missing_operation.is_error);
+    assert_eq!(
+        missing_operation.content,
+        "operation must be \"list\" or \"capture\""
+    );
+
+    let bad_operation =
+        ScreenCaptureTool.call(serde_json::json!({"operation": "record"}), &context);
+    assert!(bad_operation.is_error);
+    assert_eq!(
+        bad_operation.content,
+        "operation must be \"list\" or \"capture\""
+    );
+
+    let missing_target =
+        ScreenCaptureTool.call(serde_json::json!({"operation": "capture"}), &context);
+    assert!(missing_target.is_error);
+    assert_eq!(
+        missing_target.content,
+        "capture requires app_name or window_id"
+    );
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let result = ScreenCaptureTool.call(serde_json::json!({"operation": "list"}), &context);
+        assert!(result.is_error);
+        assert!(result.content.contains("only available on macOS"));
+    }
 }
 
 #[test]

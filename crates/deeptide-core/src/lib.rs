@@ -35,7 +35,8 @@ pub use tools::{
     CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
     FileMetadataTool, GlobTool, GrepTool, ImagePreprocessTool, LspTool, MacDiagnoseTool,
     MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, ReadFilesTool, ReadTool,
-    ReviewArtifactTool, SkillTool, SnipTool, TaskCreateTool, TaskGetTool, TaskListTool,
-    TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry,
-    ToolResult, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
+    ReviewArtifactTool, ScreenCaptureTool, SkillTool, SnipTool, SpotlightSearchTool,
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
+    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, ToolSearchTool, WebFetchTool,
+    WebSearchTool, WriteTool,
 };

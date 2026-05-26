@@ -421,6 +421,8 @@ fn is_read_only(tool_name: &str) -> bool {
             | "VideoTranscribe"
             | "MemorySearch"
             | "LSP"
+            | "SpotlightSearch"
+            | "ScreenCapture"
             | "ImagePreprocess"
             | "CrashLog"
             | "MacLog"
