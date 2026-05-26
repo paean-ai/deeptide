@@ -14,6 +14,8 @@ use deeptide_core::{
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock, mpsc};
 use std::thread;
@@ -311,17 +313,37 @@ fn agent_tool_validates_swift_agent_types_and_reports_runtime_gap() {
     assert!(explore.content.contains("ListMcpResources"));
 }
 
+#[cfg(unix)]
 #[test]
-fn mcp_tools_discover_configured_servers_without_starting_processes() {
+fn mcp_tools_call_configured_stdio_servers() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let server = temp.path().join("fake-mcp.sh");
+    std::fs::write(
+        &server,
+        r#"#!/bin/sh
+cat >/dev/null
+body1='{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}'
+body2='{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"file://guide.md","name":"Guide"}],"prompts":[{"name":"review","description":"Review code"}],"content":[{"type":"text","text":"hello"}]}}'
+printf 'Content-Length: %s\r\n\r\n%s' "${#body1}" "$body1"
+printf 'Content-Length: %s\r\n\r\n%s' "${#body2}" "$body2"
+"#,
+    )
+    .expect("write fake server");
+    let mut permissions = std::fs::metadata(&server)
+        .expect("fake server metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&server, permissions).expect("chmod fake server");
+
     std::fs::write(
         temp.path().join(".mcp.json"),
-        r#"{
+        serde_json::json!({
             "mcpServers": {
-                "docs": {"command": "docs-mcp", "args": ["serve"]},
+                "docs": {"command": server.display().to_string()},
                 "remote": {"url": "https://mcp.example.invalid"}
             }
-        }"#,
+        })
+        .to_string(),
     )
     .expect("write mcp fixture");
     let context = ToolContext::new(temp.path());
@@ -329,7 +351,8 @@ fn mcp_tools_discover_configured_servers_without_starting_processes() {
     let resources = ListMcpResourcesTool.call(serde_json::json!({}), &context);
     assert!(!resources.is_error);
     assert!(resources.content.contains("[docs]"));
-    assert!(resources.content.contains("command: docs-mcp"));
+    assert!(resources.content.contains("command:"));
+    assert!(resources.content.contains("file://guide.md - Guide"));
     assert!(resources.content.contains("[remote]"));
     assert!(
         resources
@@ -339,35 +362,35 @@ fn mcp_tools_discover_configured_servers_without_starting_processes() {
     assert!(
         resources
             .content
-            .contains("resources: unavailable until Rust MCP server sessions are implemented")
+            .contains("HTTP/SSE MCP transport is not implemented")
     );
 
     let prompts = ListMcpPromptsTool.call(serde_json::json!({"server": "docs"}), &context);
     assert!(!prompts.is_error);
     assert!(prompts.content.contains("[docs]"));
+    assert!(prompts.content.contains("review - Review code"));
     assert!(!prompts.content.contains("[remote]"));
 
     let read = ReadMcpResourceTool.call(
         serde_json::json!({"server": "docs", "uri": "file://guide.md"}),
         &context,
     );
-    assert!(read.is_error);
-    assert!(read.content.contains("resource reading"));
-    assert!(read.content.contains("docs"));
+    assert!(!read.is_error);
+    assert!(read.content.contains("\"text\": \"hello\""));
 
     let prompt = GetMcpPromptTool.call(
         serde_json::json!({"server": "docs", "name": "review"}),
         &context,
     );
-    assert!(prompt.is_error);
-    assert!(prompt.content.contains("prompt fetching"));
+    assert!(!prompt.is_error);
+    assert!(prompt.content.contains("\"prompts\""));
 
     let forward = McpTool.call(
         serde_json::json!({"server": "docs", "method": "resources/list"}),
         &context,
     );
-    assert!(forward.is_error);
-    assert!(forward.content.contains("MCP server not running: docs"));
+    assert!(!forward.is_error);
+    assert!(forward.content.contains("\"resources\""));
 }
 
 #[test]

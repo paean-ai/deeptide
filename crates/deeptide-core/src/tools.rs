@@ -945,17 +945,14 @@ impl Tool for McpTool {
             return ToolResult::error("Missing server or method");
         }
 
-        let servers = match discover_mcp_servers(&context.cwd) {
-            Ok(servers) => servers,
-            Err(error) => return ToolResult::error(error),
-        };
-        if !servers.iter().any(|configured| configured.name == server) {
-            return ToolResult::error(format!("MCP server not configured: {server}"));
+        let params = input
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        match call_configured_mcp_server(&context.cwd, server, method, params) {
+            Ok(result) => ToolResult::text(format_json_value(&result)),
+            Err(error) => ToolResult::error(error),
         }
-
-        ToolResult::error(format!(
-            "MCP server not running: {server}. The Rust implementation can discover MCP configuration, but MCP process management and JSON-RPC forwarding are not available in this build yet."
-        ))
     }
 }
 
@@ -1011,7 +1008,15 @@ impl Tool for ReadMcpResourceTool {
         if server.trim().is_empty() || uri.trim().is_empty() {
             return ToolResult::error("Missing server or uri");
         }
-        render_mcp_unavailable(server, Some(uri), "resource reading", &context.cwd)
+        match call_configured_mcp_server(
+            &context.cwd,
+            server,
+            "resources/read",
+            serde_json::json!({"uri": uri}),
+        ) {
+            Ok(result) => ToolResult::text(format_json_value(&result)),
+            Err(error) => ToolResult::error(error),
+        }
     }
 }
 
@@ -1067,7 +1072,17 @@ impl Tool for GetMcpPromptTool {
         if server.trim().is_empty() || name.trim().is_empty() {
             return ToolResult::error("Missing server or name");
         }
-        render_mcp_unavailable(server, Some(name), "prompt fetching", &context.cwd)
+        let mut params = serde_json::json!({"name": name});
+        if let Some(arguments) = input.get("arguments")
+            && arguments.is_object()
+            && let Some(object) = params.as_object_mut()
+        {
+            object.insert("arguments".to_owned(), arguments.clone());
+        }
+        match call_configured_mcp_server(&context.cwd, server, "prompts/get", params) {
+            Ok(result) => ToolResult::text(format_json_value(&result)),
+            Err(error) => ToolResult::error(error),
+        }
     }
 }
 
@@ -6301,6 +6316,7 @@ struct McpServerConfig {
     name: String,
     source: PathBuf,
     command: Option<String>,
+    args: Vec<String>,
     url: Option<String>,
 }
 
@@ -6330,37 +6346,42 @@ fn render_mcp_list(kind: &str, target: Option<&str>, cwd: &Path) -> ToolResult {
         lines.push(format!("  source: {}", server.source.display()));
         if let Some(command) = &server.command {
             lines.push(format!("  command: {command}"));
+            let method = match kind {
+                "resources" => "resources/list",
+                "prompts" => "prompts/list",
+                _ => unreachable!("MCP list kind should be known"),
+            };
+            match call_mcp_server(server, method, serde_json::json!({})) {
+                Ok(result) => lines.extend(render_mcp_collection(kind, &result)),
+                Err(error) => lines.push(format!("  error: {error}")),
+            }
         } else if let Some(url) = &server.url {
             lines.push(format!("  url: {url}"));
+            lines.push(format!(
+                "  {kind}: unavailable because HTTP/SSE MCP transport is not implemented in this Rust build yet"
+            ));
         } else {
             lines.push(String::from("  transport: configured"));
+            lines.push(format!(
+                "  {kind}: unavailable because no command or url is configured"
+            ));
         }
-        lines.push(format!(
-            "  {kind}: unavailable until Rust MCP server sessions are implemented"
-        ));
     }
 
     ToolResult::text(lines.join("\n"))
 }
 
-fn render_mcp_unavailable(
-    server: &str,
-    item: Option<&str>,
-    operation: &str,
+fn call_configured_mcp_server(
     cwd: &Path,
-) -> ToolResult {
-    let servers = match discover_mcp_servers(cwd) {
-        Ok(servers) => servers,
-        Err(error) => return ToolResult::error(error),
+    server: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let servers = discover_mcp_servers(cwd)?;
+    let Some(config) = servers.iter().find(|configured| configured.name == server) else {
+        return Err(format!("MCP server not configured: {server}"));
     };
-    if !servers.iter().any(|configured| configured.name == server) {
-        return ToolResult::error(format!("MCP server not configured: {server}"));
-    }
-
-    let target = item.map(|item| format!(" for {item}")).unwrap_or_default();
-    ToolResult::error(format!(
-        "MCP {operation}{target} is not available because the Rust implementation does not manage MCP server sessions yet: {server}"
-    ))
+    call_mcp_server(config, method, params)
 }
 
 fn discover_mcp_servers(cwd: &Path) -> Result<Vec<McpServerConfig>, String> {
@@ -6451,13 +6472,252 @@ fn collect_mcp_servers(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
+        let args = config
+            .get("args")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         servers.push(McpServerConfig {
             name: name.to_owned(),
             source: source.to_path_buf(),
             command,
+            args,
             url,
         });
     }
+}
+
+fn call_mcp_server(
+    config: &McpServerConfig,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let Some(command) = &config.command else {
+        if config.url.is_some() {
+            return Err(format!(
+                "MCP server {} uses HTTP/SSE transport, which is not implemented in this Rust build yet.",
+                config.name
+            ));
+        }
+        return Err(format!(
+            "MCP server {} has no command configured.",
+            config.name
+        ));
+    };
+
+    let mut child = Command::new(command)
+        .args(&config.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start MCP server {}: {error}", config.name))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("Failed to open stdin for MCP server {}", config.name))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("Failed to open stdout for MCP server {}", config.name))?;
+    let stderr = child.stderr.take();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            match read_mcp_frame(&mut reader) {
+                Ok(message) => {
+                    if tx.send(Ok(message)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "deeptide-rs", "version": env!("CARGO_PKG_VERSION")}
+        }
+    });
+    let initialized = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": method,
+        "params": params
+    });
+    write_mcp_frame(&mut stdin, &initialize)
+        .and_then(|_| write_mcp_frame(&mut stdin, &initialized))
+        .and_then(|_| write_mcp_frame(&mut stdin, &request))
+        .map_err(|error| format!("Failed to write MCP request to {}: {error}", config.name))?;
+    drop(stdin);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut response = None;
+    while Instant::now() < deadline {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(timeout.min(Duration::from_millis(250))) {
+            Ok(Ok(message)) => {
+                if message.get("id").and_then(serde_json::Value::as_i64) == Some(2) {
+                    response = Some(message);
+                    break;
+                }
+            }
+            Ok(Err(error)) => {
+                return Err(format!("MCP server {} closed stdout: {error}", config.name));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(format!(
+                    "MCP server {} stopped before replying",
+                    config.name
+                ));
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let Some(response) = response else {
+        let stderr_text = read_child_stderr(stderr);
+        return Err(format!(
+            "MCP server {} timed out waiting for {method}.{}",
+            config.name, stderr_text
+        ));
+    };
+    if let Some(error) = response.get("error") {
+        return Err(format!(
+            "MCP call failed on {}: {}",
+            config.name,
+            format_json_value(error)
+        ));
+    }
+    Ok(response
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({})))
+}
+
+fn read_child_stderr(stderr: Option<std::process::ChildStderr>) -> String {
+    let Some(mut stderr) = stderr else {
+        return String::new();
+    };
+    let mut text = String::new();
+    let _ = stderr.read_to_string(&mut text);
+    let text = text.trim();
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!(" stderr: {text}")
+    }
+}
+
+fn write_mcp_frame(writer: &mut impl IoWrite, message: &serde_json::Value) -> io::Result<()> {
+    let body = serde_json::to_vec(message).map_err(io::Error::other)?;
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+    writer.write_all(&body)?;
+    writer.flush()
+}
+
+fn read_mcp_frame(reader: &mut impl BufRead) -> io::Result<serde_json::Value> {
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected EOF while reading MCP headers",
+            ));
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+            content_length = Some(value.trim().parse::<usize>().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid MCP content length: {error}"),
+                )
+            })?);
+        }
+    }
+
+    let Some(length) = content_length else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing MCP Content-Length header",
+        ));
+    };
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body)?;
+    serde_json::from_slice(&body).map_err(io::Error::other)
+}
+
+fn render_mcp_collection(kind: &str, result: &serde_json::Value) -> Vec<String> {
+    let key = match kind {
+        "resources" => "resources",
+        "prompts" => "prompts",
+        _ => return vec![format!("  {kind}: {}", format_json_value(result))],
+    };
+    let Some(items) = result.get(key).and_then(serde_json::Value::as_array) else {
+        return vec![format!("  {kind}: (none)")];
+    };
+    if items.is_empty() {
+        return vec![format!("  {kind}: (none)")];
+    }
+
+    let mut lines = vec![format!("  {kind}:")];
+    for item in items {
+        if let Some(object) = item.as_object() {
+            let primary = if kind == "prompts" {
+                object.get("name")
+            } else {
+                object.get("uri").or_else(|| object.get("name"))
+            }
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+            let secondary = if kind == "prompts" {
+                object.get("description")
+            } else {
+                object.get("name").or_else(|| object.get("description"))
+            }
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+            if secondary.is_empty() || secondary == primary {
+                lines.push(format!("    - {primary}"));
+            } else {
+                lines.push(format!("    - {primary} - {secondary}"));
+            }
+        }
+    }
+    lines
+}
+
+fn format_json_value(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn remote_trigger_settings_paths(cwd: &Path) -> Vec<PathBuf> {
