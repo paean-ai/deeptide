@@ -6,7 +6,7 @@ use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
-    LocalEchoBackend, ReplEvent, ReplSession,
+    LocalEchoBackend, MarkdownRenderer, ReplEvent, ReplSession,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
@@ -207,7 +207,8 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
         for event in repl.submit(&line) {
             match event {
                 ReplEvent::Output(text) => {
-                    writeln!(stdout, "{text}").map_err(|error| error.to_string())?;
+                    writeln!(stdout, "{}", MarkdownRenderer::render(&text))
+                        .map_err(|error| error.to_string())?;
                 }
                 ReplEvent::Exit => return Ok(()),
             }
@@ -220,7 +221,7 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
 
     match cli.output_format {
         OutputFormat::Text => {
-            println!("{response}");
+            println!("{}", MarkdownRenderer::render(&response));
         }
         OutputFormat::Json => {
             let body = serde_json::json!({

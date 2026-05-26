@@ -291,6 +291,340 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "MemorySearch",
+            description: "Search Deeptide project/global memory files for durable preferences, decisions, and project facts.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keyword or phrase to search for in Deeptide memory files."},
+                    "scope": {"type": "string", "description": "Memory scope: project, global, or all. Defaults to all.", "enum": ["project", "global", "all"]},
+                    "max_results": {"type": "integer", "description": "Maximum memory files to return. Defaults to 10 and is clamped to 1..50."}
+                },
+                "required": ["query"]
+            }),
+        },
+        WireTool {
+            name: "MemoryWrite",
+            description: "Persist a concise auditable Deeptide memory shard for future sessions.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short stable title for the memory, 3-8 words.", "minLength": 3, "maxLength": 80},
+                    "body": {"type": "string", "description": "Concise, factual, durable memory content.", "minLength": 8, "maxLength": 2000},
+                    "scope": {"type": "string", "description": "Where to save the memory. Use project for repository facts and global for user preferences.", "enum": ["project", "global"], "default": "project"},
+                    "type": {"type": "string", "description": "Memory type.", "enum": ["user", "feedback", "project", "reference"], "default": "project"},
+                    "reason": {"type": "string", "description": "Why this is worth remembering, for auditability.", "minLength": 3, "maxLength": 240}
+                },
+                "required": ["title", "body", "reason"]
+            }),
+        },
+        WireTool {
+            name: "Brief",
+            description: "Request a context compaction summary of the conversation so far.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        WireTool {
+            name: "CtxInspect",
+            description: "Inspect context window usage, estimated remaining capacity, and cache expectations.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "Optional model name used to estimate the context window."},
+                    "estimated_tokens": {"type": "integer", "description": "Optional current token estimate supplied by the host."},
+                    "message_count": {"type": "integer", "description": "Optional active message count supplied by the host."}
+                }
+            }),
+        },
+        WireTool {
+            name: "Snip",
+            description: "Request aggressive trimming of older conversation history when context is overloaded.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "keepLast": {"type": "integer", "description": "Number of most recent messages to keep. Defaults to 10 and is clamped to 1..100."},
+                    "explanation": {"type": "string", "description": "Brief explanation of why history is being trimmed."}
+                }
+            }),
+        },
+        WireTool {
+            name: "EnterPlanMode",
+            description: "Enter plan mode before significant code changes: explore, design, and ask for approval before editing.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        WireTool {
+            name: "ExitPlanMode",
+            description: "Exit plan mode and present the plan for user approval before implementation.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "allowedPrompts": {
+                        "type": "array",
+                        "description": "Categories of actions needed to implement the plan.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tool": {"type": "string", "description": "The tool this prompt applies to."},
+                                "prompt": {"type": "string", "description": "Semantic description of the action."}
+                            },
+                            "required": ["tool", "prompt"]
+                        }
+                    }
+                }
+            }),
+        },
+        WireTool {
+            name: "Clipboard",
+            description: "Read from or write to the system clipboard. Finder selection is available on macOS.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "description": "inspect, read, files, finder_selection, or write.",
+                        "enum": ["inspect", "read", "files", "finder_selection", "write"]
+                    },
+                    "content": {"type": "string", "description": "Text to write to the clipboard. Required for write operation."}
+                },
+                "required": ["operation"]
+            }),
+        },
+        WireTool {
+            name: "SpotlightSearch",
+            description: "Fast macOS file discovery using the Spotlight metadata index.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keyword or mdfind predicate to search for in file names, content, and metadata."},
+                    "scope": {"type": "string", "description": "Directory scope. Relative paths resolve against the current workspace. Defaults to the workspace root."},
+                    "names_only": {"type": "boolean", "description": "Search by filename only using mdfind -name. Defaults to false."},
+                    "max_results": {"type": "integer", "description": "Maximum results to return. Defaults to 30 and is clamped to 1..200."}
+                },
+                "required": ["query"]
+            }),
+        },
+        WireTool {
+            name: "ScreenCapture",
+            description: "List visible apps or capture a macOS window screenshot.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "description": "list or capture.", "enum": ["list", "capture"]},
+                    "app_name": {"type": "string", "description": "For capture: partial app name to match. The Rust fallback currently requires window_id for capture."},
+                    "window_id": {"type": "integer", "description": "For capture: exact window ID from a list operation or platform tool."},
+                    "include_ocr": {"type": "boolean", "description": "Accepted for Swift schema parity. OCR is not implemented in the Rust fallback."},
+                    "auto_trim": {"type": "boolean", "description": "Accepted for Swift schema parity. Use ImagePreprocess on the returned file for trimming."},
+                    "enhance_text": {"type": "boolean", "description": "Accepted for Swift schema parity. Use ImagePreprocess on the returned file for text enhancement."},
+                    "max_dimension": {"type": "integer", "description": "Accepted for Swift schema parity and clamped to 256..4096."}
+                },
+                "required": ["operation"]
+            }),
+        },
+        WireTool {
+            name: "LSP",
+            description: "Code intelligence through a local Language Server Protocol server.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "description": "goToDefinition, findReferences, hover, or documentSymbol.",
+                        "enum": ["goToDefinition", "findReferences", "hover", "documentSymbol"]
+                    },
+                    "file_path": {"type": "string", "description": "Path to the source file. Relative paths resolve against the current workspace."},
+                    "line": {"type": "integer", "description": "Line number, 1-based as shown in editors."},
+                    "character": {"type": "integer", "description": "Character offset, 1-based. Required for goToDefinition, findReferences, and hover."}
+                },
+                "required": ["operation", "file_path", "line"]
+            }),
+        },
+        WireTool {
+            name: "ImagePreprocess",
+            description: "Inspect and preprocess local image files before visual analysis.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the image file. Relative paths resolve against the current workspace."},
+                    "operation": {
+                        "type": "string",
+                        "description": "inspect or preprocess.",
+                        "enum": ["inspect", "preprocess"]
+                    },
+                    "max_dimension": {"type": "integer", "description": "Largest output side in pixels for preprocess. Defaults to 1600 and is clamped to 256..4096."},
+                    "auto_trim": {"type": "boolean", "description": "Crop likely blank border/background before resize."},
+                    "enhance_text": {"type": "boolean", "description": "Grayscale, increase contrast, and sharpen for screenshots/text."},
+                    "crop": {"type": "object", "description": "Optional normalized crop rectangle with x, y, width, height in 0..1, origin at top-left."},
+                    "format": {"type": "string", "description": "Output image format for preprocess: png or jpeg.", "enum": ["png", "jpeg"]}
+                },
+                "required": ["file_path", "operation"]
+            }),
+        },
+        WireTool {
+            name: "Vision",
+            description: "Analyze local images and PDFs with OCR, layout extraction, or classification.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to an image or PDF file. Relative paths resolve against the current workspace."},
+                    "operation": {
+                        "type": "string",
+                        "description": "ocr, layout, or classify.",
+                        "enum": ["ocr", "layout", "classify"]
+                    },
+                    "pages": {"description": "PDF page number or range like 1-3. Defaults to the first page and caps ranges to five pages."},
+                    "language_hints": {"type": "array", "items": {"type": "string"}, "description": "Optional OCR language hints such as eng or jpn. Passed to local OCR backends when available."},
+                    "min_confidence": {"type": "number", "description": "Minimum OCR layout confidence from 0.0 to 1.0. Defaults to 0.5."}
+                },
+                "required": ["file_path", "operation"]
+            }),
+        },
+        WireTool {
+            name: "CrashLog",
+            description: "Inspect local macOS DiagnosticReports for crash, hang, spin, panic, and ips reports.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "description": "list, latest, or read.", "enum": ["list", "latest", "read"]},
+                    "app_name": {"type": "string", "description": "Optional app/process name filter."},
+                    "file_path": {"type": "string", "description": "Specific report path. Required for operation=read."},
+                    "limit": {"type": "integer", "description": "Maximum reports to list. Defaults to 20 and is clamped to 1..100."},
+                    "max_lines": {"type": "integer", "description": "Maximum lines to include when reading a report. Defaults to 160 and is clamped to 1..1000."}
+                },
+                "required": ["operation"]
+            }),
+        },
+        WireTool {
+            name: "MacLog",
+            description: "Search recent macOS Unified Logging entries using bounded filters.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "process": {"type": "string", "description": "Optional process name filter."},
+                    "subsystem": {"type": "string", "description": "Optional unified logging subsystem filter."},
+                    "category": {"type": "string", "description": "Optional unified logging category filter."},
+                    "contains": {"type": "string", "description": "Optional case-insensitive eventMessage filter."},
+                    "level": {"type": "string", "description": "Log level filter.", "enum": ["error_or_fault", "fault", "error", "default", "info", "debug", "all"]},
+                    "last_minutes": {"type": "integer", "description": "Lookback window in minutes. Defaults to 15 and is clamped to 1..1440."},
+                    "limit": {"type": "integer", "description": "Maximum output lines. Defaults to 80 and is clamped to 1..300."},
+                    "timeout_ms": {"type": "integer", "description": "Maximum time to wait for log show. Defaults to 8000 and is clamped to 1000..30000."}
+                }
+            }),
+        },
+        WireTool {
+            name: "MacDiagnose",
+            description: "Build a focused macOS-native diagnostic route for local failures.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scenario": {"type": "string", "description": "Problem class to diagnose.", "enum": ["general", "crash", "permission", "screen", "audio", "keychain", "network", "install", "performance"]},
+                    "app_name": {"type": "string", "description": "Optional app/process name to focus on. Defaults to deeptide."},
+                    "include_live_signals": {"type": "boolean", "description": "Accepted for Swift parity; Rust currently renders guidance without live native rows."}
+                }
+            }),
+        },
+        WireTool {
+            name: "CronCreate",
+            description: "Schedule a prompt using a 5-field cron expression.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cron": {"type": "string", "description": "5-field cron expression: minute hour day-of-month month day-of-week."},
+                    "prompt": {"type": "string", "description": "Prompt to enqueue at each fire time."},
+                    "recurring": {"type": "boolean", "description": "true repeats on schedule; false is one-shot. Omit to infer repeating schedules."}
+                },
+                "required": ["cron", "prompt"]
+            }),
+        },
+        WireTool {
+            name: "CronList",
+            description: "List all scheduled cron jobs with IDs, schedules, and prompts.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        WireTool {
+            name: "CronDelete",
+            description: "Cancel a previously scheduled cron job by ID.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Job ID returned by CronCreate."}
+                },
+                "required": ["id"]
+            }),
+        },
+        WireTool {
+            name: "ReviewArtifact",
+            description: "Mark a workspace file as needing human review.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file to flag for review. Relative paths resolve against the current workspace."},
+                    "reason": {"type": "string", "description": "Short context to help the human reviewer."}
+                },
+                "required": ["file_path"]
+            }),
+        },
+        WireTool {
+            name: "Skill",
+            description: "Invoke a named built-in skill by expanding its reusable prompt template.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "The skill name.", "enum": ["commit", "simplify", "review-pr", "init", "batch", "publish", "update-config"]},
+                    "args": {"type": "string", "description": "Optional arguments for the skill."}
+                },
+                "required": ["skill"]
+            }),
+        },
+        WireTool {
+            name: "Publish",
+            description: "Prepare, inspect, or delete a static frontend publish on clide.app.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "dir": {"type": "string", "description": "Optional publish directory. Omit to auto-detect dist/build/out/.output/public/public/root."},
+                    "handle": {"type": "string", "description": "Optional custom clide.app handle or remote publish handle."},
+                    "random": {"type": "boolean", "description": "Set true only when the user explicitly asks for a new random handle."},
+                    "delete": {"type": "boolean", "description": "Set true to delete/unpublish the saved or specified remote publish."},
+                    "dry_run": {"type": "boolean", "description": "Inspect publish directory, handle, files, bytes, and ignore rules without uploading."},
+                    "status": {"type": "boolean", "description": "Show saved .clide/publish.json state without contacting the publish API."}
+                }
+            }),
+        },
+        WireTool {
+            name: "RemoteTrigger",
+            description: "POST a JSON payload to a configured remote webhook endpoint.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "payload": {"type": "string", "description": "Free-form payload string. Sent as {\"payload\":\"...\"} JSON unless override_body is set."},
+                    "override_body": {"type": "string", "description": "Optional raw JSON string to use as the request body verbatim."}
+                },
+                "required": ["payload"]
+            }),
+        },
+        WireTool {
+            name: "PushNotification",
+            description: "Post a native desktop notification when the user should be alerted.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Notification body. Required and limited to 500 characters."},
+                    "title": {"type": "string", "description": "Notification title. Defaults to deeptide."},
+                    "subtitle": {"type": "string", "description": "Optional subtitle or second line."},
+                    "sound": {"type": "boolean", "description": "Play the default notification sound where supported. Defaults to true."}
+                },
+                "required": ["message"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -726,6 +1060,56 @@ mod tests {
             ask_user.input_schema["required"],
             serde_json::json!(["questions"])
         );
+
+        let memory_search = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "MemorySearch")
+            .expect("MemorySearch tool schema should be declared");
+        assert_eq!(
+            memory_search.input_schema["required"],
+            serde_json::json!(["query"])
+        );
+
+        let memory_write = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "MemoryWrite")
+            .expect("MemoryWrite tool schema should be declared");
+        assert_eq!(
+            memory_write.input_schema["required"],
+            serde_json::json!(["title", "body", "reason"])
+        );
+
+        for name in [
+            "Brief",
+            "CtxInspect",
+            "Snip",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "Clipboard",
+            "SpotlightSearch",
+            "ScreenCapture",
+            "LSP",
+            "ImagePreprocess",
+            "Vision",
+            "CrashLog",
+            "MacLog",
+            "MacDiagnose",
+            "CronCreate",
+            "CronList",
+            "CronDelete",
+            "ReviewArtifact",
+            "Skill",
+            "Publish",
+            "RemoteTrigger",
+            "PushNotification",
+        ] {
+            assert!(
+                request.tools.iter().any(|tool| tool.name == name),
+                "{name} tool schema should be declared"
+            );
+        }
 
         let todo_write = request
             .tools

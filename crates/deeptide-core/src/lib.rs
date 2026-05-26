@@ -4,6 +4,7 @@ pub mod commands;
 pub mod completion;
 pub mod cost;
 pub mod embedded_protocol;
+pub mod markdown;
 pub mod memory;
 pub mod permissions;
 pub mod repl;
@@ -24,6 +25,7 @@ pub use completion::{
     Replacement,
 };
 pub use cost::{CacheHealth, CostSummary, CostTracker, ModelPricing, TurnRecord, TurnUsage};
+pub use markdown::{MarkdownRenderOptions, MarkdownRenderer};
 pub use permissions::{
     PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
     ToolInput,
@@ -31,8 +33,12 @@ pub use permissions::{
 pub use repl::{ReplEvent, ReplSession};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
-    AskUserQuestionTool, BashTool, EditTool, FileMetadataTool, GlobTool, GrepTool, MonitorTool,
-    ReadFilesTool, ReadTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
+    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
+    CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
+    FileMetadataTool, GlobTool, GrepTool, ImagePreprocessTool, LspTool, MacDiagnoseTool,
+    MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, PublishTool, PushNotificationTool,
+    ReadFilesTool, ReadTool, RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool,
+    SnipTool, SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
     TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult,
-    ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
+    ToolSearchTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool,
 };

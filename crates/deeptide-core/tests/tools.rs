@@ -1,13 +1,17 @@
 use deeptide_core::{
-    AskUserQuestionTool, BashTool, EditTool, FileMetadataTool, MonitorTool, ReadFilesTool,
-    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool,
-    WriteTool,
+    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
+    CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
+    FileMetadataTool, ImagePreprocessTool, LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool,
+    MemoryWriteTool, MonitorTool, PublishTool, PushNotificationTool, ReadFilesTool,
+    RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool, SnipTool,
+    SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
+    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, VisionTool,
+    WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, mpsc};
 use std::thread;
 
 #[test]
@@ -419,6 +423,755 @@ fn monitor_tool_reports_stderr_and_failed_exit() {
     assert!(result.content.contains("exit=7"));
     assert!(result.content.contains("--- stderr ---"));
     assert!(result.content.contains("boom"));
+}
+
+#[test]
+fn memory_write_tool_writes_project_memory_shard_and_index() {
+    let _guard = memory_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    install_memory_env(temp.path());
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let result = MemoryWriteTool.call(
+        serde_json::json!({
+            "title": "Coding Style",
+            "body": "Keep tests narrow and deterministic.",
+            "reason": "User wants durable test guidance",
+            "type": "project"
+        }),
+        &ToolContext::new(&workspace),
+    );
+
+    assert!(!result.is_error);
+    assert!(
+        result
+            .content
+            .contains("Saved project memory: Coding Style")
+    );
+    let memory_dir = MemorySystem::project_memory_dir(&workspace);
+    let shard = memory_dir.join("coding-style.md");
+    let body = std::fs::read_to_string(&shard).expect("memory shard");
+    assert!(body.contains("name: Coding Style"));
+    assert!(body.contains("description: User wants durable test guidance"));
+    assert!(body.contains("type: project"));
+    assert!(body.contains("Keep tests narrow and deterministic."));
+
+    let index = std::fs::read_to_string(memory_dir.join("MEMORY.md")).expect("memory index");
+    assert!(index.contains("- [Coding Style](coding-style.md) - User wants durable test guidance"));
+}
+
+#[test]
+fn memory_write_tool_defaults_global_type_and_avoids_duplicate_names() {
+    let _guard = memory_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    install_memory_env(temp.path());
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let input = serde_json::json!({
+        "title": "Editor Preference",
+        "body": "Prefer concise code review findings first.",
+        "reason": "Durable user preference",
+        "scope": "global"
+    });
+
+    let first = MemoryWriteTool.call(input.clone(), &ToolContext::new(&workspace));
+    let second = MemoryWriteTool.call(input, &ToolContext::new(&workspace));
+
+    assert!(!first.is_error);
+    assert!(!second.is_error);
+    let memory_dir = MemorySystem::global_memory_dir();
+    assert!(memory_dir.join("editor-preference.md").exists());
+    assert!(memory_dir.join("editor-preference-2.md").exists());
+    let content =
+        std::fs::read_to_string(memory_dir.join("editor-preference.md")).expect("memory shard");
+    assert!(content.contains("type: user"));
+}
+
+#[test]
+fn memory_write_tool_rejects_invalid_inputs() {
+    let missing_reason = MemoryWriteTool.call(
+        serde_json::json!({
+            "title": "Valid Title",
+            "body": "Valid durable memory body."
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(missing_reason.is_error);
+    assert_eq!(missing_reason.content, "reason is required");
+
+    let bad_scope = MemoryWriteTool.call(
+        serde_json::json!({
+            "title": "Valid Title",
+            "body": "Valid durable memory body.",
+            "reason": "Useful later",
+            "scope": "team"
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(bad_scope.is_error);
+    assert_eq!(bad_scope.content, "scope must be project or global");
+}
+
+#[test]
+fn memory_search_tool_finds_project_and_global_memory() {
+    let _guard = memory_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    install_memory_env(temp.path());
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let project_input = serde_json::json!({
+        "title": "Provider Policy",
+        "body": "Use configured provider profiles instead of hard-coded endpoints.",
+        "reason": "Repository convention",
+        "scope": "project"
+    });
+    let global_input = serde_json::json!({
+        "title": "Review Preference",
+        "body": "Prefer concise code review findings first.",
+        "reason": "Durable user preference",
+        "scope": "global"
+    });
+    assert!(
+        !MemoryWriteTool
+            .call(project_input, &ToolContext::new(&workspace))
+            .is_error
+    );
+    assert!(
+        !MemoryWriteTool
+            .call(global_input, &ToolContext::new(&workspace))
+            .is_error
+    );
+
+    let all = MemorySearchTool.call(
+        serde_json::json!({"query": "preference", "scope": "all"}),
+        &ToolContext::new(&workspace),
+    );
+    assert!(!all.is_error);
+    assert!(all.content.contains("Review Preference"));
+    assert!(all.content.contains("scope: global"));
+
+    let project = MemorySearchTool.call(
+        serde_json::json!({"query": "provider", "scope": "project", "max_results": 5}),
+        &ToolContext::new(&workspace),
+    );
+    assert!(!project.is_error);
+    assert!(project.content.contains("Provider Policy"));
+    assert!(project.content.contains("scope: project"));
+    assert!(project.content.contains("configured provider profiles"));
+}
+
+#[test]
+fn brief_tool_requests_context_compaction() {
+    let result = BriefTool.call(serde_json::json!({}), &ToolContext::new("."));
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Context compaction triggered"));
+    assert!(result.content.contains("Summarize older messages"));
+    assert!(result.content.contains("Continue your task"));
+}
+
+#[test]
+fn ctx_inspect_tool_reports_context_budget_and_warnings() {
+    let result = CtxInspectTool.call(
+        serde_json::json!({
+            "model": "deepseek-v4-flash",
+            "estimated_tokens": 470000,
+            "message_count": 42
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Context Window Report:"));
+    assert!(result.content.contains("Model: deepseek-v4-flash"));
+    assert!(result.content.contains("Context window: 512.0K tokens"));
+    assert!(result.content.contains("Active messages: 42"));
+    assert!(result.content.contains("CRITICAL: Context at 91%"));
+}
+
+#[test]
+fn snip_tool_formats_history_trim_request() {
+    let result = SnipTool.call(
+        serde_json::json!({"keepLast": 200, "explanation": "Older build logs are no longer needed."}),
+        &ToolContext::new("."),
+    );
+
+    assert!(!result.is_error);
+    assert!(
+        result
+            .content
+            .contains("History trim requested: keeping last 100 messages.")
+    );
+    assert!(
+        result
+            .content
+            .contains("Reason: Older build logs are no longer needed.")
+    );
+}
+
+#[test]
+fn plan_mode_tools_return_approval_flow_text() {
+    let enter = EnterPlanModeTool.call(serde_json::json!({}), &ToolContext::new("."));
+    assert!(!enter.is_error);
+    assert!(enter.content.contains("Plan mode activated"));
+    assert!(enter.content.contains("Do not modify project files"));
+
+    let exit = ExitPlanModeTool.call(
+        serde_json::json!({
+            "allowedPrompts": [
+                {"tool": "Bash", "prompt": "Run cargo test"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(!exit.is_error);
+    assert!(exit.content.contains("Plan is ready for review"));
+    assert!(exit.content.contains("- Bash: Run cargo test"));
+}
+
+#[test]
+fn clipboard_tool_validates_operation_and_write_content() {
+    let missing_operation = ClipboardTool.call(serde_json::json!({}), &ToolContext::new("."));
+    assert!(missing_operation.is_error);
+    assert!(
+        missing_operation
+            .content
+            .contains("operation must be one of")
+    );
+
+    let missing_content = ClipboardTool.call(
+        serde_json::json!({"operation": "write"}),
+        &ToolContext::new("."),
+    );
+    assert!(missing_content.is_error);
+    assert_eq!(missing_content.content, "write operation requires content");
+}
+
+#[test]
+fn spotlight_search_tool_validates_inputs_and_platform_fallback() {
+    let context = ToolContext::new(".");
+    let missing_query = SpotlightSearchTool.call(serde_json::json!({}), &context);
+    assert!(missing_query.is_error);
+    assert_eq!(missing_query.content, "query is required");
+
+    let empty_query = SpotlightSearchTool.call(serde_json::json!({"query": "   "}), &context);
+    assert!(empty_query.is_error);
+    assert_eq!(empty_query.content, "query is required");
+
+    let invalid_limit = SpotlightSearchTool.call(
+        serde_json::json!({"query": "Package", "max_results": 0}),
+        &context,
+    );
+    assert!(invalid_limit.is_error);
+    assert_eq!(invalid_limit.content, "max_results must be >= 1");
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let result = SpotlightSearchTool.call(serde_json::json!({"query": "Package"}), &context);
+        assert!(result.is_error);
+        assert!(result.content.contains("only available on macOS"));
+    }
+}
+
+#[test]
+fn screen_capture_tool_validates_swift_shape_and_platform_fallback() {
+    let context = ToolContext::new(".");
+    let missing_operation = ScreenCaptureTool.call(serde_json::json!({}), &context);
+    assert!(missing_operation.is_error);
+    assert_eq!(
+        missing_operation.content,
+        "operation must be \"list\" or \"capture\""
+    );
+
+    let bad_operation =
+        ScreenCaptureTool.call(serde_json::json!({"operation": "record"}), &context);
+    assert!(bad_operation.is_error);
+    assert_eq!(
+        bad_operation.content,
+        "operation must be \"list\" or \"capture\""
+    );
+
+    let missing_target =
+        ScreenCaptureTool.call(serde_json::json!({"operation": "capture"}), &context);
+    assert!(missing_target.is_error);
+    assert_eq!(
+        missing_target.content,
+        "capture requires app_name or window_id"
+    );
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let result = ScreenCaptureTool.call(serde_json::json!({"operation": "list"}), &context);
+        assert!(result.is_error);
+        assert!(result.content.contains("only available on macOS"));
+    }
+}
+
+#[test]
+fn lsp_tool_validates_operation_file_and_line_before_server_lookup() {
+    let context = ToolContext::new(".");
+    let missing_operation = LspTool.call(serde_json::json!({}), &context);
+    assert!(missing_operation.is_error);
+    assert!(
+        missing_operation
+            .content
+            .contains("operation must be one of")
+    );
+
+    let missing_file = LspTool.call(
+        serde_json::json!({"operation": "hover", "line": 1}),
+        &context,
+    );
+    assert!(missing_file.is_error);
+    assert_eq!(missing_file.content, "file_path is required");
+
+    let missing_line = LspTool.call(
+        serde_json::json!({"operation": "documentSymbol", "file_path": "src/lib.rs"}),
+        &context,
+    );
+    assert!(missing_line.is_error);
+    assert_eq!(missing_line.content, "line is required");
+}
+
+#[test]
+fn image_preprocess_tool_inspects_and_preprocesses_local_images() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let image_path = temp.path().join("sample.png");
+    let mut image = image::RgbaImage::from_pixel(32, 24, image::Rgba([255, 255, 255, 255]));
+    for y in 8..16 {
+        for x in 10..22 {
+            image.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+        }
+    }
+    image.save(&image_path).expect("save fixture");
+
+    let context = ToolContext::new(temp.path());
+    let inspect = ImagePreprocessTool.call(
+        serde_json::json!({"file_path": "sample.png", "operation": "inspect"}),
+        &context,
+    );
+    assert!(!inspect.is_error);
+    assert!(
+        inspect
+            .content
+            .contains("[ImagePreprocess.inspect] sample.png")
+    );
+    assert!(inspect.content.contains("size: 32x24"));
+    assert!(inspect.content.contains("likely_blank: false"));
+    assert!(inspect.content.contains("content_box: x="));
+
+    let preprocess = ImagePreprocessTool.call(
+        serde_json::json!({
+            "file_path": "sample.png",
+            "operation": "preprocess",
+            "auto_trim": true,
+            "max_dimension": 16,
+            "format": "png"
+        }),
+        &context,
+    );
+    assert!(!preprocess.is_error);
+    assert!(
+        preprocess
+            .content
+            .contains("[ImagePreprocess.preprocess] sample.png")
+    );
+    assert!(preprocess.content.contains("steps: auto_trim"));
+    assert!(preprocess.content.contains("format: image/png"));
+    assert!(preprocess.content.contains("image_base64:"));
+}
+
+#[test]
+fn vision_tool_classifies_local_images_and_validates_input() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let image_path = temp.path().join("sample.png");
+    let mut image = image::RgbaImage::from_pixel(32, 24, image::Rgba([255, 255, 255, 255]));
+    for y in 8..16 {
+        for x in 10..22 {
+            image.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+        }
+    }
+    image.save(&image_path).expect("save fixture");
+
+    let context = ToolContext::new(temp.path());
+    let classify = VisionTool.call(
+        serde_json::json!({"file_path": "sample.png", "operation": "classify"}),
+        &context,
+    );
+    assert!(!classify.is_error);
+    assert!(classify.content.contains("[Vision.classify] sample.png"));
+    assert!(classify.content.contains("size: 32x24"));
+    assert!(classify.content.contains("labels: image"));
+    assert!(classify.content.contains("likely_blank: false"));
+    assert!(classify.content.contains("content_box: x="));
+
+    let invalid_operation = VisionTool.call(
+        serde_json::json!({"file_path": "sample.png", "operation": "inspect"}),
+        &context,
+    );
+    assert!(invalid_operation.is_error);
+    assert_eq!(
+        invalid_operation.content,
+        "operation must be one of: ocr, layout, classify"
+    );
+
+    let invalid_languages = VisionTool.call(
+        serde_json::json!({
+            "file_path": "sample.png",
+            "operation": "classify",
+            "language_hints": "eng"
+        }),
+        &context,
+    );
+    assert!(invalid_languages.is_error);
+    assert_eq!(
+        invalid_languages.content,
+        "language_hints must be an array of strings"
+    );
+
+    let missing = VisionTool.call(
+        serde_json::json!({"file_path": "missing.png", "operation": "classify"}),
+        &context,
+    );
+    assert!(missing.is_error);
+    assert!(missing.content.contains("File not found:"));
+}
+
+#[test]
+fn mac_diagnostic_tools_validate_inputs_and_render_guidance() {
+    let context = ToolContext::new(".");
+
+    let crash_missing_path = CrashLogTool.call(serde_json::json!({"operation": "read"}), &context);
+    assert!(crash_missing_path.is_error);
+    assert_eq!(
+        crash_missing_path.content,
+        "file_path is required for operation=read"
+    );
+
+    let invalid_log_level = MacLogTool.call(serde_json::json!({"level": "verbose"}), &context);
+    assert!(invalid_log_level.is_error);
+    assert!(invalid_log_level.content.contains("level must be"));
+
+    let diagnose = MacDiagnoseTool.call(
+        serde_json::json!({"scenario": "crash", "app_name": "Tide"}),
+        &context,
+    );
+    assert!(!diagnose.is_error);
+    assert!(
+        diagnose
+            .content
+            .contains("[MacDiagnose] scenario=crash app=Tide")
+    );
+    assert!(diagnose.content.contains("1. CrashLog list app_name: Tide"));
+    assert!(diagnose.content.contains("2. MacLog process: Tide"));
+}
+
+#[test]
+fn cron_tools_create_list_and_delete_jobs() {
+    let context = ToolContext::new(".");
+    let create = CronCreateTool.call(
+        serde_json::json!({"cron": "*/5 * * * *", "prompt": "collect news"}),
+        &context,
+    );
+    assert!(!create.is_error);
+    assert!(create.content.contains("Recurring task"));
+    assert!(create.content.contains("every 5 minutes"));
+    assert!(create.content.contains("Permission mode switched to YOLO"));
+    let id = create
+        .content
+        .split_whitespace()
+        .nth(2)
+        .expect("job id")
+        .to_owned();
+
+    let list = CronListTool.call(serde_json::json!({}), &context);
+    assert!(!list.is_error);
+    assert!(
+        list.content
+            .contains(&format!("[{id}] Recurring: every 5 minutes"))
+    );
+    assert!(list.content.contains("Prompt: collect news"));
+
+    let delete = CronDeleteTool.call(serde_json::json!({"id": id}), &context);
+    assert!(!delete.is_error);
+    assert!(delete.content.contains("deleted"));
+}
+
+#[test]
+fn cron_create_rejects_malformed_expressions_and_empty_prompts() {
+    let context = ToolContext::new(".");
+    let bad_cron = CronCreateTool.call(
+        serde_json::json!({"cron": "/5 * * *", "prompt": "collect news"}),
+        &context,
+    );
+    assert!(bad_cron.is_error);
+    assert!(bad_cron.content.contains("5-field"));
+    assert!(bad_cron.content.contains("*/5 * * * *"));
+
+    let missing_prompt = CronCreateTool.call(
+        serde_json::json!({"cron": "*/5 * * * *", "prompt": ""}),
+        &context,
+    );
+    assert!(missing_prompt.is_error);
+    assert_eq!(missing_prompt.content, "prompt is required");
+}
+
+#[test]
+fn review_artifact_marks_resolved_workspace_path_with_reason() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temp.path());
+    let result = ReviewArtifactTool.call(
+        serde_json::json!({"file_path": "src/lib.rs", "reason": "check edge case"}),
+        &context,
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("Marked"));
+    assert!(result.content.contains("src/lib.rs"));
+    assert!(result.content.contains("check edge case"));
+
+    let missing = ReviewArtifactTool.call(serde_json::json!({}), &context);
+    assert!(missing.is_error);
+    assert_eq!(missing.content, "file_path is required");
+}
+
+#[test]
+fn skill_tool_expands_builtin_skill_prompts_and_reports_unknown_names() {
+    let context = ToolContext::new(".");
+    let commit = SkillTool.call(
+        serde_json::json!({"skill": "commit", "args": "-m fix"}),
+        &context,
+    );
+    assert!(!commit.is_error);
+    assert!(commit.content.contains("Skill invoked: commit"));
+    assert!(commit.content.contains("[SKILL PROMPT START]"));
+    assert!(commit.content.contains("git diff --cached"));
+    assert!(commit.content.contains("-m fix"));
+
+    let unknown = SkillTool.call(serde_json::json!({"skill": "missing"}), &context);
+    assert!(unknown.is_error);
+    assert!(unknown.content.contains("Unknown skill: missing"));
+    assert!(unknown.content.contains("commit"));
+    assert!(unknown.content.contains("publish"));
+}
+
+#[test]
+fn publish_tool_renders_status_and_validates_option_conflicts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temp.path());
+
+    let status = PublishTool.call(serde_json::json!({"status": true}), &context);
+    assert!(!status.is_error);
+    assert!(
+        status
+            .content
+            .contains("No saved clide.app publish state at .clide/publish.json")
+    );
+
+    let conflict = PublishTool.call(
+        serde_json::json!({"status": true, "dry_run": true}),
+        &context,
+    );
+    assert!(conflict.is_error);
+    assert_eq!(
+        conflict.content,
+        "status cannot be combined with publish/delete options."
+    );
+
+    let handle_conflict = PublishTool.call(
+        serde_json::json!({"random": true, "handle": "demo"}),
+        &context,
+    );
+    assert!(handle_conflict.is_error);
+    assert_eq!(
+        handle_conflict.content,
+        "Use either random or handle, not both."
+    );
+}
+
+#[test]
+fn publish_tool_dry_run_detects_static_output_and_writes_safety_ignore() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dist = temp.path().join("dist");
+    std::fs::create_dir_all(&dist).expect("mkdir");
+    std::fs::write(dist.join("index.html"), "<h1>Hello</h1>").expect("index");
+    std::fs::write(dist.join("app.js"), "console.log('ok');").expect("asset");
+    std::fs::write(dist.join("app.js.map"), "{}").expect("sourcemap");
+    std::fs::create_dir_all(dist.join("node_modules/pkg")).expect("node_modules");
+    std::fs::write(dist.join("node_modules/pkg/private.js"), "ignored").expect("ignored");
+
+    let result = PublishTool.call(
+        serde_json::json!({"dry_run": true, "handle": "demo"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("Publish dry run: ready"));
+    assert!(result.content.contains("Directory:  dist"));
+    assert!(result.content.contains("Handle:     demo"));
+    assert!(result.content.contains("Index:      yes"));
+    assert!(!result.content.contains("app.js.map"));
+    assert!(!result.content.contains("Source maps are included"));
+    assert!(!result.content.contains("private.js"));
+
+    let ignore = std::fs::read_to_string(temp.path().join(".clideignore")).expect("ignore");
+    assert!(ignore.contains("# Added by Clide publish safety defaults"));
+    assert!(ignore.contains(".env"));
+    assert!(ignore.contains("node_modules/"));
+}
+
+#[test]
+fn publish_tool_reports_missing_output_and_missing_auth() {
+    let _guard = publish_env_guard();
+    clear_publish_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = PublishTool.call(
+        serde_json::json!({"dry_run": true}),
+        &ToolContext::new(temp.path()),
+    );
+    assert!(missing.is_error);
+    assert!(
+        missing
+            .content
+            .contains("No publishable static directory found")
+    );
+
+    let public = temp.path().join("public");
+    std::fs::create_dir_all(&public).expect("mkdir public");
+    std::fs::write(public.join("index.html"), "<html></html>").expect("index");
+    let upload = PublishTool.call(serde_json::json!({}), &ToolContext::new(temp.path()));
+    assert!(upload.is_error);
+    assert!(upload.content.contains("Paean login is missing or expired"));
+}
+
+#[test]
+fn publish_tool_uploads_archive_and_saves_state() {
+    let _guard = publish_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let public = temp.path().join("public");
+    std::fs::create_dir_all(&public).expect("mkdir public");
+    std::fs::write(public.join("index.html"), "<html></html>").expect("index");
+    std::fs::write(public.join("app.js"), "console.log('ok');").expect("asset");
+
+    let base_url = serve_publish_sequence(vec![
+        (200, r#"{"success":true}"#),
+        (
+            200,
+            r#"{"success":true,"data":{"handle":"demo","assignedHandle":null,"url":"https://demo.clide.app","shortUrl":"https://demo.clide.app","fileCount":2,"totalBytes":31,"overwritten":false,"archiveUrl":"https://example.com/site.zip"}}"#,
+        ),
+    ]);
+    install_publish_env(&base_url);
+
+    let result = PublishTool.call(
+        serde_json::json!({"handle": "demo"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("Published: https://demo.clide.app"));
+    assert!(result.content.contains("Handle:     demo"));
+    let state = std::fs::read_to_string(temp.path().join(".clide/publish.json")).expect("state");
+    assert!(state.contains("\"handle\": \"demo\""));
+    assert!(state.contains("\"url\": \"https://demo.clide.app\""));
+}
+
+#[test]
+fn publish_tool_deletes_saved_handle_and_marks_state() {
+    let _guard = publish_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".clide")).expect("mkdir .clide");
+    std::fs::write(
+        temp.path().join(".clide/publish.json"),
+        r#"{"handle":"demo","url":"https://demo.clide.app"}"#,
+    )
+    .expect("state");
+    let base_url = serve_publish_sequence(vec![
+        (200, r#"{"success":true}"#),
+        (
+            200,
+            r#"{"success":true,"handle":"demo","deletedObjects":3}"#,
+        ),
+    ]);
+    install_publish_env(&base_url);
+
+    let result = PublishTool.call(
+        serde_json::json!({"delete": true}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(
+        result
+            .content
+            .contains("Deleted remote publish: demo.clide.app")
+    );
+    assert!(result.content.contains("Deleted objects: 3"));
+    let state = std::fs::read_to_string(temp.path().join(".clide/publish.json")).expect("state");
+    assert!(state.contains("\"lastDeletedHandle\": \"demo\""));
+    assert!(!state.contains("\"handle\": \"demo\""));
+}
+
+#[test]
+fn remote_trigger_tool_posts_configured_payload() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (url, request_rx) = serve_remote_trigger(202, r#"{"accepted":true}"#);
+    std::fs::create_dir_all(temp.path().join(".deeptide")).expect("mkdir config");
+    std::fs::write(
+        temp.path().join(".deeptide/settings.json"),
+        format!(
+            r#"{{
+                "remote_trigger": {{
+                    "url": "{url}",
+                    "token": "fixture-token",
+                    "headers": {{"X-Deeptide-Test": "yes"}}
+                }}
+            }}"#
+        ),
+    )
+    .expect("settings");
+
+    let result = RemoteTriggerTool.call(
+        serde_json::json!({"payload": "deploy docs"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("HTTP 202"));
+    assert!(result.content.contains(r#"{"accepted":true}"#));
+    let request = request_rx.recv().expect("captured request");
+    let lower_request = request.to_ascii_lowercase();
+    assert!(request.contains("POST /hook HTTP/1.1"));
+    assert!(lower_request.contains("authorization: bearer fixture-token"));
+    assert!(lower_request.contains("x-deeptide-test: yes"));
+    assert!(request.contains(r#"{"payload":"deploy docs"}"#));
+}
+
+#[test]
+fn remote_trigger_and_push_notification_validate_inputs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temp.path());
+
+    let missing_payload = RemoteTriggerTool.call(serde_json::json!({}), &context);
+    assert!(missing_payload.is_error);
+    assert_eq!(missing_payload.content, "payload is required");
+
+    let missing_config = RemoteTriggerTool.call(serde_json::json!({"payload": "deploy"}), &context);
+    assert!(missing_config.is_error);
+    assert_eq!(
+        missing_config.content,
+        "Remote trigger not configured. Add settings.remote_trigger.url."
+    );
+
+    let missing_message = PushNotificationTool.call(serde_json::json!({}), &context);
+    assert!(missing_message.is_error);
+    assert_eq!(missing_message.content, "message is required");
+
+    let too_long =
+        PushNotificationTool.call(serde_json::json!({"message": "x".repeat(501)}), &context);
+    assert!(too_long.is_error);
+    assert_eq!(too_long.content, "message must be <= 500 chars (got 501)");
 }
 
 #[test]
@@ -1078,10 +1831,165 @@ fn serve_once(status: u16, content_type: &'static str, body: &'static str) -> St
     format!("http://{addr}/page")
 }
 
+fn serve_remote_trigger(status: u16, body: &'static str) -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local remote trigger server");
+    let addr = listener
+        .local_addr()
+        .expect("remote trigger server address");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept remote trigger request");
+        let request = read_http_request_text(&mut stream);
+        tx.send(request).expect("send captured request");
+        let reason = if (200..300).contains(&status) {
+            "OK"
+        } else {
+            "ERROR"
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write remote trigger response");
+    });
+    (format!("http://{addr}/hook"), rx)
+}
+
+fn serve_publish_sequence(responses: Vec<(u16, &'static str)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local publish server");
+    let addr = listener.local_addr().expect("publish server address");
+    thread::spawn(move || {
+        for (status, body) in responses {
+            let (mut stream, _) = listener.accept().expect("accept publish request");
+            read_http_request(&mut stream);
+            let reason = if status == 200 { "OK" } else { "ERROR" };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write publish response");
+        }
+    });
+    format!("http://{addr}")
+}
+
+fn read_http_request_text(stream: &mut impl Read) -> String {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let mut header_end = None;
+    while header_end.is_none() {
+        let read = stream.read(&mut chunk).expect("read request");
+        if read == 0 {
+            return String::from_utf8_lossy(&buffer).into_owned();
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+    }
+    let header_end = header_end.expect("header end") + 4;
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    let mut remaining = content_length.saturating_sub(buffer.len().saturating_sub(header_end));
+    while remaining > 0 {
+        let read = stream.read(&mut chunk).expect("read request body");
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        remaining = remaining.saturating_sub(read);
+    }
+    String::from_utf8_lossy(&buffer).into_owned()
+}
+
+fn read_http_request(stream: &mut impl Read) {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let mut header_end = None;
+    while header_end.is_none() {
+        let read = stream.read(&mut chunk).expect("read request");
+        if read == 0 {
+            return;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+    }
+    let header_end = header_end.expect("header end") + 4;
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    let mut remaining = content_length.saturating_sub(buffer.len().saturating_sub(header_end));
+    while remaining > 0 {
+        let read = stream.read(&mut chunk).expect("read request body");
+        if read == 0 {
+            return;
+        }
+        remaining = remaining.saturating_sub(read);
+    }
+}
+
 fn todo_test_guard() -> MutexGuard<'static, ()> {
     static TODO_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     TODO_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .expect("todo test lock")
+}
+
+fn publish_env_guard() -> MutexGuard<'static, ()> {
+    static PUBLISH_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    PUBLISH_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+fn install_publish_env(base_url: &str) {
+    unsafe {
+        std::env::set_var("PAEAN_API_TOKEN", "fixture-credential");
+        std::env::set_var("PAEAN_API_BASE_URL", base_url);
+        std::env::remove_var("PAEAN_TOKEN");
+        std::env::remove_var("CLIDE_API_TOKEN");
+        std::env::remove_var("CLIDE_API_BASE_URL");
+    }
+}
+
+fn clear_publish_env() {
+    unsafe {
+        std::env::remove_var("PAEAN_API_TOKEN");
+        std::env::remove_var("PAEAN_TOKEN");
+        std::env::remove_var("CLIDE_API_TOKEN");
+        std::env::remove_var("PAEAN_API_BASE_URL");
+        std::env::remove_var("CLIDE_API_BASE_URL");
+    }
+}
+
+fn memory_env_guard() -> MutexGuard<'static, ()> {
+    static MEMORY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    MEMORY_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+fn install_memory_env(root: &std::path::Path) {
+    unsafe {
+        std::env::set_var("HOME", root.join("home"));
+        std::env::set_var("TIDE_CONFIG_DIR", root.join("tide-config"));
+    }
 }
