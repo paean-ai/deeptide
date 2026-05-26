@@ -34,11 +34,12 @@ pub use repl::{ReplEvent, ReplSession};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
     AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
-    CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
-    FileMetadataTool, GlobTool, GrepTool, ImagePreprocessTool, LspTool, MacDiagnoseTool,
-    MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, PublishTool, PushNotificationTool,
-    ReadFilesTool, ReadTool, RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool,
-    SnipTool, SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
-    TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult,
-    ToolSearchTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool,
+    CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, EnterWorktreeTool,
+    ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool, GlobTool, GrepTool, ImagePreprocessTool,
+    LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool,
+    NotebookEditTool, PublishTool, PushNotificationTool, ReadFilesTool, ReadTool,
+    RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool, SnipTool,
+    SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
+    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, ToolSearchTool,
+    VerifyPlanExecutionTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool,
 };

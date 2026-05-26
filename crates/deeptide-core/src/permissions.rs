@@ -414,6 +414,8 @@ fn is_read_only(tool_name: &str) -> bool {
             | "TaskList"
             | "TaskGet"
             | "TaskOutput"
+            | "VerifyPlanExecution"
+            | "Sleep"
             | "CtxInspect"
             | "Snip"
             | "Brief"
