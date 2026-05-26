@@ -2,16 +2,16 @@ use deeptide_core::{
     AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
     CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
     FileMetadataTool, ImagePreprocessTool, LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool,
-    MemoryWriteTool, MonitorTool, PublishTool, ReadFilesTool, ReviewArtifactTool,
-    ScreenCaptureTool, SkillTool, SnipTool, SpotlightSearchTool, TaskCreateTool, TaskGetTool,
-    TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext,
-    ToolRegistry, ToolSearchTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool,
-    memory::MemorySystem,
+    MemoryWriteTool, MonitorTool, PublishTool, PushNotificationTool, ReadFilesTool,
+    RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool, SnipTool,
+    SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
+    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, VisionTool,
+    WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, mpsc};
 use std::thread;
 
 #[test]
@@ -1114,6 +1114,67 @@ fn publish_tool_deletes_saved_handle_and_marks_state() {
 }
 
 #[test]
+fn remote_trigger_tool_posts_configured_payload() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (url, request_rx) = serve_remote_trigger(202, r#"{"accepted":true}"#);
+    std::fs::create_dir_all(temp.path().join(".deeptide")).expect("mkdir config");
+    std::fs::write(
+        temp.path().join(".deeptide/settings.json"),
+        format!(
+            r#"{{
+                "remote_trigger": {{
+                    "url": "{url}",
+                    "token": "fixture-token",
+                    "headers": {{"X-Deeptide-Test": "yes"}}
+                }}
+            }}"#
+        ),
+    )
+    .expect("settings");
+
+    let result = RemoteTriggerTool.call(
+        serde_json::json!({"payload": "deploy docs"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("HTTP 202"));
+    assert!(result.content.contains(r#"{"accepted":true}"#));
+    let request = request_rx.recv().expect("captured request");
+    let lower_request = request.to_ascii_lowercase();
+    assert!(request.contains("POST /hook HTTP/1.1"));
+    assert!(lower_request.contains("authorization: bearer fixture-token"));
+    assert!(lower_request.contains("x-deeptide-test: yes"));
+    assert!(request.contains(r#"{"payload":"deploy docs"}"#));
+}
+
+#[test]
+fn remote_trigger_and_push_notification_validate_inputs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temp.path());
+
+    let missing_payload = RemoteTriggerTool.call(serde_json::json!({}), &context);
+    assert!(missing_payload.is_error);
+    assert_eq!(missing_payload.content, "payload is required");
+
+    let missing_config = RemoteTriggerTool.call(serde_json::json!({"payload": "deploy"}), &context);
+    assert!(missing_config.is_error);
+    assert_eq!(
+        missing_config.content,
+        "Remote trigger not configured. Add settings.remote_trigger.url."
+    );
+
+    let missing_message = PushNotificationTool.call(serde_json::json!({}), &context);
+    assert!(missing_message.is_error);
+    assert_eq!(missing_message.content, "message is required");
+
+    let too_long =
+        PushNotificationTool.call(serde_json::json!({"message": "x".repeat(501)}), &context);
+    assert!(too_long.is_error);
+    assert_eq!(too_long.content, "message must be <= 500 chars (got 501)");
+}
+
+#[test]
 fn todo_write_tool_updates_in_memory_list() {
     let _guard = todo_test_guard();
     let result = TodoWriteTool.call(
@@ -1770,6 +1831,31 @@ fn serve_once(status: u16, content_type: &'static str, body: &'static str) -> St
     format!("http://{addr}/page")
 }
 
+fn serve_remote_trigger(status: u16, body: &'static str) -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local remote trigger server");
+    let addr = listener
+        .local_addr()
+        .expect("remote trigger server address");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept remote trigger request");
+        let request = read_http_request_text(&mut stream);
+        tx.send(request).expect("send captured request");
+        let reason = if (200..300).contains(&status) {
+            "OK"
+        } else {
+            "ERROR"
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write remote trigger response");
+    });
+    (format!("http://{addr}/hook"), rx)
+}
+
 fn serve_publish_sequence(responses: Vec<(u16, &'static str)>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local publish server");
     let addr = listener.local_addr().expect("publish server address");
@@ -1787,6 +1873,41 @@ fn serve_publish_sequence(responses: Vec<(u16, &'static str)>) -> String {
         }
     });
     format!("http://{addr}")
+}
+
+fn read_http_request_text(stream: &mut impl Read) -> String {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let mut header_end = None;
+    while header_end.is_none() {
+        let read = stream.read(&mut chunk).expect("read request");
+        if read == 0 {
+            return String::from_utf8_lossy(&buffer).into_owned();
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+    }
+    let header_end = header_end.expect("header end") + 4;
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    let mut remaining = content_length.saturating_sub(buffer.len().saturating_sub(header_end));
+    while remaining > 0 {
+        let read = stream.read(&mut chunk).expect("read request body");
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        remaining = remaining.saturating_sub(read);
+    }
+    String::from_utf8_lossy(&buffer).into_owned()
 }
 
 fn read_http_request(stream: &mut impl Read) {

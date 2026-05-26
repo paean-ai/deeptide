@@ -112,6 +112,8 @@ impl ToolRegistry {
         registry.register(Box::<ReviewArtifactTool>::default());
         registry.register(Box::<SkillTool>::default());
         registry.register(Box::<PublishTool>::default());
+        registry.register(Box::<RemoteTriggerTool>::default());
+        registry.register(Box::<PushNotificationTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
@@ -1486,6 +1488,13 @@ static CRON_JOBS: OnceLock<Mutex<BTreeMap<String, CronJob>>> = OnceLock::new();
 static CRON_ID_COUNTER: OnceLock<Mutex<u64>> = OnceLock::new();
 static REVIEW_ARTIFACTS: OnceLock<Mutex<BTreeMap<PathBuf, String>>> = OnceLock::new();
 
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+struct RemoteTriggerSettings {
+    url: Option<String>,
+    token: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReviewArtifactTool;
 
@@ -1494,6 +1503,12 @@ pub struct SkillTool;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PublishTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RemoteTriggerTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PushNotificationTool;
 
 #[derive(Debug, Clone, Copy)]
 struct BuiltinSkill {
@@ -1922,6 +1937,149 @@ impl Tool for PublishTool {
             Ok(result) => ToolResult::text(result),
             Err(message) => ToolResult::error(message),
         }
+    }
+}
+
+impl Tool for RemoteTriggerTool {
+    fn name(&self) -> &'static str {
+        "RemoteTrigger"
+    }
+
+    fn description(&self) -> &'static str {
+        "POST a JSON payload to a configured remote webhook endpoint."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(payload) = input.get("payload").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("payload is required");
+        };
+        let settings = match load_remote_trigger_settings(context) {
+            Ok(Some(settings)) => settings,
+            Ok(None) => {
+                return ToolResult::error(
+                    "Remote trigger not configured. Add settings.remote_trigger.url.",
+                );
+            }
+            Err(error) => return ToolResult::error(error),
+        };
+        let Some(url) = settings
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return ToolResult::error(
+                "Remote trigger not configured. Add settings.remote_trigger.url.",
+            );
+        };
+
+        let body = if let Some(override_body) = input
+            .get("override_body")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            override_body.to_owned()
+        } else {
+            match serde_json::to_string(&serde_json::json!({ "payload": payload })) {
+                Ok(body) => body,
+                Err(error) => {
+                    return ToolResult::error(format!("Failed to encode payload: {error}"));
+                }
+            }
+        };
+
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                return ToolResult::error(format!("Failed to create HTTP client: {error}"));
+            }
+        };
+        let mut request = client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
+        if let Some(token) = settings
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            request = request.bearer_auth(token);
+        }
+        if let Some(headers) = settings.headers {
+            for (key, value) in headers {
+                if !key.trim().is_empty() {
+                    request = request.header(key, value);
+                }
+            }
+        }
+
+        match request.send() {
+            Ok(response) => {
+                let status = response.status();
+                let body = response
+                    .text()
+                    .unwrap_or_else(|error| format!("(failed to read response body: {error})"));
+                let mut truncated: String = body.chars().take(2000).collect();
+                if body.chars().count() > 2000 {
+                    truncated.push_str("\n[response truncated]");
+                }
+                let content = format!("HTTP {}\n{truncated}", status.as_u16());
+                if status.is_success() {
+                    ToolResult::text(content)
+                } else {
+                    ToolResult::error(content)
+                }
+            }
+            Err(error) => ToolResult::error(format!("Request failed: {error}")),
+        }
+    }
+}
+
+impl Tool for PushNotificationTool {
+    fn name(&self) -> &'static str {
+        "PushNotification"
+    }
+
+    fn description(&self) -> &'static str {
+        "Post a native desktop notification when the user should be alerted."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(message) = input.get("message").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("message is required");
+        };
+        if message.is_empty() {
+            return ToolResult::error("message is required");
+        }
+        if message.chars().count() > 500 {
+            return ToolResult::error(format!(
+                "message must be <= 500 chars (got {})",
+                message.chars().count()
+            ));
+        }
+        let title = input
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("deeptide");
+        let subtitle = input.get("subtitle").and_then(serde_json::Value::as_str);
+        let sound = input
+            .get("sound")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+
+        post_desktop_notification(title, subtitle, message, sound)
     }
 }
 
@@ -5065,6 +5223,221 @@ fn parse_publish_error_message(body: &str) -> Option<String> {
         })
 }
 
+fn load_remote_trigger_settings(
+    context: &ToolContext,
+) -> Result<Option<RemoteTriggerSettings>, String> {
+    let mut settings = RemoteTriggerSettings::default();
+    for path in remote_trigger_settings_paths(&context.cwd) {
+        let Some(layer) = read_remote_trigger_settings(&path)? else {
+            continue;
+        };
+        if layer.url.is_some() {
+            settings.url = layer.url;
+        }
+        if layer.token.is_some() {
+            settings.token = layer.token;
+        }
+        if layer.headers.is_some() {
+            settings.headers = layer.headers;
+        }
+    }
+
+    if let Ok(url) = std::env::var("DEEPTIDE_REMOTE_TRIGGER_URL")
+        && !url.trim().is_empty()
+    {
+        settings.url = Some(url);
+    }
+    if let Ok(token) = std::env::var("DEEPTIDE_REMOTE_TRIGGER_TOKEN")
+        && !token.trim().is_empty()
+    {
+        settings.token = Some(token);
+    }
+
+    if settings.url.is_none() && settings.token.is_none() && settings.headers.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(settings))
+    }
+}
+
+fn read_remote_trigger_settings(path: &Path) -> Result<Option<RemoteTriggerSettings>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read settings file {}: {error}", path.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("Failed to parse settings file {}: {error}", path.display()))?;
+    let Some(remote_trigger) = json.get("remote_trigger") else {
+        return Ok(None);
+    };
+    serde_json::from_value(remote_trigger.clone())
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "Failed to parse settings.remote_trigger in {}: {error}",
+                path.display()
+            )
+        })
+}
+
+fn remote_trigger_settings_paths(cwd: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(config_dir) = tide_config_dir() {
+        let project = project_settings_slug(cwd);
+        paths.push(config_dir.join("settings.json"));
+        paths.push(
+            config_dir
+                .join("projects")
+                .join(&project)
+                .join("settings.json"),
+        );
+        paths.push(
+            config_dir
+                .join("projects")
+                .join(project)
+                .join("settings.local.json"),
+        );
+    }
+    if let Some(home) = home_dir() {
+        paths.push(home.join(".deeptide").join("settings.json"));
+        paths.push(home.join(".deeptide").join("config.json"));
+    }
+    paths.push(cwd.join(".deeptide").join("settings.json"));
+    paths.push(cwd.join(".deeptide").join("config.json"));
+    paths
+}
+
+fn tide_config_dir() -> Option<PathBuf> {
+    std::env::var_os("TIDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".config").join("tide")))
+}
+
+fn project_settings_slug(cwd: &Path) -> String {
+    let normalized = cwd.to_string_lossy().replace('\\', "/");
+    let mut slug = normalized.replace('/', "-");
+    while slug.starts_with('-') {
+        slug.remove(0);
+    }
+    if slug.len() > 64 {
+        slug = slug.chars().take(64).collect();
+    }
+    slug
+}
+
+fn post_desktop_notification(
+    title: &str,
+    subtitle: Option<&str>,
+    message: &str,
+    sound: bool,
+) -> ToolResult {
+    post_desktop_notification_impl(title, subtitle, message, sound)
+}
+
+#[cfg(target_os = "macos")]
+fn post_desktop_notification_impl(
+    title: &str,
+    subtitle: Option<&str>,
+    message: &str,
+    sound: bool,
+) -> ToolResult {
+    let mut script = format!(
+        "display notification {} with title {}",
+        applescript_string(message),
+        applescript_string(title)
+    );
+    if let Some(subtitle) = subtitle.filter(|value| !value.is_empty()) {
+        script.push_str(" subtitle ");
+        script.push_str(&applescript_string(subtitle));
+    }
+    if sound {
+        script.push_str(" sound name \"Submarine\"");
+    }
+    let output = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            ToolResult::text(format!("Notification posted: {title}"))
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            ToolResult::error(format!(
+                "osascript exited with code {}. {}",
+                output.status.code().unwrap_or(-1),
+                stderr.trim()
+            ))
+        }
+        Err(error) => ToolResult::error(format!("Failed to spawn osascript: {error}")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn post_desktop_notification_impl(
+    title: &str,
+    subtitle: Option<&str>,
+    message: &str,
+    _sound: bool,
+) -> ToolResult {
+    let mut command = Command::new("notify-send");
+    command.arg(title).arg(message);
+    if let Some(subtitle) = subtitle.filter(|value| !value.is_empty()) {
+        command
+            .arg("--hint")
+            .arg(format!("string:deeptide-subtitle:{subtitle}"));
+    }
+    let output = command.output();
+    match output {
+        Ok(output) if output.status.success() => {
+            ToolResult::text(format!("Notification posted: {title}"))
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            ToolResult::error(format!(
+                "notify-send exited with code {}. {}",
+                output.status.code().unwrap_or(-1),
+                stderr.trim()
+            ))
+        }
+        Err(error) => ToolResult::error(format!(
+            "Failed to spawn notify-send. Install libnotify-bin or equivalent: {error}"
+        )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn post_desktop_notification_impl(
+    _title: &str,
+    _subtitle: Option<&str>,
+    _message: &str,
+    _sound: bool,
+) -> ToolResult {
+    ToolResult::error(
+        "PushNotification is not implemented on Windows yet. Use normal assistant output or a RemoteTrigger webhook.",
+    )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn post_desktop_notification_impl(
+    _title: &str,
+    _subtitle: Option<&str>,
+    _message: &str,
+    _sound: bool,
+) -> ToolResult {
+    ToolResult::error("PushNotification is not supported on this platform.")
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_string(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r'], " ");
+    format!("\"{escaped}\"")
+}
+
 fn percent_encode_path_segment(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.as_bytes() {
@@ -5783,6 +6156,15 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "static site",
             "dry run",
             "unpublish",
+        ],
+        "RemoteTrigger" => vec!["webhook", "remote", "trigger", "post", "automation"],
+        "PushNotification" => vec![
+            "notification",
+            "alert",
+            "notify",
+            "desktop",
+            "afk",
+            "reminder",
         ],
         "Edit" => vec!["replace", "patch", "modify", "string replacement"],
         "FileMetadata" => vec!["xattr", "quarantine", "binary", "mime", "file type"],
