@@ -404,6 +404,14 @@ printf 'Content-Length: %s\r\n\r\n%s' "${#body2}" "$body2"
     );
     assert!(!forward.is_error);
     assert!(forward.content.contains("\"resources\""));
+
+    let dynamic = ToolRegistry::with_builtin_tools().call(
+        "mcp__docs__lookup",
+        serde_json::json!({"query": "guide"}),
+        &context,
+    );
+    assert!(!dynamic.is_error);
+    assert!(dynamic.content.contains("\"content\""));
 }
 
 #[cfg(unix)]

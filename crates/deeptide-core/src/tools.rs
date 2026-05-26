@@ -151,6 +151,9 @@ impl ToolRegistry {
 
     pub fn call(&self, name: &str, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         let Some(tool) = self.get(name) else {
+            if let Some((server, tool_name)) = parse_dynamic_mcp_tool_name(name) {
+                return call_dynamic_mcp_tool(server, tool_name, input, context);
+            }
             return ToolResult::error(format!("Unknown tool: {name}"));
         };
         tool.call(input, context)
@@ -6390,6 +6393,32 @@ fn call_configured_mcp_server(
         return Err(format!("MCP server not configured: {server}"));
     };
     call_mcp_server(config, method, params)
+}
+
+fn parse_dynamic_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix("mcp__")?;
+    let (server, tool) = rest.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty()).then_some((server, tool))
+}
+
+fn call_dynamic_mcp_tool(
+    server: &str,
+    tool_name: &str,
+    input: serde_json::Value,
+    context: &ToolContext,
+) -> ToolResult {
+    let arguments = input
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| input.clone());
+    let params = serde_json::json!({
+        "name": tool_name,
+        "arguments": arguments
+    });
+    match call_configured_mcp_server(&context.cwd, server, "tools/call", params) {
+        Ok(result) => ToolResult::text(format_json_value(&result)),
+        Err(error) => ToolResult::error(error),
+    }
 }
 
 fn discover_mcp_servers(cwd: &Path) -> Result<Vec<McpServerConfig>, String> {
