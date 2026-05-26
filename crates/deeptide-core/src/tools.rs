@@ -6317,6 +6317,7 @@ struct McpServerConfig {
     source: PathBuf,
     command: Option<String>,
     args: Vec<String>,
+    env: BTreeMap<String, String>,
     url: Option<String>,
 }
 
@@ -6459,6 +6460,9 @@ fn collect_mcp_servers(
         let Some(config) = value.as_object() else {
             continue;
         };
+        if config.get("disabled").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
+        }
         let command = config
             .get("command")
             .and_then(serde_json::Value::as_str)
@@ -6483,11 +6487,26 @@ fn collect_mcp_servers(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let env = config
+            .get("env")
+            .and_then(serde_json::Value::as_object)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value
+                            .as_str()
+                            .map(|value| (key.to_owned(), value.to_owned()))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
         servers.push(McpServerConfig {
             name: name.to_owned(),
             source: source.to_path_buf(),
             command,
             args,
+            env,
             url,
         });
     }
@@ -6513,6 +6532,7 @@ fn call_mcp_server(
 
     let mut child = Command::new(command)
         .args(&config.args)
+        .envs(&config.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -321,6 +321,10 @@ fn mcp_tools_call_configured_stdio_servers() {
     std::fs::write(
         &server,
         r#"#!/bin/sh
+if [ "$1" != "serve" ] || [ "$DEEPTIDE_TEST_MODE" != "stdio" ]; then
+  echo "bad launch context" >&2
+  exit 7
+fi
 cat >/dev/null
 body1='{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}'
 body2='{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"file://guide.md","name":"Guide"}],"prompts":[{"name":"review","description":"Review code"}],"content":[{"type":"text","text":"hello"}]}}'
@@ -339,7 +343,15 @@ printf 'Content-Length: %s\r\n\r\n%s' "${#body2}" "$body2"
         temp.path().join(".mcp.json"),
         serde_json::json!({
             "mcpServers": {
-                "docs": {"command": server.display().to_string()},
+                "docs": {
+                    "command": server.display().to_string(),
+                    "args": ["serve"],
+                    "env": {"DEEPTIDE_TEST_MODE": "stdio"}
+                },
+                "disabled": {
+                    "command": server.display().to_string(),
+                    "disabled": true
+                },
                 "remote": {"url": "https://mcp.example.invalid"}
             }
         })
@@ -353,6 +365,7 @@ printf 'Content-Length: %s\r\n\r\n%s' "${#body2}" "$body2"
     assert!(resources.content.contains("[docs]"));
     assert!(resources.content.contains("command:"));
     assert!(resources.content.contains("file://guide.md - Guide"));
+    assert!(!resources.content.contains("[disabled]"));
     assert!(resources.content.contains("[remote]"));
     assert!(
         resources
