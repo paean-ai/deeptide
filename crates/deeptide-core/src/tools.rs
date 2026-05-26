@@ -1062,12 +1062,12 @@ impl Tool for ClipboardTool {
         };
 
         match operation {
-            "inspect" => match clipboard_read_text() {
-                Ok(text) => ToolResult::text(ClipboardSnapshot::from_text(text).render_inspect()),
+            "inspect" => match clipboard_snapshot() {
+                Ok(snapshot) => ToolResult::text(snapshot.render_inspect()),
                 Err(message) => ToolResult::error(message),
             },
-            "read" => match clipboard_read_text() {
-                Ok(text) => ToolResult::text(ClipboardSnapshot::from_text(text).render_read()),
+            "read" => match clipboard_snapshot() {
+                Ok(snapshot) => ToolResult::text(snapshot.render_read()),
                 Err(message) => ToolResult::error(message),
             },
             "files" => match clipboard_file_paths() {
@@ -1098,15 +1098,20 @@ impl Tool for ClipboardTool {
 }
 
 impl ClipboardSnapshot {
-    fn from_text(text: String) -> Self {
+    fn from_text_and_files(text: String, file_paths: Vec<String>) -> Self {
+        let has_text = !text.is_empty();
+        let has_files = !file_paths.is_empty();
+        let mut type_names = Vec::new();
+        if has_files {
+            type_names.push(String::from("public.file-url"));
+        }
+        if has_text {
+            type_names.push(String::from("text/plain"));
+        }
         Self {
-            type_names: if text.is_empty() {
-                Vec::new()
-            } else {
-                vec![String::from("text/plain")]
-            },
-            text: (!text.is_empty()).then_some(text),
-            file_paths: Vec::new(),
+            type_names,
+            text: has_text.then_some(text),
+            file_paths,
             has_html: false,
             has_rtf: false,
             image_size: None,
@@ -6178,6 +6183,12 @@ fn clipboard_write_text(content: &str) -> Result<(), String> {
     }
 }
 
+fn clipboard_snapshot() -> Result<ClipboardSnapshot, String> {
+    let text = clipboard_read_text()?;
+    let file_paths = clipboard_file_paths().unwrap_or_default();
+    Ok(ClipboardSnapshot::from_text_and_files(text, file_paths))
+}
+
 fn clipboard_file_paths() -> Result<Vec<String>, String> {
     #[cfg(target_os = "macos")]
     {
@@ -9299,19 +9310,31 @@ mod clipboard_tests {
 
     #[test]
     fn clipboard_snapshot_read_reports_file_urls() {
-        let snapshot = ClipboardSnapshot {
-            type_names: vec![String::from("public.file-url")],
-            text: None,
-            file_paths: vec![String::from("/tmp/a.txt"), String::from("/tmp/b.txt")],
-            has_html: false,
-            has_rtf: false,
-            image_size: None,
-        };
+        let snapshot = ClipboardSnapshot::from_text_and_files(
+            String::new(),
+            vec![String::from("/tmp/a.txt"), String::from("/tmp/b.txt")],
+        );
 
         assert_eq!(
             snapshot.render_read(),
             "[Clipboard file URLs]\n/tmp/a.txt\n/tmp/b.txt"
         );
+        assert!(snapshot.render_inspect().contains("files: 2"));
+    }
+
+    #[test]
+    fn clipboard_snapshot_read_prefers_text_but_inspects_files() {
+        let snapshot = ClipboardSnapshot::from_text_and_files(
+            String::from("hello"),
+            vec![String::from("/tmp/a.txt")],
+        );
+
+        assert_eq!(snapshot.render_read(), "hello");
+        let rendered = snapshot.render_inspect();
+        assert!(rendered.contains("types: public.file-url, text/plain"));
+        assert!(rendered.contains("text: 5 chars"));
+        assert!(rendered.contains("files: 1"));
+        assert!(rendered.contains("  /tmp/a.txt"));
     }
 
     #[test]
