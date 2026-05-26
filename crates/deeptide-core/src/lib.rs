@@ -8,6 +8,7 @@ pub mod markdown;
 pub mod memory;
 pub mod permissions;
 pub mod repl;
+pub mod tool_batch_labeler;
 pub mod tool_result_summary;
 pub mod tools;
 
@@ -31,6 +32,7 @@ pub use permissions::{
     ToolInput,
 };
 pub use repl::{ReplEvent, ReplSession};
+pub use tool_batch_labeler::{ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
     AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
