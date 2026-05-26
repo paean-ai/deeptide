@@ -1,13 +1,13 @@
 use deeptide_core::{
-    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
-    CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, EnterWorktreeTool,
-    ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool, ImagePreprocessTool, LspTool,
-    MacDiagnoseTool, MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, NotebookEditTool,
-    PublishTool, PushNotificationTool, ReadFilesTool, RemoteTriggerTool, ReviewArtifactTool,
-    ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool, TaskCreateTool,
-    TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool,
-    ToolContext, ToolRegistry, ToolSearchTool, VerifyPlanExecutionTool, VisionTool, WebFetchTool,
-    WebSearchTool, WriteTool, memory::MemorySystem,
+    AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool, ClipboardTool, CrashLogTool,
+    CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool,
+    EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool, ImagePreprocessTool,
+    LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool,
+    NotebookEditTool, PublishTool, PushNotificationTool, ReadFilesTool, RemoteTriggerTool,
+    ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool,
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
+    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, VerifyPlanExecutionTool,
+    VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -649,6 +649,46 @@ fn clipboard_tool_validates_operation_and_write_content() {
     );
     assert!(missing_content.is_error);
     assert_eq!(missing_content.content, "write operation requires content");
+}
+
+#[test]
+fn media_transcribe_tools_validate_inputs_and_report_backend_gap() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("clip.mp3"), b"not real audio").expect("audio fixture");
+    std::fs::write(temp.path().join("movie.mp4"), b"not real video").expect("video fixture");
+    std::fs::write(temp.path().join("notes.txt"), b"text").expect("text fixture");
+    let context = ToolContext::new(temp.path());
+
+    let missing_audio = AudioTranscribeTool.call(serde_json::json!({}), &context);
+    assert!(missing_audio.is_error);
+    assert_eq!(missing_audio.content, "file_path is required");
+
+    let unsupported =
+        AudioTranscribeTool.call(serde_json::json!({"file_path": "notes.txt"}), &context);
+    assert!(unsupported.is_error);
+    assert!(unsupported.content.contains("Unsupported audio format"));
+
+    let audio = AudioTranscribeTool.call(
+        serde_json::json!({"file_path": "clip.mp3", "language_hint": "en-US"}),
+        &context,
+    );
+    assert!(audio.is_error);
+    assert!(audio.content.contains("[AudioTranscribe] clip.mp3"));
+    assert!(audio.content.contains("Transcription backend unavailable"));
+    assert!(audio.content.contains("Language hint: en-US"));
+
+    let video = VideoTranscribeTool.call(
+        serde_json::json!({"file_path": "movie.mp4", "allow_server": true}),
+        &context,
+    );
+    assert!(video.is_error);
+    assert!(video.content.contains("[VideoTranscribe] movie.mp4"));
+    assert!(
+        video
+            .content
+            .contains("Recognition mode: local or server fallback allowed by input")
+    );
+    assert!(video.content.contains("Visual frames: not analyzed"));
 }
 
 #[test]

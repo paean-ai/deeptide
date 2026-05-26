@@ -99,6 +99,8 @@ impl ToolRegistry {
         registry.register(Box::<ExitPlanModeTool>::default());
         registry.register(Box::<LspTool>::default());
         registry.register(Box::<ClipboardTool>::default());
+        registry.register(Box::<AudioTranscribeTool>::default());
+        registry.register(Box::<VideoTranscribeTool>::default());
         registry.register(Box::<SpotlightSearchTool>::default());
         registry.register(Box::<ScreenCaptureTool>::default());
         registry.register(Box::<ImagePreprocessTool>::default());
@@ -1026,6 +1028,12 @@ impl Tool for LspTool {
 pub struct ClipboardTool;
 
 #[derive(Debug, Default, Clone, Copy)]
+pub struct AudioTranscribeTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VideoTranscribeTool;
+
+#[derive(Debug, Default, Clone, Copy)]
 pub struct SpotlightSearchTool;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1176,6 +1184,68 @@ impl ClipboardSnapshot {
             );
         }
         String::from("[Clipboard is empty or contains unsupported content]")
+    }
+}
+
+impl Tool for AudioTranscribeTool {
+    fn name(&self) -> &'static str {
+        "AudioTranscribe"
+    }
+
+    fn description(&self) -> &'static str {
+        "Transcribe a local audio file with a configured local speech backend."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("file_path is required");
+        };
+        let language_hint = input
+            .get("language_hint")
+            .and_then(serde_json::Value::as_str);
+        transcribe_media(
+            MediaKind::Audio,
+            &context.resolve_path(file_path),
+            language_hint,
+            false,
+        )
+    }
+}
+
+impl Tool for VideoTranscribeTool {
+    fn name(&self) -> &'static str {
+        "VideoTranscribe"
+    }
+
+    fn description(&self) -> &'static str {
+        "Extract and transcribe the audio track from a local video file."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("file_path is required");
+        };
+        let language_hint = input
+            .get("language_hint")
+            .and_then(serde_json::Value::as_str);
+        let allow_server = input
+            .get("allow_server")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        transcribe_media(
+            MediaKind::Video,
+            &context.resolve_path(file_path),
+            language_hint,
+            allow_server,
+        )
     }
 }
 
@@ -2715,6 +2785,147 @@ fn model_context_window(model: &str) -> u64 {
         262_144
     } else {
         200_000
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaKind {
+    Audio,
+    Video,
+}
+
+impl MediaKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Audio => "AudioTranscribe",
+            Self::Video => "VideoTranscribe",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+
+    fn supported_extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Audio => &[
+                "mp3", "wav", "m4a", "aiff", "aif", "caf", "flac", "ogg", "opus",
+            ],
+            Self::Video => &["mp4", "mov", "m4v", "mkv", "webm", "avi"],
+        }
+    }
+}
+
+fn transcribe_media(
+    kind: MediaKind,
+    path: &Path,
+    language_hint: Option<&str>,
+    allow_server: bool,
+) -> ToolResult {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("media");
+    if !path.exists() {
+        return ToolResult::error(format!("File not found: {}", path.display()));
+    }
+    if !path.is_file() {
+        return ToolResult::error(format!("Path is not a file: {}", path.display()));
+    }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !kind.supported_extensions().contains(&extension.as_str()) {
+        return ToolResult::error(format!(
+            "Unsupported {} format: .{}\nSupported formats: {}",
+            kind.noun(),
+            if extension.is_empty() {
+                "(none)"
+            } else {
+                extension.as_str()
+            },
+            kind.supported_extensions().join(", ")
+        ));
+    }
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return ToolResult::error(format!("File is not readable: {file_name}: {error}"));
+        }
+    };
+
+    let duration = media_duration(path);
+    let mut lines = vec![
+        format!("[{}] {file_name}", kind.label()),
+        String::new(),
+        String::from("Transcription backend unavailable in this Rust build."),
+        String::new(),
+        String::from("--- Metadata ---"),
+        format!("File size: {}", format_bytes(metadata.len())),
+    ];
+    if let Some(duration) = duration {
+        lines.push(format!("Duration: {}", format_duration_seconds(duration)));
+    } else {
+        lines.push(String::from("Duration: unavailable"));
+    }
+    if let Some(language_hint) = language_hint.filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("Language hint: {}", language_hint.trim()));
+    }
+    if kind == MediaKind::Video {
+        lines.push(format!(
+            "Recognition mode: {}",
+            if allow_server {
+                "local or server fallback allowed by input"
+            } else {
+                "local only"
+            }
+        ));
+        lines.push(String::from("Visual frames: not analyzed"));
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "Install or configure a local speech-to-text backend, then retry. This tool currently provides safe validation and metadata parity for Rust while avoiding cloud uploads by default.",
+    ));
+    ToolResult::error(lines.join("\n"))
+}
+
+fn media_duration(path: &Path) -> Option<f64> {
+    let ffprobe = which_binary("ffprobe")?;
+    let output = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+fn format_duration_seconds(seconds: f64) -> String {
+    let total = seconds.round() as u64;
+    let minutes = total / 60;
+    let seconds = total % 60;
+    if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -6573,6 +6784,22 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "paste",
             "finder",
             "selection",
+        ],
+        "AudioTranscribe" => vec![
+            "audio",
+            "speech",
+            "transcribe",
+            "transcription",
+            "voice",
+            "recording",
+        ],
+        "VideoTranscribe" => vec![
+            "video",
+            "speech",
+            "transcribe",
+            "transcription",
+            "audio track",
+            "subtitles",
         ],
         "SpotlightSearch" => vec![
             "spotlight",

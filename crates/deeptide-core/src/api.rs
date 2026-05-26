@@ -395,6 +395,31 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "AudioTranscribe",
+            description: "Transcribe a local audio file with a configured local speech backend.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the audio file. Relative paths resolve against the current workspace."},
+                    "language_hint": {"type": "string", "description": "Optional BCP-47 language code such as zh-CN or en-US."}
+                },
+                "required": ["file_path"]
+            }),
+        },
+        WireTool {
+            name: "VideoTranscribe",
+            description: "Extract and transcribe the audio track from a local video file.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the video file. Relative paths resolve against the current workspace."},
+                    "language_hint": {"type": "string", "description": "Optional BCP-47 language code such as zh-CN or en-US."},
+                    "allow_server": {"type": "boolean", "description": "Accepted for Swift schema parity. Rust does not upload media by default."}
+                },
+                "required": ["file_path"]
+            }),
+        },
+        WireTool {
             name: "SpotlightSearch",
             description: "Fast macOS file discovery using the Spotlight metadata index.",
             input_schema: serde_json::json!({
@@ -1146,6 +1171,8 @@ mod tests {
             "EnterPlanMode",
             "ExitPlanMode",
             "Clipboard",
+            "AudioTranscribe",
+            "VideoTranscribe",
             "SpotlightSearch",
             "ScreenCapture",
             "LSP",
