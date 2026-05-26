@@ -5,7 +5,7 @@ use crate::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, ClearCommand,
     CommandCompletionSource, CommandContext, CommandResult, CompactCommand, CostCommand,
     HelpCommand, MemoryCommand, NewCommand, PermissionMode, RememberCommand, SlashCommand, Tool,
-    ToolContext, ToolRegistry, WriteTool,
+    ToolContext, ToolRegistry, ToolResultSummaryFormatter, WriteTool,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,15 +195,40 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
             tool_call,
             content,
             is_error,
-        } => Some(ReplEvent::Output(format!(
-            "Tool {} ({}) {}\n{}",
-            tool_call.name,
-            tool_call.id,
-            if is_error { "failed:" } else { "completed:" },
-            content
+        } => Some(ReplEvent::Output(render_tool_result_for_repl(
+            &tool_call.name,
+            &tool_call.id,
+            &content,
+            is_error,
         ))),
         AgentLoopEvent::User(_) | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => None,
     }
+}
+
+fn render_tool_result_for_repl(
+    tool_name: &str,
+    tool_id: &str,
+    content: &str,
+    is_error: bool,
+) -> String {
+    let summary = ToolResultSummaryFormatter::summary(tool_name, content, is_error);
+    let verb = if is_error { "failed" } else { "completed" };
+    let header = format!("Tool {tool_name} ({tool_id}) {verb}:");
+    let trimmed = content.trim();
+
+    if is_error
+        || trimmed.is_empty()
+        || ToolResultSummaryFormatter::should_mute_appearance(tool_name, content, is_error)
+        || !should_expand_tool_result(trimmed)
+    {
+        return format!("{header} {summary}");
+    }
+
+    format!("{header} {summary}\n{trimmed}")
+}
+
+fn should_expand_tool_result(trimmed: &str) -> bool {
+    trimmed.len() <= 2_000 && trimmed.lines().count() <= 12
 }
 
 fn command_result_to_repl_events(result: CommandResult) -> Vec<ReplEvent> {

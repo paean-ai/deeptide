@@ -37,8 +37,50 @@ fn repl_shows_tool_batch_summary_before_tool_output() {
         matches!(
             event,
             ReplEvent::Output(output)
-                if output.contains("Tool Read (toolu_read) completed:")
+                if output.contains("Tool Read (toolu_read) completed: 1 lines")
                     && output.contains("1\talpha")
+        )
+    }));
+}
+
+#[test]
+fn repl_summarizes_long_tool_output() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let content = (1..=20)
+        .map(|line| format!("line-{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(temp.path().join("notes.txt"), content).expect("write fixture");
+    let mut repl = ReplSession::new(Box::new(LongReadToolBackend::default())).with_cwd(temp.path());
+
+    let events = repl.submit("read notes");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            ReplEvent::Output(output)
+                if output == "Tool Read (toolu_read) completed: 20 lines (201 B)"
+        )
+    }));
+    assert!(!events.iter().any(|event| {
+        matches!(
+            event,
+            ReplEvent::Output(output) if output.contains("13\tline-13")
+        )
+    }));
+}
+
+#[test]
+fn repl_compacts_recoverable_tool_failures() {
+    let mut repl = ReplSession::new(Box::new(MissingFileBackend::default()));
+
+    let events = repl.submit("read missing");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            ReplEvent::Output(output)
+                if output == "Tool Read (toolu_missing) failed: file not found — use Glob or find to locate it"
         )
     }));
 }
@@ -133,6 +175,54 @@ impl AgentBackend for StaticBackend {
 #[derive(Default)]
 struct ReadToolBackend {
     calls: usize,
+}
+
+#[derive(Default)]
+struct LongReadToolBackend {
+    calls: usize,
+}
+
+impl AgentBackend for LongReadToolBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("assistant with tool"),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_read",
+                    "Read",
+                    serde_json::json!({"file_path": "notes.txt"}),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("assistant after tool"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct MissingFileBackend {
+    calls: usize,
+}
+
+impl AgentBackend for MissingFileBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("assistant with missing read"),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_missing",
+                    "Read",
+                    serde_json::json!({"file_path": "missing.txt"}),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("assistant after missing read"))
+        }
+    }
 }
 
 impl AgentBackend for ReadToolBackend {
