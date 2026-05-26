@@ -319,6 +319,22 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "Agent",
+            description: "Launch a specialized sub-agent for multi-step exploration or planning.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Short 3-5 word description of the task."},
+                    "prompt": {"type": "string", "description": "Task for the agent to perform."},
+                    "subagent_type": {"type": "string", "description": "Specialized agent type: general-purpose, Explore, or Plan.", "enum": ["general-purpose", "Explore", "Plan"]},
+                    "model": {"type": "string", "description": "Optional model override for this sub-agent."},
+                    "run_in_background": {"type": "boolean", "description": "Run asynchronously when supported by the interactive host."},
+                    "isolation": {"type": "string", "description": "Optional worktree isolation for parallel-safe execution.", "enum": ["worktree"]}
+                },
+                "required": ["description", "prompt"]
+            }),
+        },
+        WireTool {
             name: "MCP",
             description: "Forward a JSON-RPC method to a configured MCP server.",
             input_schema: serde_json::json!({
@@ -1223,6 +1239,7 @@ mod tests {
         );
 
         for name in [
+            "Agent",
             "MCP",
             "ListMcpResources",
             "ReadMcpResource",

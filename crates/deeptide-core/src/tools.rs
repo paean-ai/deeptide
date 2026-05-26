@@ -92,6 +92,7 @@ impl ToolRegistry {
         registry.register(Box::<AskUserQuestionTool>::default());
         registry.register(Box::<MemorySearchTool>::default());
         registry.register(Box::<MemoryWriteTool>::default());
+        registry.register(Box::<AgentTool>::default());
         registry.register(Box::<McpTool>::default());
         registry.register(Box::<ListMcpResourcesTool>::default());
         registry.register(Box::<ReadMcpResourceTool>::default());
@@ -740,6 +741,180 @@ impl Tool for MemoryWriteTool {
             "Saved {scope_label} memory: {title}\n{}",
             path.display()
         ))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AgentTool;
+
+impl Tool for AgentTool {
+    fn name(&self) -> &'static str {
+        "Agent"
+    }
+
+    fn description(&self) -> &'static str {
+        "Launch a specialized sub-agent for multi-step exploration or planning."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(description) = input.get("description").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing description parameter");
+        };
+        let Some(prompt) = input.get("prompt").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing prompt parameter");
+        };
+        let description = description.trim();
+        let prompt = prompt.trim();
+        if description.is_empty() {
+            return ToolResult::error("description must not be empty");
+        }
+        if prompt.chars().count() < 2 {
+            return ToolResult::error("prompt must be at least 2 characters");
+        }
+
+        let subagent_type = input
+            .get("subagent_type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("general-purpose");
+        let Some(definition) = AgentDefinition::find(subagent_type) else {
+            return ToolResult::error(format!(
+                "Unknown agent type: {subagent_type}. Available: {}",
+                AgentDefinition::all_types().join(", ")
+            ));
+        };
+
+        if input
+            .get("run_in_background")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && input.get("isolation").and_then(serde_json::Value::as_str) == Some("worktree")
+        {
+            return ToolResult::error(
+                "Cannot combine run_in_background with isolation worktree in this version",
+            );
+        }
+
+        if let Some(isolation) = input.get("isolation").and_then(serde_json::Value::as_str)
+            && isolation != "worktree"
+        {
+            return ToolResult::error("isolation must be worktree when provided");
+        }
+
+        let model = input
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("(inherit parent model)");
+        let tool_policy = definition.tool_policy_label();
+
+        ToolResult::error(format!(
+            "Sub-agent execution is not available in this Rust build yet.\n\
+             Requested: {description}\n\
+             Type: {}\n\
+             Model: {model}\n\
+             Max turns: {}\n\
+             Tools: {tool_policy}\n\
+             Read-only: {}\n\n\
+             Prompt:\n{prompt}",
+            definition.kind, definition.max_turns, definition.is_read_only
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentDefinition {
+    kind: &'static str,
+    max_turns: usize,
+    is_read_only: bool,
+    allowed_tools: Option<&'static [&'static str]>,
+    disallowed_tools: &'static [&'static str],
+}
+
+impl AgentDefinition {
+    fn find(kind: &str) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|definition| definition.kind == kind)
+    }
+
+    fn all() -> Vec<Self> {
+        vec![
+            Self {
+                kind: "general-purpose",
+                max_turns: 15,
+                is_read_only: false,
+                allowed_tools: None,
+                disallowed_tools: &["Agent", "EnterPlanMode", "ExitPlanMode", "MemoryWrite"],
+            },
+            Self {
+                kind: "Explore",
+                max_turns: 10,
+                is_read_only: true,
+                allowed_tools: Some(&[
+                    "Read",
+                    "Grep",
+                    "Glob",
+                    "LSP",
+                    "WebFetch",
+                    "WebSearch",
+                    "Skill",
+                    "ToolSearch",
+                    "MemorySearch",
+                    "ListMcpResources",
+                    "ReadMcpResource",
+                    "ListMcpPrompts",
+                    "GetMcpPrompt",
+                    "ReviewArtifact",
+                    "CtxInspect",
+                    "SpotlightSearch",
+                    "TaskOutput",
+                ]),
+                disallowed_tools: &["Agent", "EnterPlanMode", "ExitPlanMode"],
+            },
+            Self {
+                kind: "Plan",
+                max_turns: 15,
+                is_read_only: true,
+                allowed_tools: None,
+                disallowed_tools: &[
+                    "Agent",
+                    "EnterPlanMode",
+                    "ExitPlanMode",
+                    "Write",
+                    "Edit",
+                    "MemoryWrite",
+                    "TaskStop",
+                ],
+            },
+        ]
+    }
+
+    fn all_types() -> Vec<&'static str> {
+        Self::all()
+            .into_iter()
+            .map(|definition| definition.kind)
+            .collect()
+    }
+
+    fn tool_policy_label(&self) -> String {
+        if let Some(allowed_tools) = self.allowed_tools {
+            return allowed_tools.join(", ");
+        }
+        if self.disallowed_tools.is_empty() {
+            String::from("all registered tools")
+        } else {
+            format!(
+                "all registered tools except {}",
+                self.disallowed_tools.join(", ")
+            )
+        }
     }
 }
 
@@ -7093,6 +7268,15 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "preference",
             "project memory",
             "global memory",
+        ],
+        "Agent" => vec![
+            "subagent",
+            "delegate",
+            "explore",
+            "plan",
+            "parallel",
+            "multi step",
+            "research",
         ],
         "MCP" => vec![
             "mcp",

@@ -35,15 +35,15 @@ pub use repl::{ReplEvent, ReplSession};
 pub use tool_batch_labeler::{ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
-    AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool, ClipboardTool, CrashLogTool,
-    CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool,
-    EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool, GetMcpPromptTool,
-    GlobTool, GrepTool, ImagePreprocessTool, ListMcpPromptsTool, ListMcpResourcesTool, LspTool,
-    MacDiagnoseTool, MacLogTool, McpTool, MemorySearchTool, MemoryWriteTool, MonitorTool,
-    NotebookEditTool, PublishTool, PushNotificationTool, ReadFilesTool, ReadMcpResourceTool,
-    ReadTool, RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool,
-    SnipTool, SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool,
-    TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult,
-    ToolSearchTool, VerifyPlanExecutionTool, VideoTranscribeTool, VisionTool, WebFetchTool,
-    WebSearchTool, WriteTool,
+    AgentTool, AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool, ClipboardTool,
+    CrashLogTool, CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool, EditTool,
+    EnterPlanModeTool, EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool,
+    GetMcpPromptTool, GlobTool, GrepTool, ImagePreprocessTool, ListMcpPromptsTool,
+    ListMcpResourcesTool, LspTool, MacDiagnoseTool, MacLogTool, McpTool, MemorySearchTool,
+    MemoryWriteTool, MonitorTool, NotebookEditTool, PublishTool, PushNotificationTool,
+    ReadFilesTool, ReadMcpResourceTool, ReadTool, RemoteTriggerTool, ReviewArtifactTool,
+    ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool, TaskCreateTool,
+    TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool,
+    ToolContext, ToolRegistry, ToolResult, ToolSearchTool, VerifyPlanExecutionTool,
+    VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool,
 };

@@ -1,14 +1,15 @@
 use deeptide_core::{
-    AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool, ClipboardTool, CrashLogTool,
-    CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool,
-    EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool, GetMcpPromptTool,
-    ImagePreprocessTool, ListMcpPromptsTool, ListMcpResourcesTool, LspTool, MacDiagnoseTool,
-    MacLogTool, McpTool, MemorySearchTool, MemoryWriteTool, MonitorTool, NotebookEditTool,
-    PublishTool, PushNotificationTool, ReadFilesTool, ReadMcpResourceTool, RemoteTriggerTool,
-    ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool,
-    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, VerifyPlanExecutionTool,
-    VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
+    AgentTool, AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool, ClipboardTool,
+    CrashLogTool, CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool, EditTool,
+    EnterPlanModeTool, EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool,
+    GetMcpPromptTool, ImagePreprocessTool, ListMcpPromptsTool, ListMcpResourcesTool, LspTool,
+    MacDiagnoseTool, MacLogTool, McpTool, MemorySearchTool, MemoryWriteTool, MonitorTool,
+    NotebookEditTool, PublishTool, PushNotificationTool, ReadFilesTool, ReadMcpResourceTool,
+    RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool, SnipTool,
+    SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
+    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool,
+    VerifyPlanExecutionTool, VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool,
+    WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -244,6 +245,70 @@ fn tool_search_supports_exact_names_and_select_syntax() {
     assert!(selected.content.contains("- Read [read-only, parallel]"));
     assert!(selected.content.contains("- Edit [writes]"));
     assert!(selected.content.contains("- MissingTool - not found"));
+}
+
+#[test]
+fn agent_tool_validates_swift_agent_types_and_reports_runtime_gap() {
+    let context = ToolContext::new(".");
+
+    let missing_prompt = AgentTool.call(
+        serde_json::json!({"description": "Find auth flow"}),
+        &context,
+    );
+    assert!(missing_prompt.is_error);
+    assert_eq!(missing_prompt.content, "Missing prompt parameter");
+
+    let unknown = AgentTool.call(
+        serde_json::json!({
+            "description": "Find auth flow",
+            "prompt": "Map the auth flow.",
+            "subagent_type": "Scout"
+        }),
+        &context,
+    );
+    assert!(unknown.is_error);
+    assert!(
+        unknown
+            .content
+            .contains("Unknown agent type: Scout. Available: general-purpose, Explore, Plan")
+    );
+
+    let invalid_background = AgentTool.call(
+        serde_json::json!({
+            "description": "Find auth flow",
+            "prompt": "Map the auth flow.",
+            "run_in_background": true,
+            "isolation": "worktree"
+        }),
+        &context,
+    );
+    assert!(invalid_background.is_error);
+    assert!(
+        invalid_background
+            .content
+            .contains("Cannot combine run_in_background with isolation worktree")
+    );
+
+    let explore = AgentTool.call(
+        serde_json::json!({
+            "description": "Find auth flow",
+            "prompt": "Map the auth flow.",
+            "subagent_type": "Explore",
+            "model": "fast-model"
+        }),
+        &context,
+    );
+    assert!(explore.is_error);
+    assert!(
+        explore
+            .content
+            .contains("Sub-agent execution is not available")
+    );
+    assert!(explore.content.contains("Type: Explore"));
+    assert!(explore.content.contains("Model: fast-model"));
+    assert!(explore.content.contains("Max turns: 10"));
+    assert!(explore.content.contains("Read-only: true"));
+    assert!(explore.content.contains("ListMcpResources"));
 }
 
 #[test]
