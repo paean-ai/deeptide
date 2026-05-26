@@ -92,6 +92,11 @@ impl ToolRegistry {
         registry.register(Box::<AskUserQuestionTool>::default());
         registry.register(Box::<MemorySearchTool>::default());
         registry.register(Box::<MemoryWriteTool>::default());
+        registry.register(Box::<McpTool>::default());
+        registry.register(Box::<ListMcpResourcesTool>::default());
+        registry.register(Box::<ReadMcpResourceTool>::default());
+        registry.register(Box::<ListMcpPromptsTool>::default());
+        registry.register(Box::<GetMcpPromptTool>::default());
         registry.register(Box::<BriefTool>::default());
         registry.register(Box::<CtxInspectTool>::default());
         registry.register(Box::<SnipTool>::default());
@@ -735,6 +740,159 @@ impl Tool for MemoryWriteTool {
             "Saved {scope_label} memory: {title}\n{}",
             path.display()
         ))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct McpTool;
+
+impl Tool for McpTool {
+    fn name(&self) -> &'static str {
+        "MCP"
+    }
+
+    fn description(&self) -> &'static str {
+        "Forward a JSON-RPC method to a configured MCP server."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(server) = input.get("server").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or method");
+        };
+        let Some(method) = input.get("method").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or method");
+        };
+        if server.trim().is_empty() || method.trim().is_empty() {
+            return ToolResult::error("Missing server or method");
+        }
+
+        let servers = match discover_mcp_servers(&context.cwd) {
+            Ok(servers) => servers,
+            Err(error) => return ToolResult::error(error),
+        };
+        if !servers.iter().any(|configured| configured.name == server) {
+            return ToolResult::error(format!("MCP server not configured: {server}"));
+        }
+
+        ToolResult::error(format!(
+            "MCP server not running: {server}. The Rust implementation can discover MCP configuration, but MCP process management and JSON-RPC forwarding are not available in this build yet."
+        ))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ListMcpResourcesTool;
+
+impl Tool for ListMcpResourcesTool {
+    fn name(&self) -> &'static str {
+        "ListMcpResources"
+    }
+
+    fn description(&self) -> &'static str {
+        "List resources exposed by configured MCP servers."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let target = input
+            .get("server")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|server| !server.is_empty());
+        render_mcp_list("resources", target, &context.cwd)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReadMcpResourceTool;
+
+impl Tool for ReadMcpResourceTool {
+    fn name(&self) -> &'static str {
+        "ReadMcpResource"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read a resource from a configured MCP server by URI."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(server) = input.get("server").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or uri");
+        };
+        let Some(uri) = input.get("uri").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or uri");
+        };
+        if server.trim().is_empty() || uri.trim().is_empty() {
+            return ToolResult::error("Missing server or uri");
+        }
+        render_mcp_unavailable(server, Some(uri), "resource reading", &context.cwd)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ListMcpPromptsTool;
+
+impl Tool for ListMcpPromptsTool {
+    fn name(&self) -> &'static str {
+        "ListMcpPrompts"
+    }
+
+    fn description(&self) -> &'static str {
+        "List prompt templates exposed by configured MCP servers."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let target = input
+            .get("server")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|server| !server.is_empty());
+        render_mcp_list("prompts", target, &context.cwd)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GetMcpPromptTool;
+
+impl Tool for GetMcpPromptTool {
+    fn name(&self) -> &'static str {
+        "GetMcpPrompt"
+    }
+
+    fn description(&self) -> &'static str {
+        "Fetch a prompt template from a configured MCP server by name."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(server) = input.get("server").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or name");
+        };
+        let Some(name) = input.get("name").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or name");
+        };
+        if server.trim().is_empty() || name.trim().is_empty() {
+            return ToolResult::error("Missing server or name");
+        }
+        render_mcp_unavailable(server, Some(name), "prompt fetching", &context.cwd)
     }
 }
 
@@ -5963,6 +6121,170 @@ fn read_remote_trigger_settings(path: &Path) -> Result<Option<RemoteTriggerSetti
         })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpServerConfig {
+    name: String,
+    source: PathBuf,
+    command: Option<String>,
+    url: Option<String>,
+}
+
+fn render_mcp_list(kind: &str, target: Option<&str>, cwd: &Path) -> ToolResult {
+    let servers = match discover_mcp_servers(cwd) {
+        Ok(servers) => servers,
+        Err(error) => return ToolResult::error(error),
+    };
+    let selected = servers
+        .iter()
+        .filter(|server| target.is_none_or(|target| server.name == target))
+        .collect::<Vec<_>>();
+
+    if selected.is_empty() {
+        return if let Some(target) = target {
+            ToolResult::error(format!("MCP server not configured: {target}"))
+        } else {
+            ToolResult::error(
+                "No MCP servers configured. Add servers under mcp_servers in .deeptide/settings.json or mcpServers in .mcp.json.",
+            )
+        };
+    }
+
+    let mut lines = Vec::new();
+    for server in selected {
+        lines.push(format!("[{}]", server.name));
+        lines.push(format!("  source: {}", server.source.display()));
+        if let Some(command) = &server.command {
+            lines.push(format!("  command: {command}"));
+        } else if let Some(url) = &server.url {
+            lines.push(format!("  url: {url}"));
+        } else {
+            lines.push(String::from("  transport: configured"));
+        }
+        lines.push(format!(
+            "  {kind}: unavailable until Rust MCP server sessions are implemented"
+        ));
+    }
+
+    ToolResult::text(lines.join("\n"))
+}
+
+fn render_mcp_unavailable(
+    server: &str,
+    item: Option<&str>,
+    operation: &str,
+    cwd: &Path,
+) -> ToolResult {
+    let servers = match discover_mcp_servers(cwd) {
+        Ok(servers) => servers,
+        Err(error) => return ToolResult::error(error),
+    };
+    if !servers.iter().any(|configured| configured.name == server) {
+        return ToolResult::error(format!("MCP server not configured: {server}"));
+    }
+
+    let target = item.map(|item| format!(" for {item}")).unwrap_or_default();
+    ToolResult::error(format!(
+        "MCP {operation}{target} is not available because the Rust implementation does not manage MCP server sessions yet: {server}"
+    ))
+}
+
+fn discover_mcp_servers(cwd: &Path) -> Result<Vec<McpServerConfig>, String> {
+    let mut servers = Vec::new();
+    for path in mcp_config_paths(cwd) {
+        if !path.exists() {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|error| format!("Failed to read MCP settings {}: {error}", path.display()))?;
+        let json: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|error| format!("Failed to parse MCP settings {}: {error}", path.display()))?;
+        extract_mcp_servers_from_json(&json, &path, &mut servers);
+    }
+    servers.sort_by(|left, right| left.name.cmp(&right.name));
+    servers.dedup_by(|left, right| left.name == right.name);
+    Ok(servers)
+}
+
+fn mcp_config_paths(cwd: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![
+        cwd.join(".mcp.json"),
+        cwd.join(".deeptide").join("mcp.json"),
+        cwd.join(".deeptide").join("settings.json"),
+        cwd.join(".deeptide").join("config.json"),
+    ];
+    if let Some(config_dir) = tide_config_dir() {
+        let project = project_settings_slug(cwd);
+        paths.push(config_dir.join("settings.json"));
+        paths.push(
+            config_dir
+                .join("projects")
+                .join(&project)
+                .join("settings.json"),
+        );
+        paths.push(
+            config_dir
+                .join("projects")
+                .join(project)
+                .join("settings.local.json"),
+        );
+    }
+    if let Some(home) = home_dir() {
+        paths.push(home.join(".deeptide").join("settings.json"));
+        paths.push(home.join(".deeptide").join("config.json"));
+    }
+    paths
+}
+
+fn extract_mcp_servers_from_json(
+    json: &serde_json::Value,
+    source: &Path,
+    servers: &mut Vec<McpServerConfig>,
+) {
+    for key in ["mcp_servers", "mcpServers", "servers"] {
+        if let Some(object) = json.get(key).and_then(serde_json::Value::as_object) {
+            collect_mcp_servers(object, source, servers);
+        }
+    }
+    if let Some(settings) = json.get("settings") {
+        for key in ["mcp_servers", "mcpServers"] {
+            if let Some(object) = settings.get(key).and_then(serde_json::Value::as_object) {
+                collect_mcp_servers(object, source, servers);
+            }
+        }
+    }
+}
+
+fn collect_mcp_servers(
+    object: &serde_json::Map<String, serde_json::Value>,
+    source: &Path,
+    servers: &mut Vec<McpServerConfig>,
+) {
+    for (name, value) in object {
+        let Some(config) = value.as_object() else {
+            continue;
+        };
+        let command = config
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let url = config
+            .get("url")
+            .or_else(|| config.get("endpoint"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        servers.push(McpServerConfig {
+            name: name.to_owned(),
+            source: source.to_path_buf(),
+            command,
+            url,
+        });
+    }
+}
+
 fn remote_trigger_settings_paths(cwd: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(config_dir) = tide_config_dir() {
@@ -6771,6 +7093,27 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "preference",
             "project memory",
             "global memory",
+        ],
+        "MCP" => vec![
+            "mcp",
+            "model context protocol",
+            "json rpc",
+            "server",
+            "tool bridge",
+        ],
+        "ListMcpResources" | "ReadMcpResource" => vec![
+            "mcp",
+            "model context protocol",
+            "resource",
+            "server",
+            "context",
+        ],
+        "ListMcpPrompts" | "GetMcpPrompt" => vec![
+            "mcp",
+            "model context protocol",
+            "prompt",
+            "template",
+            "server",
         ],
         "Brief" => vec!["context", "summary", "compact", "compaction", "tokens"],
         "CtxInspect" => vec!["context", "tokens", "window", "cache", "budget"],

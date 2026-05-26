@@ -319,6 +319,64 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "MCP",
+            description: "Forward a JSON-RPC method to a configured MCP server.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Name of the server in settings.mcp_servers or mcpServers."},
+                    "method": {"type": "string", "description": "JSON-RPC method such as tools/call, resources/list, or prompts/get."},
+                    "params": {"type": "object", "description": "Free-form JSON-RPC params object."}
+                },
+                "required": ["server", "method"]
+            }),
+        },
+        WireTool {
+            name: "ListMcpResources",
+            description: "List resources exposed by configured MCP servers.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Optional server name; omit to list across all configured servers."}
+                }
+            }),
+        },
+        WireTool {
+            name: "ReadMcpResource",
+            description: "Read a resource from a configured MCP server by URI.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Configured MCP server name."},
+                    "uri": {"type": "string", "description": "Resource URI from ListMcpResources."}
+                },
+                "required": ["server", "uri"]
+            }),
+        },
+        WireTool {
+            name: "ListMcpPrompts",
+            description: "List prompt templates exposed by configured MCP servers.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Optional server name; omit to list across all configured servers."}
+                }
+            }),
+        },
+        WireTool {
+            name: "GetMcpPrompt",
+            description: "Fetch a prompt template from a configured MCP server by name.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Configured MCP server name."},
+                    "name": {"type": "string", "description": "Prompt name from ListMcpPrompts."},
+                    "arguments": {"type": "object", "description": "Prompt arguments if required by the prompt template."}
+                },
+                "required": ["server", "name"]
+            }),
+        },
+        WireTool {
             name: "Brief",
             description: "Request a context compaction summary of the conversation so far.",
             input_schema: serde_json::json!({
@@ -1165,6 +1223,11 @@ mod tests {
         );
 
         for name in [
+            "MCP",
+            "ListMcpResources",
+            "ReadMcpResource",
+            "ListMcpPrompts",
+            "GetMcpPrompt",
             "Brief",
             "CtxInspect",
             "Snip",

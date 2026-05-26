@@ -1,9 +1,10 @@
 use deeptide_core::{
     AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool, ClipboardTool, CrashLogTool,
     CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool,
-    EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool, ImagePreprocessTool,
-    LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool,
-    NotebookEditTool, PublishTool, PushNotificationTool, ReadFilesTool, RemoteTriggerTool,
+    EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool, GetMcpPromptTool,
+    ImagePreprocessTool, ListMcpPromptsTool, ListMcpResourcesTool, LspTool, MacDiagnoseTool,
+    MacLogTool, McpTool, MemorySearchTool, MemoryWriteTool, MonitorTool, NotebookEditTool,
+    PublishTool, PushNotificationTool, ReadFilesTool, ReadMcpResourceTool, RemoteTriggerTool,
     ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool,
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
     TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, VerifyPlanExecutionTool,
@@ -243,6 +244,86 @@ fn tool_search_supports_exact_names_and_select_syntax() {
     assert!(selected.content.contains("- Read [read-only, parallel]"));
     assert!(selected.content.contains("- Edit [writes]"));
     assert!(selected.content.contains("- MissingTool - not found"));
+}
+
+#[test]
+fn mcp_tools_discover_configured_servers_without_starting_processes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join(".mcp.json"),
+        r#"{
+            "mcpServers": {
+                "docs": {"command": "docs-mcp", "args": ["serve"]},
+                "remote": {"url": "https://mcp.example.invalid"}
+            }
+        }"#,
+    )
+    .expect("write mcp fixture");
+    let context = ToolContext::new(temp.path());
+
+    let resources = ListMcpResourcesTool.call(serde_json::json!({}), &context);
+    assert!(!resources.is_error);
+    assert!(resources.content.contains("[docs]"));
+    assert!(resources.content.contains("command: docs-mcp"));
+    assert!(resources.content.contains("[remote]"));
+    assert!(
+        resources
+            .content
+            .contains("url: https://mcp.example.invalid")
+    );
+    assert!(
+        resources
+            .content
+            .contains("resources: unavailable until Rust MCP server sessions are implemented")
+    );
+
+    let prompts = ListMcpPromptsTool.call(serde_json::json!({"server": "docs"}), &context);
+    assert!(!prompts.is_error);
+    assert!(prompts.content.contains("[docs]"));
+    assert!(!prompts.content.contains("[remote]"));
+
+    let read = ReadMcpResourceTool.call(
+        serde_json::json!({"server": "docs", "uri": "file://guide.md"}),
+        &context,
+    );
+    assert!(read.is_error);
+    assert!(read.content.contains("resource reading"));
+    assert!(read.content.contains("docs"));
+
+    let prompt = GetMcpPromptTool.call(
+        serde_json::json!({"server": "docs", "name": "review"}),
+        &context,
+    );
+    assert!(prompt.is_error);
+    assert!(prompt.content.contains("prompt fetching"));
+
+    let forward = McpTool.call(
+        serde_json::json!({"server": "docs", "method": "resources/list"}),
+        &context,
+    );
+    assert!(forward.is_error);
+    assert!(forward.content.contains("MCP server not running: docs"));
+}
+
+#[test]
+fn mcp_tools_report_missing_configuration_and_required_inputs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temp.path());
+
+    let list = ListMcpResourcesTool.call(serde_json::json!({}), &context);
+    assert!(list.is_error);
+    assert!(list.content.contains("No MCP servers configured"));
+
+    let missing = McpTool.call(serde_json::json!({"server": "docs"}), &context);
+    assert!(missing.is_error);
+    assert_eq!(missing.content, "Missing server or method");
+
+    let unknown = ReadMcpResourceTool.call(
+        serde_json::json!({"server": "docs", "uri": "file://guide.md"}),
+        &context,
+    );
+    assert!(unknown.is_error);
+    assert_eq!(unknown.content, "MCP server not configured: docs");
 }
 
 #[test]
