@@ -280,6 +280,7 @@ fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resul
                 return Err(String::from("maximum turns reached"));
             }
             AgentLoopEvent::User(_)
+            | AgentLoopEvent::ToolBatchSummary { .. }
             | AgentLoopEvent::ToolResult { .. }
             | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => {}
         }

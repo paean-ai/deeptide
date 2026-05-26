@@ -67,6 +67,16 @@ fn agent_loop_executes_tool_calls_and_continues() {
     assert!(events.iter().any(|event| {
         matches!(
             event,
+            AgentLoopEvent::ToolBatchSummary {
+                label,
+                failed_count: 0,
+                ..
+            } if label == "Read 1 file in ."
+        )
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
             AgentLoopEvent::ToolResult {
                 tool_call,
                 content,
@@ -106,6 +116,16 @@ fn agent_loop_blocks_write_tool_calls_without_edit_permission() {
         )
     }));
     assert!(!temp.path().join("notes.txt").exists());
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolBatchSummary {
+                label,
+                failed_count: 1,
+                ..
+            } if label == "Wrote 1 write, 1 failed"
+        )
+    }));
 }
 
 #[test]

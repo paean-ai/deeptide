@@ -173,6 +173,18 @@ impl ReplSession {
 fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
     match event {
         AgentLoopEvent::Assistant(message) => Some(ReplEvent::Output(message.content)),
+        AgentLoopEvent::ToolBatchSummary {
+            label,
+            failed_count,
+            ..
+        } => {
+            let status = if failed_count == 0 {
+                "completed"
+            } else {
+                "completed with failures"
+            };
+            Some(ReplEvent::Output(format!("Tools {status}: {label}")))
+        }
         AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => {
             Some(ReplEvent::Output(String::from("Maximum turns reached.")))
         }
