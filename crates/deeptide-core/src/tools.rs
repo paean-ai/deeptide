@@ -114,6 +114,11 @@ impl ToolRegistry {
         registry.register(Box::<PublishTool>::default());
         registry.register(Box::<RemoteTriggerTool>::default());
         registry.register(Box::<PushNotificationTool>::default());
+        registry.register(Box::<NotebookEditTool>::default());
+        registry.register(Box::<EnterWorktreeTool>::default());
+        registry.register(Box::<ExitWorktreeTool>::default());
+        registry.register(Box::<VerifyPlanExecutionTool>::default());
+        registry.register(Box::<SleepTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
@@ -1057,12 +1062,12 @@ impl Tool for ClipboardTool {
         };
 
         match operation {
-            "inspect" => match clipboard_read_text() {
-                Ok(text) => ToolResult::text(ClipboardSnapshot::from_text(text).render_inspect()),
+            "inspect" => match clipboard_snapshot() {
+                Ok(snapshot) => ToolResult::text(snapshot.render_inspect()),
                 Err(message) => ToolResult::error(message),
             },
-            "read" => match clipboard_read_text() {
-                Ok(text) => ToolResult::text(ClipboardSnapshot::from_text(text).render_read()),
+            "read" => match clipboard_snapshot() {
+                Ok(snapshot) => ToolResult::text(snapshot.render_read()),
                 Err(message) => ToolResult::error(message),
             },
             "files" => match clipboard_file_paths() {
@@ -1093,15 +1098,20 @@ impl Tool for ClipboardTool {
 }
 
 impl ClipboardSnapshot {
-    fn from_text(text: String) -> Self {
+    fn from_text_and_files(text: String, file_paths: Vec<String>) -> Self {
+        let has_text = !text.is_empty();
+        let has_files = !file_paths.is_empty();
+        let mut type_names = Vec::new();
+        if has_files {
+            type_names.push(String::from("public.file-url"));
+        }
+        if has_text {
+            type_names.push(String::from("text/plain"));
+        }
         Self {
-            type_names: if text.is_empty() {
-                Vec::new()
-            } else {
-                vec![String::from("text/plain")]
-            },
-            text: (!text.is_empty()).then_some(text),
-            file_paths: Vec::new(),
+            type_names,
+            text: has_text.then_some(text),
+            file_paths,
             has_html: false,
             has_rtf: false,
             image_size: None,
@@ -1509,6 +1519,21 @@ pub struct RemoteTriggerTool;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PushNotificationTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NotebookEditTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EnterWorktreeTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ExitWorktreeTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VerifyPlanExecutionTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SleepTool;
 
 #[derive(Debug, Clone, Copy)]
 struct BuiltinSkill {
@@ -2080,6 +2105,219 @@ impl Tool for PushNotificationTool {
             .unwrap_or(true);
 
         post_desktop_notification(title, subtitle, message, sound)
+    }
+}
+
+impl Tool for NotebookEditTool {
+    fn name(&self) -> &'static str {
+        "NotebookEdit"
+    }
+
+    fn description(&self) -> &'static str {
+        "Edit Jupyter notebook cells by id or insert new cells."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(notebook_path) = input
+            .get("notebook_path")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return ToolResult::error("notebook_path must be a .ipynb file");
+        };
+        if !notebook_path.ends_with(".ipynb") {
+            return ToolResult::error("notebook_path must be a .ipynb file");
+        }
+        let Some(new_source) = input.get("new_source").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("new_source is required");
+        };
+        let edit_mode = input
+            .get("edit_mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("replace");
+        if !matches!(edit_mode, "replace" | "insert" | "delete") {
+            return ToolResult::error("edit_mode must be one of: replace, insert, delete");
+        }
+        let cell_type = input
+            .get("cell_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("code");
+        if !matches!(cell_type, "code" | "markdown") {
+            return ToolResult::error("cell_type must be code or markdown");
+        }
+        let cell_id = input.get("cell_id").and_then(serde_json::Value::as_str);
+        let path = context.resolve_path(notebook_path);
+        if !path.exists() {
+            return ToolResult::error(format!("Notebook not found: {}", path.display()));
+        }
+
+        match edit_notebook(&path, edit_mode, cell_id, new_source, cell_type) {
+            Ok(message) => ToolResult::text(message),
+            Err(error) => ToolResult::error(error),
+        }
+    }
+}
+
+impl Tool for EnterWorktreeTool {
+    fn name(&self) -> &'static str {
+        "EnterWorktree"
+    }
+
+    fn description(&self) -> &'static str {
+        "Create an isolated git worktree for parallel work."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        if !is_git_repository(&context.cwd) {
+            return ToolResult::error("Not a git repository. Worktrees require a git repo.");
+        }
+        let name = input
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(sanitize_worktree_name)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(default_worktree_name);
+        let worktree_path = context
+            .cwd
+            .parent()
+            .unwrap_or(context.cwd.as_path())
+            .join(".deeptide-worktrees")
+            .join(&name);
+        if let Some(parent) = worktree_path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            return ToolResult::error(format!("Failed to create worktree parent: {error}"));
+        }
+
+        let output = run_git(
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_string_lossy().as_ref(),
+                "-b",
+                &name,
+            ],
+            &context.cwd,
+        );
+        match output {
+            Ok(output) if output.status.success() => ToolResult::text(format!(
+                "Worktree created: {}\nBranch: {name}\n\nThe worktree is an isolated copy of the repository. Changes made here will not affect your main working directory. Use ExitWorktree to clean up.",
+                worktree_path.display()
+            )),
+            Ok(output) => ToolResult::error(format!(
+                "Failed to create worktree: {}",
+                String::from_utf8_lossy(&output.stderr)
+                    .trim()
+                    .if_empty("unknown error")
+            )),
+            Err(error) => ToolResult::error(format!("Failed to run git worktree add: {error}")),
+        }
+    }
+}
+
+impl Tool for ExitWorktreeTool {
+    fn name(&self) -> &'static str {
+        "ExitWorktree"
+    }
+
+    fn description(&self) -> &'static str {
+        "Keep or remove a git worktree and its branch."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let action = input
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("keep");
+        if !matches!(action, "keep" | "remove") {
+            return ToolResult::error("action must be keep or remove");
+        }
+        let worktree_path = input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|path| context.resolve_path(path))
+            .unwrap_or_else(|| context.cwd.clone());
+
+        if action == "keep" {
+            return ToolResult::text(format!("Worktree kept at: {}", worktree_path.display()));
+        }
+
+        let branch = worktree_branch_for_path(&context.cwd, &worktree_path);
+        let path_string = worktree_path.to_string_lossy();
+        let remove = run_git(
+            &["worktree", "remove", path_string.as_ref(), "--force"],
+            &context.cwd,
+        );
+        match remove {
+            Ok(output) if output.status.success() => {
+                if let Some(branch) = branch.as_deref() {
+                    let _ = run_git(&["branch", "-D", branch], &context.cwd);
+                }
+                ToolResult::text(format!("Worktree removed: {}", worktree_path.display()))
+            }
+            Ok(output) => ToolResult::error(format!(
+                "Failed to remove worktree: {}",
+                String::from_utf8_lossy(&output.stderr)
+                    .trim()
+                    .if_empty("unknown error")
+            )),
+            Err(error) => ToolResult::error(format!("Failed to run git worktree remove: {error}")),
+        }
+    }
+}
+
+impl Tool for VerifyPlanExecutionTool {
+    fn name(&self) -> &'static str {
+        "VerifyPlanExecution"
+    }
+
+    fn description(&self) -> &'static str {
+        "Verify that planned file changes appear in git status."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        match render_plan_verification(&input, context) {
+            Ok(report) => ToolResult::text(report),
+            Err(error) => ToolResult::error(error),
+        }
+    }
+}
+
+impl Tool for SleepTool {
+    fn name(&self) -> &'static str {
+        "Sleep"
+    }
+
+    fn description(&self) -> &'static str {
+        "Wait for a bounded duration without running a shell command."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(duration_ms) = input.get("duration_ms").and_then(serde_json::Value::as_f64) else {
+            return ToolResult::error("duration_ms is required");
+        };
+        let clamped = duration_ms.clamp(0.0, 300_000.0);
+        thread::sleep(Duration::from_millis(clamped as u64));
+        ToolResult::text(format!("Slept {} ms", clamped as u64))
     }
 }
 
@@ -5223,6 +5461,239 @@ fn parse_publish_error_message(body: &str) -> Option<String> {
         })
 }
 
+fn edit_notebook(
+    path: &Path,
+    edit_mode: &str,
+    cell_id: Option<&str>,
+    new_source: &str,
+    cell_type: &str,
+) -> Result<String, String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read notebook {}: {error}", path.display()))?;
+    let mut notebook: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|error| format!("Invalid notebook format: {error}"))?;
+    let Some(cells) = notebook
+        .get_mut("cells")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Err(String::from("Invalid notebook format"));
+    };
+
+    let result = match edit_mode {
+        "delete" => {
+            let Some(cell_id) = cell_id else {
+                return Err(String::from("cell_id required for delete mode"));
+            };
+            let Some(index) = cells.iter().position(|cell| {
+                cell.get("id").and_then(serde_json::Value::as_str) == Some(cell_id)
+            }) else {
+                return Err(format!("Cell not found: {cell_id}"));
+            };
+            cells.remove(index);
+            format!("Cell {cell_id} deleted.")
+        }
+        "insert" => {
+            let insert_index = cell_id
+                .and_then(|cell_id| {
+                    cells
+                        .iter()
+                        .position(|cell| {
+                            cell.get("id").and_then(serde_json::Value::as_str) == Some(cell_id)
+                        })
+                        .map(|index| index + 1)
+                })
+                .unwrap_or(0);
+            let new_cell = serde_json::json!({
+                "id": generated_cell_id(),
+                "cell_type": cell_type,
+                "source": [new_source],
+                "metadata": {},
+                "outputs": [],
+                "execution_count": serde_json::Value::Null,
+            });
+            cells.insert(insert_index.min(cells.len()), new_cell);
+            format!("Cell inserted at position {insert_index}.")
+        }
+        _ => {
+            let Some(cell_id) = cell_id else {
+                return Err(String::from("cell_id required for replace mode"));
+            };
+            let Some(cell) = cells
+                .iter_mut()
+                .find(|cell| cell.get("id").and_then(serde_json::Value::as_str) == Some(cell_id))
+            else {
+                return Err(format!("Cell not found: {cell_id}"));
+            };
+            cell["source"] = serde_json::json!([new_source]);
+            cell["cell_type"] = serde_json::Value::String(cell_type.to_owned());
+            format!("Cell {cell_id} replaced.")
+        }
+    };
+
+    let formatted = serde_json::to_string_pretty(&notebook)
+        .map_err(|error| format!("Failed to encode notebook: {error}"))?;
+    fs::write(path, format!("{formatted}\n"))
+        .map_err(|error| format!("Failed to write notebook {}: {error}", path.display()))?;
+    Ok(result)
+}
+
+fn generated_cell_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("deeptide-{nanos:x}")
+}
+
+fn is_git_repository(cwd: &Path) -> bool {
+    run_git(&["rev-parse", "--is-inside-work-tree"], cwd)
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn run_git(args: &[&str], cwd: &Path) -> io::Result<std::process::Output> {
+    Command::new("git").args(args).current_dir(cwd).output()
+}
+
+fn default_worktree_name() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("deeptide-worktree-{millis:x}")
+}
+
+fn sanitize_worktree_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned()
+}
+
+fn worktree_branch_for_path(cwd: &Path, worktree_path: &Path) -> Option<String> {
+    let output = run_git(&["worktree", "list", "--porcelain"], cwd).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let target = normalize_path(worktree_path.to_path_buf());
+    let mut found = false;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            found = normalize_path(PathBuf::from(path)) == target;
+            continue;
+        }
+        if found && let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            return Some(branch.to_owned());
+        }
+    }
+    None
+}
+
+fn render_plan_verification(
+    input: &serde_json::Value,
+    context: &ToolContext,
+) -> Result<String, String> {
+    let diff = run_git(&["diff", "--name-status", "HEAD"], &context.cwd)
+        .map_err(|error| format!("Failed to run git diff: {error}"))?;
+    if !diff.status.success() {
+        return Err(format!(
+            "Failed to run git diff: {}",
+            String::from_utf8_lossy(&diff.stderr)
+                .trim()
+                .if_empty("unknown error")
+        ));
+    }
+    let untracked = run_git(
+        &["ls-files", "--others", "--exclude-standard"],
+        &context.cwd,
+    )
+    .map_err(|error| format!("Failed to run git ls-files: {error}"))?;
+    if !untracked.status.success() {
+        return Err(format!(
+            "Failed to run git ls-files: {}",
+            String::from_utf8_lossy(&untracked.stderr)
+                .trim()
+                .if_empty("unknown error")
+        ));
+    }
+
+    let mut lines = vec![String::from("Plan Verification Report:")];
+    let mut changed = std::collections::BTreeSet::new();
+    for line in String::from_utf8_lossy(&diff.stdout).lines() {
+        let mut parts = line.splitn(2, '\t');
+        let status = parts.next().unwrap_or_default();
+        let file = parts.next().unwrap_or_default();
+        if file.is_empty() {
+            continue;
+        }
+        changed.insert(file.to_owned());
+        let label = match status.chars().next() {
+            Some('A') => "ADDED",
+            Some('M') => "MODIFIED",
+            Some('D') => "DELETED",
+            Some('R') => "RENAMED",
+            _ => status,
+        };
+        lines.push(format!("  [{label}] {file}"));
+    }
+    for file in String::from_utf8_lossy(&untracked.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        changed.insert(file.to_owned());
+        lines.push(format!("  [NEW] {file}"));
+    }
+
+    let expected = input
+        .get("expected_files")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !expected.is_empty() {
+        lines.push(String::new());
+        lines.push(String::from("Expected files:"));
+        let mut all_found = true;
+        for file in expected {
+            let normalized = context
+                .resolve_path(&file)
+                .strip_prefix(&context.cwd)
+                .ok()
+                .and_then(|path| path.to_str())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| file.clone());
+            if changed.contains(&file) || changed.contains(&normalized) {
+                lines.push(format!("  OK {file}"));
+            } else {
+                lines.push(format!("  MISSING {file} - NOT FOUND in changes"));
+                all_found = false;
+            }
+        }
+        if all_found {
+            lines.push(String::new());
+            lines.push(String::from("All expected changes verified."));
+        }
+    }
+
+    if lines.len() == 1 {
+        lines.push(String::from("  (no changes detected)"));
+    }
+    Ok(lines.join("\n"))
+}
+
 fn load_remote_trigger_settings(
     context: &ToolContext,
 ) -> Result<Option<RemoteTriggerSettings>, String> {
@@ -5712,6 +6183,12 @@ fn clipboard_write_text(content: &str) -> Result<(), String> {
     }
 }
 
+fn clipboard_snapshot() -> Result<ClipboardSnapshot, String> {
+    let text = clipboard_read_text()?;
+    let file_paths = clipboard_file_paths().unwrap_or_default();
+    Ok(ClipboardSnapshot::from_text_and_files(text, file_paths))
+}
+
 fn clipboard_file_paths() -> Result<Vec<String>, String> {
     #[cfg(target_os = "macos")]
     {
@@ -6166,6 +6643,12 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "afk",
             "reminder",
         ],
+        "NotebookEdit" => vec!["notebook", "jupyter", "ipynb", "cell", "data science"],
+        "EnterWorktree" | "ExitWorktree" => {
+            vec!["git", "worktree", "parallel", "branch", "isolation"]
+        }
+        "VerifyPlanExecution" => vec!["verify", "plan", "git diff", "expected files"],
+        "Sleep" => vec!["sleep", "wait", "delay", "pause", "timer"],
         "Edit" => vec!["replace", "patch", "modify", "string replacement"],
         "FileMetadata" => vec!["xattr", "quarantine", "binary", "mime", "file type"],
         "Glob" => vec!["find files", "discover", "pattern"],
@@ -8827,19 +9310,31 @@ mod clipboard_tests {
 
     #[test]
     fn clipboard_snapshot_read_reports_file_urls() {
-        let snapshot = ClipboardSnapshot {
-            type_names: vec![String::from("public.file-url")],
-            text: None,
-            file_paths: vec![String::from("/tmp/a.txt"), String::from("/tmp/b.txt")],
-            has_html: false,
-            has_rtf: false,
-            image_size: None,
-        };
+        let snapshot = ClipboardSnapshot::from_text_and_files(
+            String::new(),
+            vec![String::from("/tmp/a.txt"), String::from("/tmp/b.txt")],
+        );
 
         assert_eq!(
             snapshot.render_read(),
             "[Clipboard file URLs]\n/tmp/a.txt\n/tmp/b.txt"
         );
+        assert!(snapshot.render_inspect().contains("files: 2"));
+    }
+
+    #[test]
+    fn clipboard_snapshot_read_prefers_text_but_inspects_files() {
+        let snapshot = ClipboardSnapshot::from_text_and_files(
+            String::from("hello"),
+            vec![String::from("/tmp/a.txt")],
+        );
+
+        assert_eq!(snapshot.render_read(), "hello");
+        let rendered = snapshot.render_inspect();
+        assert!(rendered.contains("types: public.file-url, text/plain"));
+        assert!(rendered.contains("text: 5 chars"));
+        assert!(rendered.contains("files: 1"));
+        assert!(rendered.contains("  /tmp/a.txt"));
     }
 
     #[test]

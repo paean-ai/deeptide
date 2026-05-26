@@ -625,6 +625,64 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "NotebookEdit",
+            description: "Edit Jupyter notebook cells by id or insert new cells.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "notebook_path": {"type": "string", "description": "Path to a .ipynb notebook file."},
+                    "cell_id": {"type": "string", "description": "Cell id to replace/delete, or the cell after which to insert."},
+                    "new_source": {"type": "string", "description": "New source text for replace or insert."},
+                    "cell_type": {"type": "string", "description": "Cell type for replace or insert.", "enum": ["code", "markdown"]},
+                    "edit_mode": {"type": "string", "description": "replace, insert, or delete.", "enum": ["replace", "insert", "delete"]}
+                },
+                "required": ["notebook_path", "new_source"]
+            }),
+        },
+        WireTool {
+            name: "EnterWorktree",
+            description: "Create an isolated git worktree for parallel work.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Optional worktree branch name."}
+                }
+            }),
+        },
+        WireTool {
+            name: "ExitWorktree",
+            description: "Keep or remove a git worktree and its branch.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "keep or remove.", "enum": ["keep", "remove"]},
+                    "path": {"type": "string", "description": "Path to the worktree. Defaults to the current workspace."}
+                },
+                "required": ["action"]
+            }),
+        },
+        WireTool {
+            name: "VerifyPlanExecution",
+            description: "Verify that planned file changes appear in git status.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "expected_files": {"type": "array", "items": {"type": "string"}, "description": "File paths that should appear in the current git diff or untracked set."}
+                }
+            }),
+        },
+        WireTool {
+            name: "Sleep",
+            description: "Wait for a bounded duration without running a shell command.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "duration_ms": {"type": "number", "description": "Duration to sleep in milliseconds, clamped to 0..300000."}
+                },
+                "required": ["duration_ms"]
+            }),
+        },
+        WireTool {
             name: "Write",
             description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
             input_schema: serde_json::json!({
@@ -1104,6 +1162,11 @@ mod tests {
             "Publish",
             "RemoteTrigger",
             "PushNotification",
+            "NotebookEdit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "VerifyPlanExecution",
+            "Sleep",
         ] {
             assert!(
                 request.tools.iter().any(|tool| tool.name == name),

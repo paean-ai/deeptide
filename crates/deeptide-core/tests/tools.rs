@@ -1,16 +1,18 @@
 use deeptide_core::{
     AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
-    CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, ExitPlanModeTool,
-    FileMetadataTool, ImagePreprocessTool, LspTool, MacDiagnoseTool, MacLogTool, MemorySearchTool,
-    MemoryWriteTool, MonitorTool, PublishTool, PushNotificationTool, ReadFilesTool,
-    RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool, SnipTool,
-    SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
-    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool, VisionTool,
-    WebFetchTool, WebSearchTool, WriteTool, memory::MemorySystem,
+    CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, EnterWorktreeTool,
+    ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool, ImagePreprocessTool, LspTool,
+    MacDiagnoseTool, MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, NotebookEditTool,
+    PublishTool, PushNotificationTool, ReadFilesTool, RemoteTriggerTool, ReviewArtifactTool,
+    ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool, TaskCreateTool,
+    TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool,
+    ToolContext, ToolRegistry, ToolSearchTool, VerifyPlanExecutionTool, VisionTool, WebFetchTool,
+    WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock, mpsc};
 use std::thread;
 
@@ -1175,6 +1177,107 @@ fn remote_trigger_and_push_notification_validate_inputs() {
 }
 
 #[test]
+fn edge_tools_edit_notebooks_sleep_and_verify_changes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    init_git_fixture(temp.path());
+    let notebook_path = temp.path().join("analysis.ipynb");
+    std::fs::write(
+        &notebook_path,
+        r#"{
+  "cells": [
+    {
+      "id": "cell-1",
+      "cell_type": "code",
+      "source": ["print('old')"],
+      "metadata": {},
+      "outputs": [],
+      "execution_count": null
+    }
+  ],
+  "metadata": {},
+  "nbformat": 4,
+  "nbformat_minor": 5
+}"#,
+    )
+    .expect("write notebook");
+
+    let context = ToolContext::new(temp.path());
+    let replace = NotebookEditTool.call(
+        serde_json::json!({
+            "notebook_path": "analysis.ipynb",
+            "cell_id": "cell-1",
+            "new_source": "print('new')",
+            "cell_type": "code"
+        }),
+        &context,
+    );
+    assert!(!replace.is_error, "{}", replace.content);
+    assert_eq!(replace.content, "Cell cell-1 replaced.");
+    let updated = std::fs::read_to_string(&notebook_path).expect("updated notebook");
+    assert!(updated.contains("print('new')"));
+
+    let insert = NotebookEditTool.call(
+        serde_json::json!({
+            "notebook_path": "analysis.ipynb",
+            "cell_id": "cell-1",
+            "edit_mode": "insert",
+            "cell_type": "markdown",
+            "new_source": "# Notes"
+        }),
+        &context,
+    );
+    assert!(!insert.is_error, "{}", insert.content);
+    assert_eq!(insert.content, "Cell inserted at position 1.");
+
+    let sleep = SleepTool.call(serde_json::json!({"duration_ms": 0}), &context);
+    assert!(!sleep.is_error);
+    assert_eq!(sleep.content, "Slept 0 ms");
+
+    let verify = VerifyPlanExecutionTool.call(
+        serde_json::json!({"expected_files": ["analysis.ipynb"]}),
+        &context,
+    );
+    assert!(!verify.is_error, "{}", verify.content);
+    assert!(verify.content.contains("Plan Verification Report:"));
+    assert!(verify.content.contains("[NEW] analysis.ipynb"));
+    assert!(verify.content.contains("OK analysis.ipynb"));
+    assert!(verify.content.contains("All expected changes verified."));
+}
+
+#[test]
+fn worktree_tools_create_keep_and_remove_git_worktrees() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    init_git_fixture(temp.path());
+    let context = ToolContext::new(temp.path());
+
+    let create = EnterWorktreeTool.call(serde_json::json!({"name": "parity-test"}), &context);
+    assert!(!create.is_error, "{}", create.content);
+    assert!(create.content.contains("Worktree created:"));
+    assert!(create.content.contains("Branch: parity-test"));
+    let worktree = temp
+        .path()
+        .parent()
+        .expect("temp parent")
+        .join(".deeptide-worktrees")
+        .join("parity-test");
+    assert!(worktree.exists());
+
+    let keep = ExitWorktreeTool.call(
+        serde_json::json!({"action": "keep", "path": worktree}),
+        &context,
+    );
+    assert!(!keep.is_error, "{}", keep.content);
+    assert!(keep.content.contains("Worktree kept at:"));
+
+    let remove = ExitWorktreeTool.call(
+        serde_json::json!({"action": "remove", "path": worktree}),
+        &context,
+    );
+    assert!(!remove.is_error, "{}", remove.content);
+    assert!(remove.content.contains("Worktree removed:"));
+}
+
+#[test]
 fn todo_write_tool_updates_in_memory_list() {
     let _guard = todo_test_guard();
     let result = TodoWriteTool.call(
@@ -1992,4 +2095,28 @@ fn install_memory_env(root: &std::path::Path) {
         std::env::set_var("HOME", root.join("home"));
         std::env::set_var("TIDE_CONFIG_DIR", root.join("tide-config"));
     }
+}
+
+fn init_git_fixture(path: &std::path::Path) {
+    run_git_fixture(path, &["init"]);
+    run_git_fixture(path, &["config", "user.email", "deeptide@example.invalid"]);
+    run_git_fixture(path, &["config", "user.name", "Deeptide Tests"]);
+    std::fs::write(path.join("README.md"), "fixture\n").expect("write readme");
+    run_git_fixture(path, &["add", "README.md"]);
+    run_git_fixture(path, &["commit", "-m", "initial"]);
+}
+
+fn run_git_fixture(path: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .unwrap_or_else(|error| panic!("git fixture command should run: {error}"));
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

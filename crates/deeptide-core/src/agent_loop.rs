@@ -1,6 +1,7 @@
 use crate::{
     CostTracker, PermissionDecision, PermissionManager, PermissionMode, PermissionRules,
-    ToolContext, ToolRegistry, TurnUsage,
+    ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler, ToolContext, ToolRegistry,
+    TurnUsage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +105,11 @@ impl ToolCall {
 pub enum AgentLoopEvent {
     User(ConversationMessage),
     Assistant(ConversationMessage),
+    ToolBatchSummary {
+        label: String,
+        tool_calls: Vec<ToolCall>,
+        failed_count: usize,
+    },
     ToolResult {
         tool_call: ToolCall,
         content: String,
@@ -224,10 +230,43 @@ impl AgentLoop {
                         return events;
                     }
 
+                    let mut tool_results = Vec::with_capacity(response.tool_calls.len());
+                    let mut failure_summaries = Vec::new();
                     for tool_call in response.tool_calls {
                         let result = self.execute_tool_call(&tool_call);
                         let content = result.content;
                         let is_error = result.is_error;
+                        if is_error {
+                            failure_summaries
+                                .push(ToolBatchFailureClassifier::classify(&content, is_error));
+                        }
+                        tool_results.push((tool_call, content, is_error));
+                    }
+
+                    let tool_calls = tool_results
+                        .iter()
+                        .map(|(tool_call, _, _)| tool_call.clone())
+                        .collect::<Vec<_>>();
+                    let label_items = tool_calls
+                        .iter()
+                        .map(|tool_call| {
+                            ToolBatchItem::new(tool_call.name.clone(), tool_call.input.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    let failed_count = tool_results
+                        .iter()
+                        .filter(|(_, _, is_error)| *is_error)
+                        .count();
+                    events.push(AgentLoopEvent::ToolBatchSummary {
+                        label: ToolBatchLabeler::label_with_failure_summaries(
+                            &label_items,
+                            &failure_summaries,
+                        ),
+                        tool_calls,
+                        failed_count,
+                    });
+
+                    for (tool_call, content, is_error) in tool_results {
                         events.push(AgentLoopEvent::ToolResult {
                             tool_call: tool_call.clone(),
                             content: content.clone(),
