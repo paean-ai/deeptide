@@ -4,6 +4,7 @@ pub mod commands;
 pub mod completion;
 pub mod cost;
 pub mod embedded_protocol;
+pub mod markdown;
 pub mod memory;
 pub mod permissions;
 pub mod repl;
@@ -24,6 +25,7 @@ pub use completion::{
     Replacement,
 };
 pub use cost::{CacheHealth, CostSummary, CostTracker, ModelPricing, TurnRecord, TurnUsage};
+pub use markdown::{MarkdownRenderOptions, MarkdownRenderer};
 pub use permissions::{
     PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
     ToolInput,
