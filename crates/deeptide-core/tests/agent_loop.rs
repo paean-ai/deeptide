@@ -323,6 +323,62 @@ fn agent_loop_snip_tool_trims_active_message_history() {
     );
 }
 
+#[test]
+fn agent_loop_enter_plan_mode_changes_permission_mode_and_blocks_writes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(EnterPlanThenWriteBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3);
+
+    let events = loop_.run("plan before writing");
+
+    assert_eq!(loop_.permission_mode(), PermissionMode::Plan);
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "EnterPlanMode" && content.contains("Plan mode activated")
+        )
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: true,
+            } if tool_call.name == "Write" && content.contains("Plan mode")
+        )
+    }));
+    assert!(!temp.path().join("notes.txt").exists());
+}
+
+#[test]
+fn agent_loop_exit_plan_mode_returns_to_default_permission_mode() {
+    let mut loop_ = AgentLoop::new(Box::new(ExitPlanBackend::default()))
+        .with_permission_mode(PermissionMode::Plan)
+        .with_max_turns(3);
+
+    let events = loop_.run("implementation plan is ready");
+
+    assert_eq!(loop_.permission_mode(), PermissionMode::Default);
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "ExitPlanMode"
+                && content.contains("Plan is ready for review")
+                && content.contains("- Bash: Run cargo test")
+        )
+    }));
+}
+
 struct StaticBackend {
     content: String,
     usage: Option<AgentUsage>,
@@ -538,6 +594,64 @@ impl AgentBackend for SnipCallingBackend {
             })
         } else {
             Ok(AgentResponse::text(format!("turn {}", self.calls)))
+        }
+    }
+}
+
+#[derive(Default)]
+struct EnterPlanThenWriteBackend {
+    calls: usize,
+}
+
+impl AgentBackend for EnterPlanThenWriteBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will enter plan mode and try a write."),
+                usage: None,
+                tool_calls: vec![
+                    ToolCall::new("toolu_plan", "EnterPlanMode", serde_json::json!({})),
+                    ToolCall::new(
+                        "toolu_write_in_plan",
+                        "Write",
+                        serde_json::json!({
+                            "file_path": "notes.txt",
+                            "content": "should not be written",
+                        }),
+                    ),
+                ],
+            })
+        } else {
+            Ok(AgentResponse::text("done after plan"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct ExitPlanBackend {
+    calls: usize,
+}
+
+impl AgentBackend for ExitPlanBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("Plan is ready."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_exit_plan",
+                    "ExitPlanMode",
+                    serde_json::json!({
+                        "allowedPrompts": [
+                            {"tool": "Bash", "prompt": "Run cargo test"}
+                        ]
+                    }),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after exit plan"))
         }
     }
 }

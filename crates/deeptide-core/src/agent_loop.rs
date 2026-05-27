@@ -327,7 +327,20 @@ impl AgentLoop {
         &self.model
     }
 
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.permission_manager.mode()
+    }
+
     fn execute_tool_call(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
+        if tool_call.name == "EnterPlanMode" {
+            return self.execute_plan_mode_transition(tool_call, PermissionMode::Plan);
+        }
+        if tool_call.name == "ExitPlanMode"
+            && self.permission_manager.mode() == PermissionMode::Plan
+        {
+            return self.execute_plan_mode_transition(tool_call, PermissionMode::Default);
+        }
+
         let permission = tool_call
             .input
             .as_object()
@@ -489,6 +502,20 @@ impl AgentLoop {
         self.messages.clear();
         self.messages.push(marker);
         self.messages.append(&mut kept);
+    }
+
+    fn execute_plan_mode_transition(
+        &mut self,
+        tool_call: &ToolCall,
+        mode: PermissionMode,
+    ) -> crate::ToolResult {
+        let result =
+            self.tool_registry
+                .call(&tool_call.name, tool_call.input.clone(), &self.tool_context);
+        if !result.is_error {
+            self.permission_manager.set_mode(mode);
+        }
+        result
     }
 }
 
