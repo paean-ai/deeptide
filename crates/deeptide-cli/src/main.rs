@@ -79,6 +79,14 @@ struct Cli {
 
     #[arg(long, default_value_t = 4096)]
     max_output_tokens: usize,
+
+    #[arg(
+        long,
+        env = "DEEPTIDE_MAX_TURNS",
+        default_value_t = 25,
+        help = "Safety cap on agentic turns per prompt."
+    )]
+    max_turns: usize,
 }
 
 fn main() {
@@ -182,6 +190,7 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
     let mut repl = ReplSession::new(configured.backend)
         .with_model(configured.model)
         .with_permission_mode(permission_mode)
+        .with_max_turns(cli.max_turns)
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
     writeln!(stdout, "{}", repl.banner()).map_err(|error| error.to_string())?;
@@ -241,6 +250,7 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
                 "session_id": cli.session_id,
                 "permission_mode": permission_mode.label(),
                 "model": cli.model,
+                "max_turns": cli.max_turns,
             });
             println!(
                 "{}",
@@ -263,6 +273,7 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
                     "session_id": cli.session_id,
                     "permission_mode": permission_mode.label(),
                     "model": cli.model,
+                    "max_turns": cli.max_turns,
                 }))
                 .map_err(|error| error.to_string())?
             );
@@ -277,6 +288,7 @@ fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resul
     let mut loop_ = AgentLoop::new(configured.backend)
         .with_model(configured.model)
         .with_permission_mode(permission_mode)
+        .with_max_turns(cli.max_turns)
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
     let events = loop_.run(prompt);
@@ -442,6 +454,7 @@ mod tests {
         configured_backend, effective_base_url, effective_model, normalize_embedded_mode,
         validate_formats,
     };
+    use clap::Parser;
     use deeptide_core::AnthropicAuthMode;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -459,6 +472,7 @@ mod tests {
             base_url: "https://api.anthropic.com".to_owned(),
             api_key: None,
             max_output_tokens: 4096,
+            max_turns: 25,
         }
     }
 
@@ -556,6 +570,14 @@ mod tests {
         .unwrap_or_else(|error| panic!("stream-json prompt should parse: {error}"));
 
         assert_eq!(prompt, "first\n\nsecond");
+    }
+
+    #[test]
+    fn parses_max_turns_option() {
+        let cli = Cli::try_parse_from(["deeptide", "--max-turns", "7", "--print", "-p", "hello"])
+            .expect("max turns option should parse");
+
+        assert_eq!(cli.max_turns, 7);
     }
 
     #[test]

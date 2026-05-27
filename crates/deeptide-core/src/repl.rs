@@ -49,6 +49,11 @@ impl ReplSession {
         self
     }
 
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.agent_loop = self.agent_loop.with_max_turns(max_turns);
+        self
+    }
+
     pub fn with_subagent_backend_factory<F>(mut self, factory: F) -> Self
     where
         F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,

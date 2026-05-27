@@ -118,6 +118,21 @@ fn repl_cost_command_uses_agent_loop_usage() {
 }
 
 #[test]
+fn repl_honors_max_turns_setting() {
+    let mut repl = ReplSession::new(Box::new(AlwaysToolBackend)).with_max_turns(1);
+
+    let events = repl.submit("keep going");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            ReplEvent::Output(output) if output == "Maximum turns reached."
+        )
+    }));
+    assert_eq!(repl.agent_loop().max_turns(), 1);
+}
+
+#[test]
 fn repl_clear_resets_agent_loop_state() {
     let mut repl = ReplSession::new(Box::new(StaticBackend));
     let _ = repl.submit("hello");
@@ -168,6 +183,22 @@ impl AgentBackend for StaticBackend {
             content: String::from("assistant reply"),
             usage: Some(AgentUsage::new(4, 2, 0, 0, 10)),
             tool_calls: Vec::new(),
+        })
+    }
+}
+
+struct AlwaysToolBackend;
+
+impl AgentBackend for AlwaysToolBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        Ok(AgentResponse {
+            content: String::from("assistant with tool"),
+            usage: None,
+            tool_calls: vec![ToolCall::new(
+                "toolu_read",
+                "Read",
+                serde_json::json!({"file_path": "missing.txt"}),
+            )],
         })
     }
 }
