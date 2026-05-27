@@ -299,10 +299,8 @@ fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resul
 }
 
 fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
-    let api_key = cli.api_key.clone().or_else(|| {
-        env_first_non_empty(&["ZERO_API_KEY", "ZERO_CLI_API_KEY", "ANTHROPIC_API_KEY"])
-    });
-    let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) else {
+    let credential = effective_credential(cli);
+    let Some(credential) = credential else {
         return Ok(ConfiguredBackend {
             backend: Box::<LocalEchoBackend>::default(),
             model: String::from("unconfigured"),
@@ -313,7 +311,12 @@ fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
 
     let base_url = effective_base_url(cli);
     let model = effective_model(cli);
-    let mut config = AnthropicConfig::new(base_url, api_key, model.clone());
+    let mut config = match credential {
+        CloudCredential::ApiKey(api_key) => AnthropicConfig::new(base_url, api_key, model.clone()),
+        CloudCredential::BearerToken(token) => {
+            AnthropicConfig::new_with_bearer_token(base_url, token, model.clone())
+        }
+    };
     config.max_tokens = cli.max_output_tokens;
     let backend = AnthropicBackend::new(config.clone())?;
     Ok(ConfiguredBackend {
@@ -322,6 +325,27 @@ fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
         is_configured: true,
         subagent_config: Some(config),
     })
+}
+
+enum CloudCredential {
+    ApiKey(String),
+    BearerToken(String),
+}
+
+fn effective_credential(cli: &Cli) -> Option<CloudCredential> {
+    let api_key = cli.api_key.clone().or_else(|| {
+        env_first_non_empty(&["ZERO_API_KEY", "ZERO_CLI_API_KEY", "ANTHROPIC_API_KEY"])
+    });
+    if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
+        return Some(CloudCredential::ApiKey(api_key));
+    }
+
+    if has_provider_base_url(cli) {
+        return env_first_non_empty(&["ZERO_CLI_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"])
+            .map(CloudCredential::BearerToken);
+    }
+
+    None
 }
 
 fn subagent_backend_factory(
@@ -346,6 +370,12 @@ fn effective_base_url(cli: &Cli) -> String {
 
     env_first_non_empty(&["ZERO_CLI_BASE_URL", "ZERO_API_BASE", "ANTHROPIC_BASE_URL"])
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned())
+}
+
+fn has_provider_base_url(cli: &Cli) -> bool {
+    cli.base_url != DEFAULT_BASE_URL
+        || env_first_non_empty(&["ZERO_CLI_BASE_URL", "ZERO_API_BASE", "ANTHROPIC_BASE_URL"])
+            .is_some()
 }
 
 fn effective_model(cli: &Cli) -> String {
@@ -412,6 +442,7 @@ mod tests {
         configured_backend, effective_base_url, effective_model, normalize_embedded_mode,
         validate_formats,
     };
+    use deeptide_core::AnthropicAuthMode;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn sample_cli() -> Cli {
@@ -448,6 +479,8 @@ mod tests {
                 "ZERO_CLI_BASE_URL",
                 "ZERO_API_BASE",
                 "ANTHROPIC_BASE_URL",
+                "ZERO_CLI_AUTH_TOKEN",
+                "ANTHROPIC_AUTH_TOKEN",
                 "ZERO_CLI_MODEL",
                 "ANTHROPIC_MODEL",
             ] {
@@ -545,6 +578,45 @@ mod tests {
         assert_eq!(subagent_config.model, "zero-model");
         assert_eq!(subagent_config.base_url, "https://zero.example.test");
         assert_eq!(subagent_config.api_key, "zero-cli-key");
+        assert_eq!(subagent_config.auth_mode, AnthropicAuthMode::ApiKey);
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn zero_cli_auth_token_uses_bearer_auth_with_provider_base_url() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ZERO_CLI_AUTH_TOKEN", "provider-token");
+            std::env::set_var("ZERO_CLI_BASE_URL", "https://provider.example.test");
+        }
+
+        let cli = sample_cli();
+        let configured = configured_backend(&cli).expect("configured backend");
+
+        assert!(configured.is_configured);
+        let subagent_config = configured.subagent_config.expect("subagent config");
+        assert_eq!(subagent_config.api_key, "provider-token");
+        assert_eq!(subagent_config.base_url, "https://provider.example.test");
+        assert_eq!(subagent_config.auth_mode, AnthropicAuthMode::BearerToken);
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn zero_cli_auth_token_without_provider_base_url_falls_back_to_local() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ZERO_CLI_AUTH_TOKEN", "provider-token");
+        }
+
+        let cli = sample_cli();
+        let configured = configured_backend(&cli).expect("configured backend");
+
+        assert!(!configured.is_configured);
+        assert!(configured.subagent_config.is_none());
 
         clear_api_env();
     }

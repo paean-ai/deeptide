@@ -11,6 +11,13 @@ pub struct AnthropicConfig {
     pub api_key: String,
     pub model: String,
     pub max_tokens: usize,
+    pub auth_mode: AnthropicAuthMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnthropicAuthMode {
+    ApiKey,
+    BearerToken,
 }
 
 impl AnthropicConfig {
@@ -24,6 +31,21 @@ impl AnthropicConfig {
             api_key: api_key.into(),
             model: model.into(),
             max_tokens: 4096,
+            auth_mode: AnthropicAuthMode::ApiKey,
+        }
+    }
+
+    pub fn new_with_bearer_token(
+        base_url: impl Into<String>,
+        token: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key: token.into(),
+            model: model.into(),
+            max_tokens: 4096,
+            auth_mode: AnthropicAuthMode::BearerToken,
         }
     }
 }
@@ -63,12 +85,16 @@ impl AgentBackend for AnthropicBackend {
         );
         let url = messages_url(&self.config.base_url);
 
-        let response = self
+        let request = self
             .client
             .post(url)
-            .header("x-api-key", &self.config.api_key)
             .header("anthropic-version", "2023-06-01")
-            .json(&body)
+            .json(&body);
+        let request = match self.config.auth_mode {
+            AnthropicAuthMode::ApiKey => request.header("x-api-key", &self.config.api_key),
+            AnthropicAuthMode::BearerToken => request.bearer_auth(&self.config.api_key),
+        };
+        let response = request
             .send()
             .map_err(|error| format!("connection error: {error}"))?;
         let status = response.status();
