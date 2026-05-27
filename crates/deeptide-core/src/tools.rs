@@ -3162,15 +3162,32 @@ fn safe_inline(value: &str) -> String {
 
 fn model_context_window(model: &str) -> u64 {
     let lower = model.to_ascii_lowercase();
-    if lower.contains("deepseek-v4-pro") || lower.contains("deepseek-v4-flash-q4") {
+    if lower.contains("deepseek-v4-flash-q4") {
         1_000_000
+    } else if lower.contains("v4-flash-mlx-q4q8") || lower.contains("v4-flash-q4q8") {
+        1_048_576
     } else if lower.contains("deepseek-v4-flash") {
         512_000
-    } else if lower.contains("qwen3-coder") || lower.contains("qwen3.6") || lower.contains("claude")
+    } else if lower.contains("deepseek-v4") {
+        1_000_000
+    } else if lower.contains("qwen3-coder-next")
+        || lower.contains("qwen3.6-35b-a3b")
+        || lower.contains("qwen3.6")
     {
         262_144
-    } else {
+    } else if lower.contains("glm-4.7-flash") {
+        131_072
+    } else if lower.contains("deepseek-v3") || lower.contains("deepseek-chat") {
+        128_000
+    } else if lower.contains("claude-3-opus")
+        || lower.contains("claude-3-5")
+        || lower.contains("claude-3.5")
+    {
         200_000
+    } else if lower.contains("gemini") {
+        1_000_000
+    } else {
+        128_000
     }
 }
 

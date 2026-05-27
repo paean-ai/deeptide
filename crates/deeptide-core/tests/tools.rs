@@ -834,6 +834,41 @@ fn ctx_inspect_tool_reports_context_budget_and_warnings() {
 }
 
 #[test]
+fn ctx_inspect_tool_matches_swift_model_context_windows() {
+    let cases = [
+        ("deepseek-v4-flash-q4k", "1.0M tokens"),
+        ("Deviad/DeepSeek-V4-Flash-MLX-Q4Q8", "1.0M tokens"),
+        ("deepseek-v4-pro", "1.0M tokens"),
+        ("mlx-community/Qwen3-Coder-Next-8bit", "262.1K tokens"),
+        ("mlx-community/Qwen3.6-35B-A3B-4bit", "262.1K tokens"),
+        ("glm-4.7-flash", "131.1K tokens"),
+        ("deepseek-chat", "128.0K tokens"),
+        ("claude-3.5-sonnet", "200.0K tokens"),
+        ("gemini-1.5-pro", "1.0M tokens"),
+    ];
+
+    for (model, expected_window) in cases {
+        let result = CtxInspectTool.call(
+            serde_json::json!({
+                "model": model,
+                "estimated_tokens": 1,
+                "message_count": 1
+            }),
+            &ToolContext::new("."),
+        );
+
+        assert!(!result.is_error, "{model} should inspect successfully");
+        assert!(
+            result
+                .content
+                .contains(&format!("Context window: {expected_window}")),
+            "{model} should report {expected_window}, got:\n{}",
+            result.content
+        );
+    }
+}
+
+#[test]
 fn snip_tool_formats_history_trim_request() {
     let result = SnipTool.call(
         serde_json::json!({"keepLast": 200, "explanation": "Older build logs are no longer needed."}),
