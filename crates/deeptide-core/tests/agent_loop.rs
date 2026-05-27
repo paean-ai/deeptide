@@ -2,6 +2,7 @@ use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
     AgentUsage, MessageRole, PermissionMode, ToolCall,
 };
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn agent_loop_appends_user_and_assistant_messages() {
@@ -224,6 +225,160 @@ fn agent_loop_allows_bash_tool_calls_in_bypass_mode() {
     }));
 }
 
+#[test]
+fn agent_loop_executes_agent_tool_with_subagent_backend_factory() {
+    let requested_models = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requested_models_for_factory = Arc::clone(&requested_models);
+    let mut loop_ = AgentLoop::new(Box::new(AgentCallingBackend::default()))
+        .with_permission_mode(PermissionMode::Bypass)
+        .with_subagent_backend_factory(move |model| {
+            requested_models_for_factory
+                .lock()
+                .expect("model log")
+                .push(model.to_owned());
+            Box::new(StaticBackend::new("auth flow is handled in api/auth.rs"))
+        })
+        .with_model("parent-model")
+        .with_max_turns(3);
+
+    let events = loop_.run("delegate exploration");
+
+    assert_eq!(
+        requested_models.lock().expect("model log").as_slice(),
+        ["fast-model"]
+    );
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "Agent"
+                && content.contains("Sub-agent Explore completed with model fast-model.")
+                && content.contains("auth flow is handled in api/auth.rs")
+        )
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::Assistant(message) if message.content == "done after agent"
+        )
+    }));
+}
+
+#[test]
+fn agent_loop_binds_context_state_to_ctx_inspect_tool() {
+    let mut loop_ = AgentLoop::new(Box::new(CtxInspectCallingBackend::default()))
+        .with_model("deepseek-v4-flash")
+        .with_max_turns(3);
+
+    let events = loop_.run("inspect this context please");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "CtxInspect"
+                && content.contains("Model: deepseek-v4-flash")
+                && content.contains("Active messages: 2")
+                && content.contains("Estimated usage:")
+        )
+    }));
+}
+
+#[test]
+fn agent_loop_snip_tool_trims_active_message_history() {
+    let mut loop_ = AgentLoop::new(Box::new(SnipCallingBackend::default())).with_max_turns(3);
+
+    let _ = loop_.run("first");
+    let _ = loop_.run("second");
+    let events = loop_.run("third");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "Snip"
+                && content.contains("History trim requested: keeping last 2 messages.")
+        )
+    }));
+    assert!(loop_.messages().len() <= 5);
+    assert!(
+        loop_.messages()[0]
+            .content
+            .starts_with("[context trimmed by Snip:")
+    );
+    assert!(
+        loop_
+            .messages()
+            .iter()
+            .any(|message| message.content.contains("[tool_result id=toolu_snip"))
+    );
+}
+
+#[test]
+fn agent_loop_enter_plan_mode_changes_permission_mode_and_blocks_writes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(EnterPlanThenWriteBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3);
+
+    let events = loop_.run("plan before writing");
+
+    assert_eq!(loop_.permission_mode(), PermissionMode::Plan);
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "EnterPlanMode" && content.contains("Plan mode activated")
+        )
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: true,
+            } if tool_call.name == "Write" && content.contains("Plan mode")
+        )
+    }));
+    assert!(!temp.path().join("notes.txt").exists());
+}
+
+#[test]
+fn agent_loop_exit_plan_mode_returns_to_default_permission_mode() {
+    let mut loop_ = AgentLoop::new(Box::new(ExitPlanBackend::default()))
+        .with_permission_mode(PermissionMode::Plan)
+        .with_max_turns(3);
+
+    let events = loop_.run("implementation plan is ready");
+
+    assert_eq!(loop_.permission_mode(), PermissionMode::Default);
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "ExitPlanMode"
+                && content.contains("Plan is ready for review")
+                && content.contains("- Bash: Run cargo test")
+        )
+    }));
+}
+
 struct StaticBackend {
     content: String,
     usage: Option<AgentUsage>,
@@ -362,6 +517,141 @@ impl AgentBackend for BashCallingBackend {
             })
         } else {
             Ok(AgentResponse::text("done after bash"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct AgentCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for AgentCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will delegate exploration."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_agent",
+                    "Agent",
+                    serde_json::json!({
+                        "description": "Find auth flow",
+                        "prompt": "Map the auth flow.",
+                        "subagent_type": "Explore",
+                        "model": "fast-model",
+                    }),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after agent"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct CtxInspectCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for CtxInspectCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will inspect context."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_ctx",
+                    "CtxInspect",
+                    serde_json::json!({}),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after context inspection"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct SnipCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for SnipCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 3 {
+            Ok(AgentResponse {
+                content: String::from("I will trim history."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_snip",
+                    "Snip",
+                    serde_json::json!({"keepLast": 2, "explanation": "Older turns are no longer needed."}),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text(format!("turn {}", self.calls)))
+        }
+    }
+}
+
+#[derive(Default)]
+struct EnterPlanThenWriteBackend {
+    calls: usize,
+}
+
+impl AgentBackend for EnterPlanThenWriteBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will enter plan mode and try a write."),
+                usage: None,
+                tool_calls: vec![
+                    ToolCall::new("toolu_plan", "EnterPlanMode", serde_json::json!({})),
+                    ToolCall::new(
+                        "toolu_write_in_plan",
+                        "Write",
+                        serde_json::json!({
+                            "file_path": "notes.txt",
+                            "content": "should not be written",
+                        }),
+                    ),
+                ],
+            })
+        } else {
+            Ok(AgentResponse::text("done after plan"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct ExitPlanBackend {
+    calls: usize,
+}
+
+impl AgentBackend for ExitPlanBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("Plan is ready."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_exit_plan",
+                    "ExitPlanMode",
+                    serde_json::json!({
+                        "allowedPrompts": [
+                            {"tool": "Bash", "prompt": "Run cargo test"}
+                        ]
+                    }),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after exit plan"))
         }
     }
 }

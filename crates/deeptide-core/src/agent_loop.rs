@@ -3,6 +3,7 @@ use crate::{
     ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler, ToolContext, ToolRegistry,
     TurnUsage,
 };
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRole {
@@ -129,6 +130,8 @@ pub trait AgentBackend: Send {
     fn respond(&mut self, request: AgentRequest) -> Result<AgentResponse, String>;
 }
 
+pub type SubAgentBackendFactory = Arc<dyn Fn(&str) -> Box<dyn AgentBackend> + Send + Sync>;
+
 pub struct AgentLoop {
     backend: Box<dyn AgentBackend>,
     messages: Vec<ConversationMessage>,
@@ -139,6 +142,7 @@ pub struct AgentLoop {
     tool_registry: ToolRegistry,
     tool_context: ToolContext,
     permission_manager: PermissionManager,
+    subagent_backend_factory: Option<SubAgentBackendFactory>,
 }
 
 impl AgentLoop {
@@ -156,6 +160,7 @@ impl AgentLoop {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
             permission_manager: PermissionManager::new(PermissionMode::Default, rules),
+            subagent_backend_factory: None,
         }
     }
 
@@ -181,6 +186,14 @@ impl AgentLoop {
 
     pub fn with_permission_manager(mut self, permission_manager: PermissionManager) -> Self {
         self.permission_manager = permission_manager;
+        self
+    }
+
+    pub fn with_subagent_backend_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,
+    {
+        self.subagent_backend_factory = Some(Arc::new(factory));
         self
     }
 
@@ -314,7 +327,20 @@ impl AgentLoop {
         &self.model
     }
 
-    fn execute_tool_call(&self, tool_call: &ToolCall) -> crate::ToolResult {
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.permission_manager.mode()
+    }
+
+    fn execute_tool_call(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
+        if tool_call.name == "EnterPlanMode" {
+            return self.execute_plan_mode_transition(tool_call, PermissionMode::Plan);
+        }
+        if tool_call.name == "ExitPlanMode"
+            && self.permission_manager.mode() == PermissionMode::Plan
+        {
+            return self.execute_plan_mode_transition(tool_call, PermissionMode::Default);
+        }
+
         let permission = tool_call
             .input
             .as_object()
@@ -325,11 +351,24 @@ impl AgentLoop {
             });
 
         match permission {
-            PermissionDecision::Allow => self.tool_registry.call(
-                &tool_call.name,
-                tool_call.input.clone(),
-                &self.tool_context,
-            ),
+            PermissionDecision::Allow => {
+                if tool_call.name == "Agent"
+                    && let Some(result) = self.execute_subagent_tool_call(tool_call)
+                {
+                    return result;
+                }
+                if tool_call.name == "CtxInspect" {
+                    return self.execute_ctx_inspect_tool_call(tool_call);
+                }
+                if tool_call.name == "Snip" {
+                    return self.execute_snip_tool_call(tool_call);
+                }
+                self.tool_registry.call(
+                    &tool_call.name,
+                    tool_call.input.clone(),
+                    &self.tool_context,
+                )
+            }
             PermissionDecision::Deny { reason } => crate::ToolResult::error(format!(
                 "Permission denied for {}: {reason}",
                 tool_call.name
@@ -340,6 +379,161 @@ impl AgentLoop {
             )),
         }
     }
+
+    fn execute_subagent_tool_call(&self, tool_call: &ToolCall) -> Option<crate::ToolResult> {
+        let factory = self.subagent_backend_factory.as_ref()?;
+        let invocation = match crate::tools::parse_agent_invocation(&tool_call.input) {
+            Ok(invocation) => invocation,
+            Err(error) => return Some(crate::ToolResult::error(error)),
+        };
+
+        let subagent_model = invocation
+            .model
+            .as_deref()
+            .unwrap_or(self.model.as_str())
+            .to_owned();
+        let permission_mode = if invocation.definition.is_read_only {
+            PermissionMode::Plan
+        } else {
+            self.permission_manager.mode()
+        };
+        let mut subagent = AgentLoop::new(factory(&subagent_model))
+            .with_model(subagent_model.clone())
+            .with_max_turns(invocation.definition.max_turns)
+            .with_cwd(self.tool_context.cwd.clone())
+            .with_permission_mode(permission_mode);
+        let events = subagent.run(format!(
+            "Sub-agent task: {}\n\n{}",
+            invocation.description, invocation.prompt
+        ));
+
+        Some(render_subagent_result(
+            invocation.definition.kind,
+            &subagent_model,
+            &events,
+        ))
+    }
+}
+
+fn render_subagent_result(kind: &str, model: &str, events: &[AgentLoopEvent]) -> crate::ToolResult {
+    if let Some(AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error))) = events.last() {
+        return crate::ToolResult::error(format!("Sub-agent {kind} failed: {error}"));
+    }
+
+    let mut lines = vec![format!("Sub-agent {kind} completed with model {model}.")];
+    for event in events {
+        match event {
+            AgentLoopEvent::Assistant(message) if !message.content.trim().is_empty() => {
+                lines.push(String::new());
+                lines.push(message.content.trim().to_owned());
+            }
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error,
+            } => {
+                let status = if *is_error { "error" } else { "ok" };
+                lines.push(String::new());
+                lines.push(format!(
+                    "[tool_result name={} status={}]\n{}",
+                    tool_call.name,
+                    status,
+                    content.trim()
+                ));
+            }
+            AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => {
+                lines.push(String::new());
+                lines.push(String::from(
+                    "Sub-agent stopped after reaching the turn limit.",
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    crate::ToolResult::text(lines.join("\n"))
+}
+
+impl AgentLoop {
+    fn execute_ctx_inspect_tool_call(&self, tool_call: &ToolCall) -> crate::ToolResult {
+        let mut input = tool_call
+            .input
+            .as_object()
+            .cloned()
+            .unwrap_or_else(serde_json::Map::new);
+        input
+            .entry(String::from("model"))
+            .or_insert_with(|| serde_json::Value::String(self.model.clone()));
+        input
+            .entry(String::from("estimated_tokens"))
+            .or_insert_with(|| serde_json::Value::from(estimate_context_tokens(&self.messages)));
+        input
+            .entry(String::from("message_count"))
+            .or_insert_with(|| serde_json::Value::from(self.messages.len()));
+
+        self.tool_registry.call(
+            &tool_call.name,
+            serde_json::Value::Object(input),
+            &self.tool_context,
+        )
+    }
+
+    fn execute_snip_tool_call(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
+        let result =
+            self.tool_registry
+                .call(&tool_call.name, tool_call.input.clone(), &self.tool_context);
+        if !result.is_error {
+            let keep_last = snip_keep_last(&tool_call.input);
+            self.trim_messages_for_snip(keep_last);
+        }
+        result
+    }
+
+    fn trim_messages_for_snip(&mut self, keep_last: usize) {
+        if self.messages.len() <= keep_last {
+            return;
+        }
+
+        let removed_count = self.messages.len() - keep_last;
+        let mut kept = self.messages.split_off(removed_count);
+        let marker = ConversationMessage::user(format!(
+            "[context trimmed by Snip: {removed_count} older messages removed; {keep_last} recent messages kept]"
+        ));
+        self.messages.clear();
+        self.messages.push(marker);
+        self.messages.append(&mut kept);
+    }
+
+    fn execute_plan_mode_transition(
+        &mut self,
+        tool_call: &ToolCall,
+        mode: PermissionMode,
+    ) -> crate::ToolResult {
+        let result =
+            self.tool_registry
+                .call(&tool_call.name, tool_call.input.clone(), &self.tool_context);
+        if !result.is_error {
+            self.permission_manager.set_mode(mode);
+        }
+        result
+    }
+}
+
+fn estimate_context_tokens(messages: &[ConversationMessage]) -> u64 {
+    messages
+        .iter()
+        .map(|message| (message.content.chars().count() as u64).div_ceil(4) + 4)
+        .sum()
+}
+
+fn snip_keep_last(input: &serde_json::Value) -> usize {
+    input
+        .get("keepLast")
+        .or_else(|| input.get("keep_last"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(10)
+        .clamp(1, 100)
 }
 
 #[derive(Debug, Default)]

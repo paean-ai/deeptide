@@ -92,6 +92,12 @@ impl ToolRegistry {
         registry.register(Box::<AskUserQuestionTool>::default());
         registry.register(Box::<MemorySearchTool>::default());
         registry.register(Box::<MemoryWriteTool>::default());
+        registry.register(Box::<AgentTool>::default());
+        registry.register(Box::<McpTool>::default());
+        registry.register(Box::<ListMcpResourcesTool>::default());
+        registry.register(Box::<ReadMcpResourceTool>::default());
+        registry.register(Box::<ListMcpPromptsTool>::default());
+        registry.register(Box::<GetMcpPromptTool>::default());
         registry.register(Box::<BriefTool>::default());
         registry.register(Box::<CtxInspectTool>::default());
         registry.register(Box::<SnipTool>::default());
@@ -99,6 +105,8 @@ impl ToolRegistry {
         registry.register(Box::<ExitPlanModeTool>::default());
         registry.register(Box::<LspTool>::default());
         registry.register(Box::<ClipboardTool>::default());
+        registry.register(Box::<AudioTranscribeTool>::default());
+        registry.register(Box::<VideoTranscribeTool>::default());
         registry.register(Box::<SpotlightSearchTool>::default());
         registry.register(Box::<ScreenCaptureTool>::default());
         registry.register(Box::<ImagePreprocessTool>::default());
@@ -143,6 +151,9 @@ impl ToolRegistry {
 
     pub fn call(&self, name: &str, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         let Some(tool) = self.get(name) else {
+            if let Some((server, tool_name)) = parse_dynamic_mcp_tool_name(name) {
+                return call_dynamic_mcp_tool(server, tool_name, input, context);
+            }
             return ToolResult::error(format!("Unknown tool: {name}"));
         };
         tool.call(input, context)
@@ -494,7 +505,7 @@ impl Tool for ToolSearchTool {
         true
     }
 
-    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         let Some(raw_query) = input.get("query").and_then(serde_json::Value::as_str) else {
             return ToolResult::error("query is required");
         };
@@ -511,25 +522,30 @@ impl Tool for ToolSearchTool {
             .clamp(1, 40);
         let entries = builtin_tool_search_entries();
 
-        if query.to_ascii_lowercase().starts_with("select:") {
+        let lower_query = query.to_ascii_lowercase();
+        if lower_query.starts_with("select:") {
             return ToolResult::text(render_selected_tools(query, &entries));
         }
 
         let matches = search_tool_entries(query, &entries);
-        if matches.is_empty() {
+        let dynamic_mcp = if lower_query.contains("mcp") {
+            render_dynamic_mcp_tool_search_entries(&context.cwd)
+        } else {
+            Vec::new()
+        };
+        if matches.is_empty() && dynamic_mcp.is_empty() {
             return ToolResult::text(
                 "No matching tools. Try a tool name, an action, or `select:<ToolName>`.",
             );
         }
 
-        ToolResult::text(
-            matches
-                .into_iter()
-                .take(max_results)
-                .map(render_tool_search_entry)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
+        let mut lines = matches
+            .into_iter()
+            .take(max_results)
+            .map(render_tool_search_entry)
+            .collect::<Vec<_>>();
+        lines.extend(dynamic_mcp);
+        ToolResult::text(lines.join("\n"))
     }
 }
 
@@ -733,6 +749,378 @@ impl Tool for MemoryWriteTool {
             "Saved {scope_label} memory: {title}\n{}",
             path.display()
         ))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AgentTool;
+
+impl Tool for AgentTool {
+    fn name(&self) -> &'static str {
+        "Agent"
+    }
+
+    fn description(&self) -> &'static str {
+        "Launch a specialized sub-agent for multi-step exploration or planning."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let invocation = match parse_agent_invocation(&input) {
+            Ok(invocation) => invocation,
+            Err(error) => return ToolResult::error(error),
+        };
+        let model = invocation
+            .model
+            .as_deref()
+            .unwrap_or("(inherit parent model)");
+        let tool_policy = invocation.definition.tool_policy_label();
+
+        ToolResult::error(format!(
+            "Sub-agent execution is not available in this Rust build yet.\n\
+             Requested: {}\n\
+             Type: {}\n\
+             Model: {model}\n\
+             Max turns: {}\n\
+             Tools: {tool_policy}\n\
+             Read-only: {}\n\n\
+             Prompt:\n{prompt}",
+            invocation.description,
+            invocation.definition.kind,
+            invocation.definition.max_turns,
+            invocation.definition.is_read_only,
+            prompt = invocation.prompt
+        ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentDefinition {
+    pub(crate) kind: &'static str,
+    pub(crate) max_turns: usize,
+    pub(crate) is_read_only: bool,
+    pub(crate) allowed_tools: Option<&'static [&'static str]>,
+    pub(crate) disallowed_tools: &'static [&'static str],
+}
+
+impl AgentDefinition {
+    fn find(kind: &str) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|definition| definition.kind == kind)
+    }
+
+    fn all() -> Vec<Self> {
+        vec![
+            Self {
+                kind: "general-purpose",
+                max_turns: 15,
+                is_read_only: false,
+                allowed_tools: None,
+                disallowed_tools: &["Agent", "EnterPlanMode", "ExitPlanMode", "MemoryWrite"],
+            },
+            Self {
+                kind: "Explore",
+                max_turns: 10,
+                is_read_only: true,
+                allowed_tools: Some(&[
+                    "Read",
+                    "Grep",
+                    "Glob",
+                    "LSP",
+                    "WebFetch",
+                    "WebSearch",
+                    "Skill",
+                    "ToolSearch",
+                    "MemorySearch",
+                    "ListMcpResources",
+                    "ReadMcpResource",
+                    "ListMcpPrompts",
+                    "GetMcpPrompt",
+                    "ReviewArtifact",
+                    "CtxInspect",
+                    "SpotlightSearch",
+                    "TaskOutput",
+                ]),
+                disallowed_tools: &["Agent", "EnterPlanMode", "ExitPlanMode"],
+            },
+            Self {
+                kind: "Plan",
+                max_turns: 15,
+                is_read_only: true,
+                allowed_tools: None,
+                disallowed_tools: &[
+                    "Agent",
+                    "EnterPlanMode",
+                    "ExitPlanMode",
+                    "Write",
+                    "Edit",
+                    "MemoryWrite",
+                    "TaskStop",
+                ],
+            },
+        ]
+    }
+
+    fn all_types() -> Vec<&'static str> {
+        Self::all()
+            .into_iter()
+            .map(|definition| definition.kind)
+            .collect()
+    }
+
+    fn tool_policy_label(&self) -> String {
+        if let Some(allowed_tools) = self.allowed_tools {
+            return allowed_tools.join(", ");
+        }
+        if self.disallowed_tools.is_empty() {
+            String::from("all registered tools")
+        } else {
+            format!(
+                "all registered tools except {}",
+                self.disallowed_tools.join(", ")
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentInvocation {
+    pub(crate) description: String,
+    pub(crate) prompt: String,
+    pub(crate) definition: AgentDefinition,
+    pub(crate) model: Option<String>,
+}
+
+pub(crate) fn parse_agent_invocation(input: &serde_json::Value) -> Result<AgentInvocation, String> {
+    let Some(description) = input.get("description").and_then(serde_json::Value::as_str) else {
+        return Err(String::from("Missing description parameter"));
+    };
+    let Some(prompt) = input.get("prompt").and_then(serde_json::Value::as_str) else {
+        return Err(String::from("Missing prompt parameter"));
+    };
+    let description = description.trim();
+    let prompt = prompt.trim();
+    if description.is_empty() {
+        return Err(String::from("description must not be empty"));
+    }
+    if prompt.chars().count() < 2 {
+        return Err(String::from("prompt must be at least 2 characters"));
+    }
+
+    let subagent_type = input
+        .get("subagent_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("general-purpose");
+    let Some(definition) = AgentDefinition::find(subagent_type) else {
+        return Err(format!(
+            "Unknown agent type: {subagent_type}. Available: {}",
+            AgentDefinition::all_types().join(", ")
+        ));
+    };
+
+    if input
+        .get("run_in_background")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && input.get("isolation").and_then(serde_json::Value::as_str) == Some("worktree")
+    {
+        return Err(String::from(
+            "Cannot combine run_in_background with isolation worktree in this version",
+        ));
+    }
+
+    if let Some(isolation) = input.get("isolation").and_then(serde_json::Value::as_str)
+        && isolation != "worktree"
+    {
+        return Err(String::from("isolation must be worktree when provided"));
+    }
+
+    let model = input
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    Ok(AgentInvocation {
+        description: description.to_owned(),
+        prompt: prompt.to_owned(),
+        definition,
+        model,
+    })
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct McpTool;
+
+impl Tool for McpTool {
+    fn name(&self) -> &'static str {
+        "MCP"
+    }
+
+    fn description(&self) -> &'static str {
+        "Forward a JSON-RPC method to a configured MCP server."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(server) = input.get("server").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or method");
+        };
+        let Some(method) = input.get("method").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or method");
+        };
+        if server.trim().is_empty() || method.trim().is_empty() {
+            return ToolResult::error("Missing server or method");
+        }
+
+        let params = input
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        match call_configured_mcp_server(&context.cwd, server, method, params) {
+            Ok(result) => ToolResult::text(format_json_value(&result)),
+            Err(error) => ToolResult::error(error),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ListMcpResourcesTool;
+
+impl Tool for ListMcpResourcesTool {
+    fn name(&self) -> &'static str {
+        "ListMcpResources"
+    }
+
+    fn description(&self) -> &'static str {
+        "List resources exposed by configured MCP servers."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let target = input
+            .get("server")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|server| !server.is_empty());
+        render_mcp_list("resources", target, &context.cwd)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReadMcpResourceTool;
+
+impl Tool for ReadMcpResourceTool {
+    fn name(&self) -> &'static str {
+        "ReadMcpResource"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read a resource from a configured MCP server by URI."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(server) = input.get("server").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or uri");
+        };
+        let Some(uri) = input.get("uri").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or uri");
+        };
+        if server.trim().is_empty() || uri.trim().is_empty() {
+            return ToolResult::error("Missing server or uri");
+        }
+        match call_configured_mcp_server(
+            &context.cwd,
+            server,
+            "resources/read",
+            serde_json::json!({"uri": uri}),
+        ) {
+            Ok(result) => ToolResult::text(format_json_value(&result)),
+            Err(error) => ToolResult::error(error),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ListMcpPromptsTool;
+
+impl Tool for ListMcpPromptsTool {
+    fn name(&self) -> &'static str {
+        "ListMcpPrompts"
+    }
+
+    fn description(&self) -> &'static str {
+        "List prompt templates exposed by configured MCP servers."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let target = input
+            .get("server")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|server| !server.is_empty());
+        render_mcp_list("prompts", target, &context.cwd)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GetMcpPromptTool;
+
+impl Tool for GetMcpPromptTool {
+    fn name(&self) -> &'static str {
+        "GetMcpPrompt"
+    }
+
+    fn description(&self) -> &'static str {
+        "Fetch a prompt template from a configured MCP server by name."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(server) = input.get("server").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or name");
+        };
+        let Some(name) = input.get("name").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("Missing server or name");
+        };
+        if server.trim().is_empty() || name.trim().is_empty() {
+            return ToolResult::error("Missing server or name");
+        }
+        let mut params = serde_json::json!({"name": name});
+        if let Some(arguments) = input.get("arguments")
+            && arguments.is_object()
+            && let Some(object) = params.as_object_mut()
+        {
+            object.insert("arguments".to_owned(), arguments.clone());
+        }
+        match call_configured_mcp_server(&context.cwd, server, "prompts/get", params) {
+            Ok(result) => ToolResult::text(format_json_value(&result)),
+            Err(error) => ToolResult::error(error),
+        }
     }
 }
 
@@ -1026,6 +1414,12 @@ impl Tool for LspTool {
 pub struct ClipboardTool;
 
 #[derive(Debug, Default, Clone, Copy)]
+pub struct AudioTranscribeTool;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VideoTranscribeTool;
+
+#[derive(Debug, Default, Clone, Copy)]
 pub struct SpotlightSearchTool;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1176,6 +1570,68 @@ impl ClipboardSnapshot {
             );
         }
         String::from("[Clipboard is empty or contains unsupported content]")
+    }
+}
+
+impl Tool for AudioTranscribeTool {
+    fn name(&self) -> &'static str {
+        "AudioTranscribe"
+    }
+
+    fn description(&self) -> &'static str {
+        "Transcribe a local audio file with a configured local speech backend."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("file_path is required");
+        };
+        let language_hint = input
+            .get("language_hint")
+            .and_then(serde_json::Value::as_str);
+        transcribe_media(
+            MediaKind::Audio,
+            &context.resolve_path(file_path),
+            language_hint,
+            false,
+        )
+    }
+}
+
+impl Tool for VideoTranscribeTool {
+    fn name(&self) -> &'static str {
+        "VideoTranscribe"
+    }
+
+    fn description(&self) -> &'static str {
+        "Extract and transcribe the audio track from a local video file."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("file_path is required");
+        };
+        let language_hint = input
+            .get("language_hint")
+            .and_then(serde_json::Value::as_str);
+        let allow_server = input
+            .get("allow_server")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        transcribe_media(
+            MediaKind::Video,
+            &context.resolve_path(file_path),
+            language_hint,
+            allow_server,
+        )
     }
 }
 
@@ -2715,6 +3171,147 @@ fn model_context_window(model: &str) -> u64 {
         262_144
     } else {
         200_000
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaKind {
+    Audio,
+    Video,
+}
+
+impl MediaKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Audio => "AudioTranscribe",
+            Self::Video => "VideoTranscribe",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+
+    fn supported_extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Audio => &[
+                "mp3", "wav", "m4a", "aiff", "aif", "caf", "flac", "ogg", "opus",
+            ],
+            Self::Video => &["mp4", "mov", "m4v", "mkv", "webm", "avi"],
+        }
+    }
+}
+
+fn transcribe_media(
+    kind: MediaKind,
+    path: &Path,
+    language_hint: Option<&str>,
+    allow_server: bool,
+) -> ToolResult {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("media");
+    if !path.exists() {
+        return ToolResult::error(format!("File not found: {}", path.display()));
+    }
+    if !path.is_file() {
+        return ToolResult::error(format!("Path is not a file: {}", path.display()));
+    }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !kind.supported_extensions().contains(&extension.as_str()) {
+        return ToolResult::error(format!(
+            "Unsupported {} format: .{}\nSupported formats: {}",
+            kind.noun(),
+            if extension.is_empty() {
+                "(none)"
+            } else {
+                extension.as_str()
+            },
+            kind.supported_extensions().join(", ")
+        ));
+    }
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return ToolResult::error(format!("File is not readable: {file_name}: {error}"));
+        }
+    };
+
+    let duration = media_duration(path);
+    let mut lines = vec![
+        format!("[{}] {file_name}", kind.label()),
+        String::new(),
+        String::from("Transcription backend unavailable in this Rust build."),
+        String::new(),
+        String::from("--- Metadata ---"),
+        format!("File size: {}", format_bytes(metadata.len())),
+    ];
+    if let Some(duration) = duration {
+        lines.push(format!("Duration: {}", format_duration_seconds(duration)));
+    } else {
+        lines.push(String::from("Duration: unavailable"));
+    }
+    if let Some(language_hint) = language_hint.filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("Language hint: {}", language_hint.trim()));
+    }
+    if kind == MediaKind::Video {
+        lines.push(format!(
+            "Recognition mode: {}",
+            if allow_server {
+                "local or server fallback allowed by input"
+            } else {
+                "local only"
+            }
+        ));
+        lines.push(String::from("Visual frames: not analyzed"));
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "Install or configure a local speech-to-text backend, then retry. This tool currently provides safe validation and metadata parity for Rust while avoiding cloud uploads by default.",
+    ));
+    ToolResult::error(lines.join("\n"))
+}
+
+fn media_duration(path: &Path) -> Option<f64> {
+    let ffprobe = which_binary("ffprobe")?;
+    let output = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+fn format_duration_seconds(seconds: f64) -> String {
+    let total = seconds.round() as u64;
+    let minutes = total / 60;
+    let seconds = total % 60;
+    if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -5752,6 +6349,568 @@ fn read_remote_trigger_settings(path: &Path) -> Result<Option<RemoteTriggerSetti
         })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpServerConfig {
+    name: String,
+    source: PathBuf,
+    command: Option<String>,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    framing: McpFraming,
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpFraming {
+    ContentLength,
+    NewlineJson,
+}
+
+fn render_mcp_list(kind: &str, target: Option<&str>, cwd: &Path) -> ToolResult {
+    let servers = match discover_mcp_servers(cwd) {
+        Ok(servers) => servers,
+        Err(error) => return ToolResult::error(error),
+    };
+    let selected = servers
+        .iter()
+        .filter(|server| target.is_none_or(|target| server.name == target))
+        .collect::<Vec<_>>();
+
+    if selected.is_empty() {
+        return if let Some(target) = target {
+            ToolResult::error(format!("MCP server not configured: {target}"))
+        } else {
+            ToolResult::error(
+                "No MCP servers configured. Add servers under mcp_servers in .deeptide/settings.json or mcpServers in .mcp.json.",
+            )
+        };
+    }
+
+    let mut lines = Vec::new();
+    for server in selected {
+        lines.push(format!("[{}]", server.name));
+        lines.push(format!("  source: {}", server.source.display()));
+        if let Some(command) = &server.command {
+            lines.push(format!("  command: {command}"));
+            let method = match kind {
+                "resources" => "resources/list",
+                "prompts" => "prompts/list",
+                _ => unreachable!("MCP list kind should be known"),
+            };
+            match call_mcp_server(server, method, serde_json::json!({})) {
+                Ok(result) => lines.extend(render_mcp_collection(kind, &result)),
+                Err(error) => lines.push(format!("  error: {error}")),
+            }
+        } else if let Some(url) = &server.url {
+            lines.push(format!("  url: {url}"));
+            lines.push(format!(
+                "  {kind}: unavailable because HTTP/SSE MCP transport is not implemented in this Rust build yet"
+            ));
+        } else {
+            lines.push(String::from("  transport: configured"));
+            lines.push(format!(
+                "  {kind}: unavailable because no command or url is configured"
+            ));
+        }
+    }
+
+    ToolResult::text(lines.join("\n"))
+}
+
+fn call_configured_mcp_server(
+    cwd: &Path,
+    server: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let servers = discover_mcp_servers(cwd)?;
+    let Some(config) = servers.iter().find(|configured| configured.name == server) else {
+        return Err(format!("MCP server not configured: {server}"));
+    };
+    call_mcp_server(config, method, params)
+}
+
+fn parse_dynamic_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix("mcp__")?;
+    let (server, tool) = rest.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty()).then_some((server, tool))
+}
+
+fn call_dynamic_mcp_tool(
+    server: &str,
+    tool_name: &str,
+    input: serde_json::Value,
+    context: &ToolContext,
+) -> ToolResult {
+    let arguments = input
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| input.clone());
+    let params = serde_json::json!({
+        "name": tool_name,
+        "arguments": arguments
+    });
+    match call_configured_mcp_server(&context.cwd, server, "tools/call", params) {
+        Ok(result) => ToolResult::text(format_json_value(&result)),
+        Err(error) => ToolResult::error(error),
+    }
+}
+
+fn discover_mcp_servers(cwd: &Path) -> Result<Vec<McpServerConfig>, String> {
+    let mut servers = Vec::new();
+    for path in mcp_config_paths(cwd) {
+        if !path.exists() {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|error| format!("Failed to read MCP settings {}: {error}", path.display()))?;
+        let json: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|error| format!("Failed to parse MCP settings {}: {error}", path.display()))?;
+        extract_mcp_servers_from_json(&json, &path, &mut servers);
+    }
+    servers.sort_by(|left, right| left.name.cmp(&right.name));
+    servers.dedup_by(|left, right| left.name == right.name);
+    Ok(servers)
+}
+
+fn mcp_config_paths(cwd: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![
+        cwd.join(".mcp.json"),
+        cwd.join(".deeptide").join("mcp.json"),
+        cwd.join(".deeptide").join("settings.json"),
+        cwd.join(".deeptide").join("config.json"),
+    ];
+    if let Some(config_dir) = tide_config_dir() {
+        let project = project_settings_slug(cwd);
+        paths.push(config_dir.join("settings.json"));
+        paths.push(
+            config_dir
+                .join("projects")
+                .join(&project)
+                .join("settings.json"),
+        );
+        paths.push(
+            config_dir
+                .join("projects")
+                .join(project)
+                .join("settings.local.json"),
+        );
+    }
+    if let Some(home) = home_dir() {
+        paths.push(home.join(".deeptide").join("settings.json"));
+        paths.push(home.join(".deeptide").join("config.json"));
+    }
+    paths
+}
+
+fn extract_mcp_servers_from_json(
+    json: &serde_json::Value,
+    source: &Path,
+    servers: &mut Vec<McpServerConfig>,
+) {
+    for key in ["mcp_servers", "mcpServers", "servers"] {
+        if let Some(object) = json.get(key).and_then(serde_json::Value::as_object) {
+            collect_mcp_servers(object, source, servers);
+        }
+    }
+    if let Some(settings) = json.get("settings") {
+        for key in ["mcp_servers", "mcpServers"] {
+            if let Some(object) = settings.get(key).and_then(serde_json::Value::as_object) {
+                collect_mcp_servers(object, source, servers);
+            }
+        }
+    }
+}
+
+fn collect_mcp_servers(
+    object: &serde_json::Map<String, serde_json::Value>,
+    source: &Path,
+    servers: &mut Vec<McpServerConfig>,
+) {
+    for (name, value) in object {
+        let Some(config) = value.as_object() else {
+            continue;
+        };
+        if config.get("disabled").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
+        }
+        let command = config
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let url = config
+            .get("url")
+            .or_else(|| config.get("endpoint"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let args = config
+            .get("args")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let env = config
+            .get("env")
+            .and_then(serde_json::Value::as_object)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value
+                            .as_str()
+                            .map(|value| (key.to_owned(), value.to_owned()))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let framing = config
+            .get("framing")
+            .or_else(|| config.get("message_framing"))
+            .and_then(serde_json::Value::as_str)
+            .map(parse_mcp_framing)
+            .unwrap_or(McpFraming::ContentLength);
+        servers.push(McpServerConfig {
+            name: name.to_owned(),
+            source: source.to_path_buf(),
+            command,
+            args,
+            env,
+            framing,
+            url,
+        });
+    }
+}
+
+fn call_mcp_server(
+    config: &McpServerConfig,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let Some(command) = &config.command else {
+        if config.url.is_some() {
+            return Err(format!(
+                "MCP server {} uses HTTP/SSE transport, which is not implemented in this Rust build yet.",
+                config.name
+            ));
+        }
+        return Err(format!(
+            "MCP server {} has no command configured.",
+            config.name
+        ));
+    };
+
+    let mut child = Command::new(command)
+        .args(&config.args)
+        .envs(&config.env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start MCP server {}: {error}", config.name))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("Failed to open stdin for MCP server {}", config.name))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("Failed to open stdout for MCP server {}", config.name))?;
+    let stderr = child.stderr.take();
+    let (tx, rx) = mpsc::channel();
+    let framing = config.framing;
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            match read_mcp_frame(&mut reader, framing) {
+                Ok(message) => {
+                    if tx.send(Ok(message)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error.to_string()));
+                    break;
+                }
+            }
+        }
+    });
+
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "deeptide-rs", "version": env!("CARGO_PKG_VERSION")}
+        }
+    });
+    let initialized = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": method,
+        "params": params
+    });
+    write_mcp_frame(&mut stdin, &initialize, config.framing)
+        .and_then(|_| write_mcp_frame(&mut stdin, &initialized, config.framing))
+        .and_then(|_| write_mcp_frame(&mut stdin, &request, config.framing))
+        .map_err(|error| format!("Failed to write MCP request to {}: {error}", config.name))?;
+    drop(stdin);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut response = None;
+    while Instant::now() < deadline {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(timeout.min(Duration::from_millis(250))) {
+            Ok(Ok(message)) => {
+                if message.get("id").and_then(serde_json::Value::as_i64) == Some(2) {
+                    response = Some(message);
+                    break;
+                }
+            }
+            Ok(Err(error)) => {
+                return Err(format!("MCP server {} closed stdout: {error}", config.name));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(format!(
+                    "MCP server {} stopped before replying",
+                    config.name
+                ));
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let Some(response) = response else {
+        let stderr_text = read_child_stderr(stderr);
+        return Err(format!(
+            "MCP server {} timed out waiting for {method}.{}",
+            config.name, stderr_text
+        ));
+    };
+    if let Some(error) = response.get("error") {
+        return Err(format!(
+            "MCP call failed on {}: {}",
+            config.name,
+            format_json_value(error)
+        ));
+    }
+    Ok(response
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({})))
+}
+
+fn read_child_stderr(stderr: Option<std::process::ChildStderr>) -> String {
+    let Some(mut stderr) = stderr else {
+        return String::new();
+    };
+    let mut text = String::new();
+    let _ = stderr.read_to_string(&mut text);
+    let text = text.trim();
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!(" stderr: {text}")
+    }
+}
+
+fn parse_mcp_framing(raw: &str) -> McpFraming {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "newline" | "json-lines" | "jsonl" | "ndjson" => McpFraming::NewlineJson,
+        _ => McpFraming::ContentLength,
+    }
+}
+
+fn write_mcp_frame(
+    writer: &mut impl IoWrite,
+    message: &serde_json::Value,
+    framing: McpFraming,
+) -> io::Result<()> {
+    let body = serde_json::to_vec(message).map_err(io::Error::other)?;
+    match framing {
+        McpFraming::ContentLength => {
+            write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+            writer.write_all(&body)?;
+        }
+        McpFraming::NewlineJson => {
+            writer.write_all(&body)?;
+            writer.write_all(b"\n")?;
+        }
+    }
+    writer.flush()
+}
+
+fn read_mcp_frame(reader: &mut impl BufRead, framing: McpFraming) -> io::Result<serde_json::Value> {
+    match framing {
+        McpFraming::ContentLength => read_mcp_content_length_frame(reader),
+        McpFraming::NewlineJson => read_mcp_newline_json_frame(reader),
+    }
+}
+
+fn read_mcp_newline_json_frame(reader: &mut impl BufRead) -> io::Result<serde_json::Value> {
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected EOF while reading MCP JSON line",
+            ));
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        return serde_json::from_str(trimmed).map_err(io::Error::other);
+    }
+}
+
+fn read_mcp_content_length_frame(reader: &mut impl BufRead) -> io::Result<serde_json::Value> {
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected EOF while reading MCP headers",
+            ));
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+            content_length = Some(value.trim().parse::<usize>().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid MCP content length: {error}"),
+                )
+            })?);
+        }
+    }
+
+    let Some(length) = content_length else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing MCP Content-Length header",
+        ));
+    };
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body)?;
+    serde_json::from_slice(&body).map_err(io::Error::other)
+}
+
+fn render_mcp_collection(kind: &str, result: &serde_json::Value) -> Vec<String> {
+    let key = match kind {
+        "resources" => "resources",
+        "prompts" => "prompts",
+        _ => return vec![format!("  {kind}: {}", format_json_value(result))],
+    };
+    let Some(items) = result.get(key).and_then(serde_json::Value::as_array) else {
+        return vec![format!("  {kind}: (none)")];
+    };
+    if items.is_empty() {
+        return vec![format!("  {kind}: (none)")];
+    }
+
+    let mut lines = vec![format!("  {kind}:")];
+    for item in items {
+        if let Some(object) = item.as_object() {
+            let primary = if kind == "prompts" {
+                object.get("name")
+            } else {
+                object.get("uri").or_else(|| object.get("name"))
+            }
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+            let secondary = if kind == "prompts" {
+                object.get("description")
+            } else {
+                object.get("name").or_else(|| object.get("description"))
+            }
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+            if secondary.is_empty() || secondary == primary {
+                lines.push(format!("    - {primary}"));
+            } else {
+                lines.push(format!("    - {primary} - {secondary}"));
+            }
+        }
+    }
+    lines
+}
+
+fn render_dynamic_mcp_tool_search_entries(cwd: &Path) -> Vec<String> {
+    let Ok(servers) = discover_mcp_servers(cwd) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for server in servers {
+        let Some(command) = &server.command else {
+            continue;
+        };
+        match call_mcp_server(&server, "tools/list", serde_json::json!({})) {
+            Ok(result) => {
+                let Some(tools) = result.get("tools").and_then(serde_json::Value::as_array) else {
+                    continue;
+                };
+                if !tools.is_empty() && !lines.iter().any(|line| line == "[MCP tools]") {
+                    lines.push(String::from("[MCP tools]"));
+                }
+                for tool in tools {
+                    let Some(object) = tool.as_object() else {
+                        continue;
+                    };
+                    let Some(name) = object.get("name").and_then(serde_json::Value::as_str) else {
+                        continue;
+                    };
+                    let description = object
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("MCP server tool");
+                    lines.push(format!(
+                        "- mcp__{}__{} [external] - {}",
+                        server.name,
+                        name,
+                        truncate_chars(description, 160)
+                    ));
+                }
+            }
+            Err(error) => {
+                lines.push(format!(
+                    "- MCP server {} ({command}) - tools/list unavailable: {}",
+                    server.name,
+                    truncate_chars(&error, 120)
+                ));
+            }
+        }
+    }
+    lines
+}
+
+fn format_json_value(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
 fn remote_trigger_settings_paths(cwd: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(config_dir) = tide_config_dir() {
@@ -6561,6 +7720,36 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "project memory",
             "global memory",
         ],
+        "Agent" => vec![
+            "subagent",
+            "delegate",
+            "explore",
+            "plan",
+            "parallel",
+            "multi step",
+            "research",
+        ],
+        "MCP" => vec![
+            "mcp",
+            "model context protocol",
+            "json rpc",
+            "server",
+            "tool bridge",
+        ],
+        "ListMcpResources" | "ReadMcpResource" => vec![
+            "mcp",
+            "model context protocol",
+            "resource",
+            "server",
+            "context",
+        ],
+        "ListMcpPrompts" | "GetMcpPrompt" => vec![
+            "mcp",
+            "model context protocol",
+            "prompt",
+            "template",
+            "server",
+        ],
         "Brief" => vec!["context", "summary", "compact", "compaction", "tokens"],
         "CtxInspect" => vec!["context", "tokens", "window", "cache", "budget"],
         "Snip" => vec!["context", "trim", "history", "messages", "tokens"],
@@ -6573,6 +7762,22 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "paste",
             "finder",
             "selection",
+        ],
+        "AudioTranscribe" => vec![
+            "audio",
+            "speech",
+            "transcribe",
+            "transcription",
+            "voice",
+            "recording",
+        ],
+        "VideoTranscribe" => vec![
+            "video",
+            "speech",
+            "transcribe",
+            "transcription",
+            "audio track",
+            "subtitles",
         ],
         "SpotlightSearch" => vec![
             "spotlight",

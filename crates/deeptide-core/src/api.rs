@@ -319,6 +319,80 @@ fn tool_schemas() -> Vec<WireTool> {
             }),
         },
         WireTool {
+            name: "Agent",
+            description: "Launch a specialized sub-agent for multi-step exploration or planning.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Short 3-5 word description of the task."},
+                    "prompt": {"type": "string", "description": "Task for the agent to perform."},
+                    "subagent_type": {"type": "string", "description": "Specialized agent type: general-purpose, Explore, or Plan.", "enum": ["general-purpose", "Explore", "Plan"]},
+                    "model": {"type": "string", "description": "Optional model override for this sub-agent."},
+                    "run_in_background": {"type": "boolean", "description": "Run asynchronously when supported by the interactive host."},
+                    "isolation": {"type": "string", "description": "Optional worktree isolation for parallel-safe execution.", "enum": ["worktree"]}
+                },
+                "required": ["description", "prompt"]
+            }),
+        },
+        WireTool {
+            name: "MCP",
+            description: "Forward a JSON-RPC method to a configured MCP server.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Name of the server in settings.mcp_servers or mcpServers."},
+                    "method": {"type": "string", "description": "JSON-RPC method such as tools/call, resources/list, or prompts/get."},
+                    "params": {"type": "object", "description": "Free-form JSON-RPC params object."}
+                },
+                "required": ["server", "method"]
+            }),
+        },
+        WireTool {
+            name: "ListMcpResources",
+            description: "List resources exposed by configured MCP servers.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Optional server name; omit to list across all configured servers."}
+                }
+            }),
+        },
+        WireTool {
+            name: "ReadMcpResource",
+            description: "Read a resource from a configured MCP server by URI.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Configured MCP server name."},
+                    "uri": {"type": "string", "description": "Resource URI from ListMcpResources."}
+                },
+                "required": ["server", "uri"]
+            }),
+        },
+        WireTool {
+            name: "ListMcpPrompts",
+            description: "List prompt templates exposed by configured MCP servers.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Optional server name; omit to list across all configured servers."}
+                }
+            }),
+        },
+        WireTool {
+            name: "GetMcpPrompt",
+            description: "Fetch a prompt template from a configured MCP server by name.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Configured MCP server name."},
+                    "name": {"type": "string", "description": "Prompt name from ListMcpPrompts."},
+                    "arguments": {"type": "object", "description": "Prompt arguments if required by the prompt template."}
+                },
+                "required": ["server", "name"]
+            }),
+        },
+        WireTool {
             name: "Brief",
             description: "Request a context compaction summary of the conversation so far.",
             input_schema: serde_json::json!({
@@ -392,6 +466,31 @@ fn tool_schemas() -> Vec<WireTool> {
                     "content": {"type": "string", "description": "Text to write to the clipboard. Required for write operation."}
                 },
                 "required": ["operation"]
+            }),
+        },
+        WireTool {
+            name: "AudioTranscribe",
+            description: "Transcribe a local audio file with a configured local speech backend.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the audio file. Relative paths resolve against the current workspace."},
+                    "language_hint": {"type": "string", "description": "Optional BCP-47 language code such as zh-CN or en-US."}
+                },
+                "required": ["file_path"]
+            }),
+        },
+        WireTool {
+            name: "VideoTranscribe",
+            description: "Extract and transcribe the audio track from a local video file.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the video file. Relative paths resolve against the current workspace."},
+                    "language_hint": {"type": "string", "description": "Optional BCP-47 language code such as zh-CN or en-US."},
+                    "allow_server": {"type": "boolean", "description": "Accepted for Swift schema parity. Rust does not upload media by default."}
+                },
+                "required": ["file_path"]
             }),
         },
         WireTool {
@@ -1140,12 +1239,20 @@ mod tests {
         );
 
         for name in [
+            "Agent",
+            "MCP",
+            "ListMcpResources",
+            "ReadMcpResource",
+            "ListMcpPrompts",
+            "GetMcpPrompt",
             "Brief",
             "CtxInspect",
             "Snip",
             "EnterPlanMode",
             "ExitPlanMode",
             "Clipboard",
+            "AudioTranscribe",
+            "VideoTranscribe",
             "SpotlightSearch",
             "ScreenCapture",
             "LSP",

@@ -1,17 +1,21 @@
 use deeptide_core::{
-    AskUserQuestionTool, BashTool, BriefTool, ClipboardTool, CrashLogTool, CronCreateTool,
-    CronDeleteTool, CronListTool, CtxInspectTool, EditTool, EnterPlanModeTool, EnterWorktreeTool,
-    ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool, ImagePreprocessTool, LspTool,
-    MacDiagnoseTool, MacLogTool, MemorySearchTool, MemoryWriteTool, MonitorTool, NotebookEditTool,
-    PublishTool, PushNotificationTool, ReadFilesTool, RemoteTriggerTool, ReviewArtifactTool,
-    ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool, TaskCreateTool,
-    TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool,
-    ToolContext, ToolRegistry, ToolSearchTool, VerifyPlanExecutionTool, VisionTool, WebFetchTool,
-    WebSearchTool, WriteTool, memory::MemorySystem,
+    AgentTool, AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool, ClipboardTool,
+    CrashLogTool, CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool, EditTool,
+    EnterPlanModeTool, EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool,
+    GetMcpPromptTool, ImagePreprocessTool, ListMcpPromptsTool, ListMcpResourcesTool, LspTool,
+    MacDiagnoseTool, MacLogTool, McpTool, MemorySearchTool, MemoryWriteTool, MonitorTool,
+    NotebookEditTool, PublishTool, PushNotificationTool, ReadFilesTool, ReadMcpResourceTool,
+    RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool, SnipTool,
+    SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
+    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool,
+    VerifyPlanExecutionTool, VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool,
+    WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock, mpsc};
 use std::thread;
@@ -243,6 +247,242 @@ fn tool_search_supports_exact_names_and_select_syntax() {
     assert!(selected.content.contains("- Read [read-only, parallel]"));
     assert!(selected.content.contains("- Edit [writes]"));
     assert!(selected.content.contains("- MissingTool - not found"));
+}
+
+#[test]
+fn agent_tool_validates_swift_agent_types_and_reports_runtime_gap() {
+    let context = ToolContext::new(".");
+
+    let missing_prompt = AgentTool.call(
+        serde_json::json!({"description": "Find auth flow"}),
+        &context,
+    );
+    assert!(missing_prompt.is_error);
+    assert_eq!(missing_prompt.content, "Missing prompt parameter");
+
+    let unknown = AgentTool.call(
+        serde_json::json!({
+            "description": "Find auth flow",
+            "prompt": "Map the auth flow.",
+            "subagent_type": "Scout"
+        }),
+        &context,
+    );
+    assert!(unknown.is_error);
+    assert!(
+        unknown
+            .content
+            .contains("Unknown agent type: Scout. Available: general-purpose, Explore, Plan")
+    );
+
+    let invalid_background = AgentTool.call(
+        serde_json::json!({
+            "description": "Find auth flow",
+            "prompt": "Map the auth flow.",
+            "run_in_background": true,
+            "isolation": "worktree"
+        }),
+        &context,
+    );
+    assert!(invalid_background.is_error);
+    assert!(
+        invalid_background
+            .content
+            .contains("Cannot combine run_in_background with isolation worktree")
+    );
+
+    let explore = AgentTool.call(
+        serde_json::json!({
+            "description": "Find auth flow",
+            "prompt": "Map the auth flow.",
+            "subagent_type": "Explore",
+            "model": "fast-model"
+        }),
+        &context,
+    );
+    assert!(explore.is_error);
+    assert!(
+        explore
+            .content
+            .contains("Sub-agent execution is not available")
+    );
+    assert!(explore.content.contains("Type: Explore"));
+    assert!(explore.content.contains("Model: fast-model"));
+    assert!(explore.content.contains("Max turns: 10"));
+    assert!(explore.content.contains("Read-only: true"));
+    assert!(explore.content.contains("ListMcpResources"));
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_tools_call_configured_stdio_servers() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let server = temp.path().join("fake-mcp.sh");
+    std::fs::write(
+        &server,
+        r#"#!/bin/sh
+if [ "$1" != "serve" ] || [ "$DEEPTIDE_TEST_MODE" != "stdio" ]; then
+  echo "bad launch context" >&2
+  exit 7
+fi
+cat >/dev/null
+body1='{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}'
+body2='{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"file://guide.md","name":"Guide"}],"prompts":[{"name":"review","description":"Review code"}],"tools":[{"name":"lookup","description":"Look up project facts"}],"content":[{"type":"text","text":"hello"}]}}'
+printf 'Content-Length: %s\r\n\r\n%s' "${#body1}" "$body1"
+printf 'Content-Length: %s\r\n\r\n%s' "${#body2}" "$body2"
+"#,
+    )
+    .expect("write fake server");
+    let mut permissions = std::fs::metadata(&server)
+        .expect("fake server metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&server, permissions).expect("chmod fake server");
+
+    std::fs::write(
+        temp.path().join(".mcp.json"),
+        serde_json::json!({
+            "mcpServers": {
+                "docs": {
+                    "command": server.display().to_string(),
+                    "args": ["serve"],
+                    "env": {"DEEPTIDE_TEST_MODE": "stdio"}
+                },
+                "disabled": {
+                    "command": server.display().to_string(),
+                    "disabled": true
+                },
+                "remote": {"url": "https://mcp.example.invalid"}
+            }
+        })
+        .to_string(),
+    )
+    .expect("write mcp fixture");
+    let context = ToolContext::new(temp.path());
+
+    let resources = ListMcpResourcesTool.call(serde_json::json!({}), &context);
+    assert!(!resources.is_error);
+    assert!(resources.content.contains("[docs]"));
+    assert!(resources.content.contains("command:"));
+    assert!(resources.content.contains("file://guide.md - Guide"));
+    assert!(!resources.content.contains("[disabled]"));
+    assert!(resources.content.contains("[remote]"));
+    assert!(
+        resources
+            .content
+            .contains("url: https://mcp.example.invalid")
+    );
+    assert!(
+        resources
+            .content
+            .contains("HTTP/SSE MCP transport is not implemented")
+    );
+
+    let prompts = ListMcpPromptsTool.call(serde_json::json!({"server": "docs"}), &context);
+    assert!(!prompts.is_error);
+    assert!(prompts.content.contains("[docs]"));
+    assert!(prompts.content.contains("review - Review code"));
+    assert!(!prompts.content.contains("[remote]"));
+
+    let read = ReadMcpResourceTool.call(
+        serde_json::json!({"server": "docs", "uri": "file://guide.md"}),
+        &context,
+    );
+    assert!(!read.is_error);
+    assert!(read.content.contains("\"text\": \"hello\""));
+
+    let prompt = GetMcpPromptTool.call(
+        serde_json::json!({"server": "docs", "name": "review"}),
+        &context,
+    );
+    assert!(!prompt.is_error);
+    assert!(prompt.content.contains("\"prompts\""));
+
+    let forward = McpTool.call(
+        serde_json::json!({"server": "docs", "method": "resources/list"}),
+        &context,
+    );
+    assert!(!forward.is_error);
+    assert!(forward.content.contains("\"resources\""));
+
+    let dynamic = ToolRegistry::with_builtin_tools().call(
+        "mcp__docs__lookup",
+        serde_json::json!({"query": "guide"}),
+        &context,
+    );
+    assert!(!dynamic.is_error);
+    assert!(dynamic.content.contains("\"content\""));
+
+    let search = ToolSearchTool.call(serde_json::json!({"query": "mcp lookup"}), &context);
+    assert!(!search.is_error);
+    assert!(search.content.contains("[MCP tools]"));
+    assert!(search.content.contains("mcp__docs__lookup"));
+    assert!(search.content.contains("Look up project facts"));
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_tools_support_swift_style_newline_json_framing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let server = temp.path().join("fake-mcp-newline.sh");
+    std::fs::write(
+        &server,
+        r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake-newline","version":"1"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"triage","description":"Triage issue"}]}}'
+"#,
+    )
+    .expect("write fake newline server");
+    let mut permissions = std::fs::metadata(&server)
+        .expect("fake newline server metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&server, permissions).expect("chmod fake newline server");
+
+    std::fs::write(
+        temp.path().join(".mcp.json"),
+        serde_json::json!({
+            "mcpServers": {
+                "swiftish": {
+                    "command": server.display().to_string(),
+                    "framing": "newline"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write mcp fixture");
+
+    let prompts = ListMcpPromptsTool.call(
+        serde_json::json!({"server": "swiftish"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!prompts.is_error);
+    assert!(prompts.content.contains("[swiftish]"));
+    assert!(prompts.content.contains("triage - Triage issue"));
+}
+
+#[test]
+fn mcp_tools_report_missing_configuration_and_required_inputs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temp.path());
+
+    let list = ListMcpResourcesTool.call(serde_json::json!({}), &context);
+    assert!(list.is_error);
+    assert!(list.content.contains("No MCP servers configured"));
+
+    let missing = McpTool.call(serde_json::json!({"server": "docs"}), &context);
+    assert!(missing.is_error);
+    assert_eq!(missing.content, "Missing server or method");
+
+    let unknown = ReadMcpResourceTool.call(
+        serde_json::json!({"server": "docs", "uri": "file://guide.md"}),
+        &context,
+    );
+    assert!(unknown.is_error);
+    assert_eq!(unknown.content, "MCP server not configured: docs");
 }
 
 #[test]
@@ -649,6 +889,46 @@ fn clipboard_tool_validates_operation_and_write_content() {
     );
     assert!(missing_content.is_error);
     assert_eq!(missing_content.content, "write operation requires content");
+}
+
+#[test]
+fn media_transcribe_tools_validate_inputs_and_report_backend_gap() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("clip.mp3"), b"not real audio").expect("audio fixture");
+    std::fs::write(temp.path().join("movie.mp4"), b"not real video").expect("video fixture");
+    std::fs::write(temp.path().join("notes.txt"), b"text").expect("text fixture");
+    let context = ToolContext::new(temp.path());
+
+    let missing_audio = AudioTranscribeTool.call(serde_json::json!({}), &context);
+    assert!(missing_audio.is_error);
+    assert_eq!(missing_audio.content, "file_path is required");
+
+    let unsupported =
+        AudioTranscribeTool.call(serde_json::json!({"file_path": "notes.txt"}), &context);
+    assert!(unsupported.is_error);
+    assert!(unsupported.content.contains("Unsupported audio format"));
+
+    let audio = AudioTranscribeTool.call(
+        serde_json::json!({"file_path": "clip.mp3", "language_hint": "en-US"}),
+        &context,
+    );
+    assert!(audio.is_error);
+    assert!(audio.content.contains("[AudioTranscribe] clip.mp3"));
+    assert!(audio.content.contains("Transcription backend unavailable"));
+    assert!(audio.content.contains("Language hint: en-US"));
+
+    let video = VideoTranscribeTool.call(
+        serde_json::json!({"file_path": "movie.mp4", "allow_server": true}),
+        &context,
+    );
+    assert!(video.is_error);
+    assert!(video.content.contains("[VideoTranscribe] movie.mp4"));
+    assert!(
+        video
+            .content
+            .contains("Recognition mode: local or server fallback allowed by input")
+    );
+    assert!(video.content.contains("Visual frames: not analyzed"));
 }
 
 #[test]
