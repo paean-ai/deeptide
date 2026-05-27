@@ -9,6 +9,13 @@ use deeptide_core::{
     LocalEchoBackend, MarkdownRenderer, ReplEvent, ReplSession,
 };
 
+struct ConfiguredBackend {
+    backend: Box<dyn AgentBackend>,
+    model: String,
+    is_configured: bool,
+    subagent_config: Option<AnthropicConfig>,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 enum InputFormat {
     Text,
@@ -171,10 +178,12 @@ fn collect_prompt(cli: &Cli, stdin: Option<&str>) -> Result<String, String> {
 fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), String> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let (backend, model, is_configured) = configured_backend(cli)?;
-    let mut repl = ReplSession::new(backend)
-        .with_model(model)
-        .with_permission_mode(permission_mode);
+    let configured = configured_backend(cli)?;
+    let is_configured = configured.is_configured;
+    let mut repl = ReplSession::new(configured.backend)
+        .with_model(configured.model)
+        .with_permission_mode(permission_mode)
+        .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
     writeln!(stdout, "{}", repl.banner()).map_err(|error| error.to_string())?;
     writeln!(
@@ -265,10 +274,11 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
 }
 
 fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Result<String, String> {
-    let (backend, model, _) = configured_backend(cli)?;
-    let mut loop_ = AgentLoop::new(backend)
-        .with_model(model)
-        .with_permission_mode(permission_mode);
+    let configured = configured_backend(cli)?;
+    let mut loop_ = AgentLoop::new(configured.backend)
+        .with_model(configured.model)
+        .with_permission_mode(permission_mode)
+        .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
     let events = loop_.run(prompt);
     let mut assistant = None;
@@ -289,24 +299,45 @@ fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resul
     assistant.ok_or_else(|| String::from("model returned no assistant message"))
 }
 
-fn configured_backend(cli: &Cli) -> Result<(Box<dyn AgentBackend>, String, bool), String> {
+fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
     let api_key = cli
         .api_key
         .clone()
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
     let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) else {
-        return Ok((
-            Box::<LocalEchoBackend>::default(),
-            String::from("unconfigured"),
-            false,
-        ));
+        return Ok(ConfiguredBackend {
+            backend: Box::<LocalEchoBackend>::default(),
+            model: String::from("unconfigured"),
+            is_configured: false,
+            subagent_config: None,
+        });
     };
 
     let base_url = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| cli.base_url.clone());
     let mut config = AnthropicConfig::new(base_url, api_key, cli.model.clone());
     config.max_tokens = cli.max_output_tokens;
-    let backend = AnthropicBackend::new(config)?;
-    Ok((Box::new(backend), cli.model.clone(), true))
+    let backend = AnthropicBackend::new(config.clone())?;
+    Ok(ConfiguredBackend {
+        backend: Box::new(backend),
+        model: cli.model.clone(),
+        is_configured: true,
+        subagent_config: Some(config),
+    })
+}
+
+fn subagent_backend_factory(
+    config: Option<AnthropicConfig>,
+) -> impl Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static {
+    move |model| {
+        let Some(mut config) = config.clone() else {
+            return Box::<LocalEchoBackend>::default();
+        };
+        config.model = model.to_owned();
+        match AnthropicBackend::new(config) {
+            Ok(backend) => Box::new(backend),
+            Err(_) => Box::<LocalEchoBackend>::default(),
+        }
+    }
 }
 
 fn read_stdin_if_needed(cli: &Cli) -> Result<Option<String>, String> {

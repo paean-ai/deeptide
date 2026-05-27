@@ -49,6 +49,14 @@ impl ReplSession {
         self
     }
 
+    pub fn with_subagent_backend_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,
+    {
+        self.agent_loop = self.agent_loop.with_subagent_backend_factory(factory);
+        self
+    }
+
     pub fn submit(&mut self, line: &str) -> Vec<ReplEvent> {
         let trimmed = line.trim();
         if trimmed.is_empty() {
