@@ -327,7 +327,7 @@ if [ "$1" != "serve" ] || [ "$DEEPTIDE_TEST_MODE" != "stdio" ]; then
 fi
 cat >/dev/null
 body1='{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}'
-body2='{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"file://guide.md","name":"Guide"}],"prompts":[{"name":"review","description":"Review code"}],"content":[{"type":"text","text":"hello"}]}}'
+body2='{"jsonrpc":"2.0","id":2,"result":{"resources":[{"uri":"file://guide.md","name":"Guide"}],"prompts":[{"name":"review","description":"Review code"}],"tools":[{"name":"lookup","description":"Look up project facts"}],"content":[{"type":"text","text":"hello"}]}}'
 printf 'Content-Length: %s\r\n\r\n%s' "${#body1}" "$body1"
 printf 'Content-Length: %s\r\n\r\n%s' "${#body2}" "$body2"
 "#,
@@ -412,6 +412,12 @@ printf 'Content-Length: %s\r\n\r\n%s' "${#body2}" "$body2"
     );
     assert!(!dynamic.is_error);
     assert!(dynamic.content.contains("\"content\""));
+
+    let search = ToolSearchTool.call(serde_json::json!({"query": "mcp lookup"}), &context);
+    assert!(!search.is_error);
+    assert!(search.content.contains("[MCP tools]"));
+    assert!(search.content.contains("mcp__docs__lookup"));
+    assert!(search.content.contains("Look up project facts"));
 }
 
 #[cfg(unix)]

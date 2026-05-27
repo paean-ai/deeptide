@@ -505,7 +505,7 @@ impl Tool for ToolSearchTool {
         true
     }
 
-    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
         let Some(raw_query) = input.get("query").and_then(serde_json::Value::as_str) else {
             return ToolResult::error("query is required");
         };
@@ -522,25 +522,30 @@ impl Tool for ToolSearchTool {
             .clamp(1, 40);
         let entries = builtin_tool_search_entries();
 
-        if query.to_ascii_lowercase().starts_with("select:") {
+        let lower_query = query.to_ascii_lowercase();
+        if lower_query.starts_with("select:") {
             return ToolResult::text(render_selected_tools(query, &entries));
         }
 
         let matches = search_tool_entries(query, &entries);
-        if matches.is_empty() {
+        let dynamic_mcp = if lower_query.contains("mcp") {
+            render_dynamic_mcp_tool_search_entries(&context.cwd)
+        } else {
+            Vec::new()
+        };
+        if matches.is_empty() && dynamic_mcp.is_empty() {
             return ToolResult::text(
                 "No matching tools. Try a tool name, an action, or `select:<ToolName>`.",
             );
         }
 
-        ToolResult::text(
-            matches
-                .into_iter()
-                .take(max_results)
-                .map(render_tool_search_entry)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
+        let mut lines = matches
+            .into_iter()
+            .take(max_results)
+            .map(render_tool_search_entry)
+            .collect::<Vec<_>>();
+        lines.extend(dynamic_mcp);
+        ToolResult::text(lines.join("\n"))
     }
 }
 
@@ -6818,6 +6823,54 @@ fn render_mcp_collection(kind: &str, result: &serde_json::Value) -> Vec<String> 
                 lines.push(format!("    - {primary}"));
             } else {
                 lines.push(format!("    - {primary} - {secondary}"));
+            }
+        }
+    }
+    lines
+}
+
+fn render_dynamic_mcp_tool_search_entries(cwd: &Path) -> Vec<String> {
+    let Ok(servers) = discover_mcp_servers(cwd) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for server in servers {
+        let Some(command) = &server.command else {
+            continue;
+        };
+        match call_mcp_server(&server, "tools/list", serde_json::json!({})) {
+            Ok(result) => {
+                let Some(tools) = result.get("tools").and_then(serde_json::Value::as_array) else {
+                    continue;
+                };
+                if !tools.is_empty() && !lines.iter().any(|line| line == "[MCP tools]") {
+                    lines.push(String::from("[MCP tools]"));
+                }
+                for tool in tools {
+                    let Some(object) = tool.as_object() else {
+                        continue;
+                    };
+                    let Some(name) = object.get("name").and_then(serde_json::Value::as_str) else {
+                        continue;
+                    };
+                    let description = object
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("MCP server tool");
+                    lines.push(format!(
+                        "- mcp__{}__{} [external] - {}",
+                        server.name,
+                        name,
+                        truncate_chars(description, 160)
+                    ));
+                }
+            }
+            Err(error) => {
+                lines.push(format!(
+                    "- MCP server {} ({command}) - tools/list unavailable: {}",
+                    server.name,
+                    truncate_chars(&error, 120)
+                ));
             }
         }
     }
