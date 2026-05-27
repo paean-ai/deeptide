@@ -9,6 +9,9 @@ use deeptide_core::{
     LocalEchoBackend, MarkdownRenderer, ReplEvent, ReplSession,
 };
 
+const DEFAULT_MODEL: &str = "deepseek-v4-pro";
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+
 struct ConfiguredBackend {
     backend: Box<dyn AgentBackend>,
     model: String,
@@ -65,14 +68,10 @@ struct Cli {
     )]
     permission_mode: String,
 
-    #[arg(long, env = "DEEPTIDE_MODEL", default_value = "deepseek-v4-pro")]
+    #[arg(long, env = "DEEPTIDE_MODEL", default_value = DEFAULT_MODEL)]
     model: String,
 
-    #[arg(
-        long,
-        env = "DEEPTIDE_BASE_URL",
-        default_value = "https://api.anthropic.com"
-    )]
+    #[arg(long, env = "DEEPTIDE_BASE_URL", default_value = DEFAULT_BASE_URL)]
     base_url: String,
 
     #[arg(long, env = "DEEPTIDE_API_KEY", hide_env_values = true)]
@@ -300,10 +299,9 @@ fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resul
 }
 
 fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
-    let api_key = cli
-        .api_key
-        .clone()
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+    let api_key = cli.api_key.clone().or_else(|| {
+        env_first_non_empty(&["ZERO_API_KEY", "ZERO_CLI_API_KEY", "ANTHROPIC_API_KEY"])
+    });
     let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) else {
         return Ok(ConfiguredBackend {
             backend: Box::<LocalEchoBackend>::default(),
@@ -313,13 +311,14 @@ fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
         });
     };
 
-    let base_url = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| cli.base_url.clone());
-    let mut config = AnthropicConfig::new(base_url, api_key, cli.model.clone());
+    let base_url = effective_base_url(cli);
+    let model = effective_model(cli);
+    let mut config = AnthropicConfig::new(base_url, api_key, model.clone());
     config.max_tokens = cli.max_output_tokens;
     let backend = AnthropicBackend::new(config.clone())?;
     Ok(ConfiguredBackend {
         backend: Box::new(backend),
-        model: cli.model.clone(),
+        model,
         is_configured: true,
         subagent_config: Some(config),
     })
@@ -338,6 +337,33 @@ fn subagent_backend_factory(
             Err(_) => Box::<LocalEchoBackend>::default(),
         }
     }
+}
+
+fn effective_base_url(cli: &Cli) -> String {
+    if cli.base_url != DEFAULT_BASE_URL {
+        return cli.base_url.clone();
+    }
+
+    env_first_non_empty(&["ZERO_CLI_BASE_URL", "ZERO_API_BASE", "ANTHROPIC_BASE_URL"])
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned())
+}
+
+fn effective_model(cli: &Cli) -> String {
+    if cli.model != DEFAULT_MODEL {
+        return cli.model.clone();
+    }
+
+    env_first_non_empty(&["ZERO_CLI_MODEL", "ANTHROPIC_MODEL"])
+        .unwrap_or_else(|| DEFAULT_MODEL.to_owned())
+}
+
+fn env_first_non_empty(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn read_stdin_if_needed(cli: &Cli) -> Result<Option<String>, String> {
@@ -382,8 +408,11 @@ impl EnumValue for OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, InputFormat, OutputFormat, collect_prompt, normalize_embedded_mode, validate_formats,
+        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, collect_prompt,
+        configured_backend, effective_base_url, effective_model, normalize_embedded_mode,
+        validate_formats,
     };
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn sample_cli() -> Cli {
         Cli {
@@ -399,6 +428,31 @@ mod tests {
             base_url: "https://api.anthropic.com".to_owned(),
             api_key: None,
             max_output_tokens: 4096,
+        }
+    }
+
+    fn env_guard() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn clear_api_env() {
+        unsafe {
+            for name in [
+                "ZERO_API_KEY",
+                "ZERO_CLI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "ZERO_CLI_BASE_URL",
+                "ZERO_API_BASE",
+                "ANTHROPIC_BASE_URL",
+                "ZERO_CLI_MODEL",
+                "ANTHROPIC_MODEL",
+            ] {
+                std::env::remove_var(name);
+            }
         }
     }
 
@@ -469,5 +523,59 @@ mod tests {
         .unwrap_or_else(|error| panic!("stream-json prompt should parse: {error}"));
 
         assert_eq!(prompt, "first\n\nsecond");
+    }
+
+    #[test]
+    fn zero_cli_api_env_takes_priority_for_cloud_backend() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "anthropic-key");
+            std::env::set_var("ZERO_CLI_API_KEY", "zero-cli-key");
+            std::env::set_var("ZERO_CLI_BASE_URL", "https://zero.example.test");
+            std::env::set_var("ZERO_CLI_MODEL", "zero-model");
+        }
+
+        let cli = sample_cli();
+        let configured = configured_backend(&cli).expect("configured backend");
+
+        assert!(configured.is_configured);
+        let subagent_config = configured.subagent_config.expect("subagent config");
+        assert_eq!(configured.model, "zero-model");
+        assert_eq!(subagent_config.model, "zero-model");
+        assert_eq!(subagent_config.base_url, "https://zero.example.test");
+        assert_eq!(subagent_config.api_key, "zero-cli-key");
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn explicit_deeptide_options_still_override_zero_cli_env() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ZERO_CLI_BASE_URL", "https://zero.example.test");
+            std::env::set_var("ZERO_CLI_MODEL", "zero-model");
+        }
+        let mut cli = sample_cli();
+        cli.base_url = "https://deeptide.example.test".to_owned();
+        cli.model = "deeptide-model".to_owned();
+
+        assert_eq!(effective_base_url(&cli), "https://deeptide.example.test");
+        assert_eq!(effective_model(&cli), "deeptide-model");
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn defaults_apply_when_no_compatible_api_env_is_set() {
+        let _guard = env_guard();
+        clear_api_env();
+        let cli = sample_cli();
+
+        assert_eq!(effective_base_url(&cli), DEFAULT_BASE_URL);
+        assert_eq!(effective_model(&cli), DEFAULT_MODEL);
+
+        clear_api_env();
     }
 }
