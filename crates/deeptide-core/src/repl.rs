@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, ClearCommand,
     CommandCompletionSource, CommandContext, CommandResult, CompactCommand, CostCommand,
-    HelpCommand, MemoryCommand, NewCommand, PermissionManager, PermissionMode, PermissionRules,
-    RememberCommand, Rule, SlashCommand, Tool, ToolContext, ToolRegistry,
+    CostTracker, HelpCommand, MemoryCommand, NewCommand, PermissionManager, PermissionMode,
+    PermissionRules, RememberCommand, Rule, SlashCommand, Tool, ToolContext, ToolRegistry,
     ToolResultSummaryFormatter, WriteTool,
 };
 
@@ -119,6 +119,7 @@ impl ReplSession {
             }
             "compact" | "compress" => CompactCommand.execute(args, &context),
             "cost" => CostCommand.execute(args, &context),
+            "status" => self.execute_status_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
@@ -170,6 +171,14 @@ impl ReplSession {
             &self.tool_context,
         );
         CommandResult::Text(result.content)
+    }
+
+    fn execute_status_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /status"));
+        }
+
+        CommandResult::Text(render_status(&self.agent_loop, &self.tool_context.cwd))
     }
 
     fn execute_permission_command(&mut self, args: &str) -> CommandResult {
@@ -323,6 +332,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
         CommandCompletionSource::from_command(&CompactCommand),
         CommandCompletionSource::from_command(&CostCommand),
         CommandCompletionSource::new(
+            "status",
+            Vec::<&str>::new(),
+            "Show session status: model, cwd, turns, tokens, cost",
+            "/status",
+        ),
+        CommandCompletionSource::new(
             "read",
             Vec::<&str>::new(),
             "Read a text file with optional line range",
@@ -343,6 +358,89 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "/permission [--allow Pattern | --deny Pattern | --remove pattern]",
         ),
     ]
+}
+
+fn render_status(agent_loop: &AgentLoop, cwd: &std::path::Path) -> String {
+    let summary = agent_loop.cost_tracker().summary();
+    let cache = summary.cache_health();
+    let context_tokens = estimate_repl_context_tokens(agent_loop.messages());
+    let branch = git_branch(cwd).unwrap_or_else(|| String::from("(no git)"));
+    let cache_summary = render_cache_health(&cache);
+
+    let mut lines = vec![
+        String::from("Deeptide session status"),
+        format!("  Model:    {}", agent_loop.model()),
+        format!("  CWD:      {}", cwd.display()),
+        format!("  Branch:   {branch}"),
+        String::from("  Session:  (not persisted)"),
+        format!(
+            "  Turns:    {} / {}",
+            summary.turns.len(),
+            agent_loop.max_turns()
+        ),
+        format!("  Messages: {}", agent_loop.messages().len()),
+        format!(
+            "  Context:  ~{} tokens",
+            CostTracker::format_tokens(context_tokens)
+        ),
+        format!("  Mode:     {}", agent_loop.permission_mode().label()),
+        format!(
+            "  In/Out:   {} / {}",
+            CostTracker::format_tokens(summary.total_input),
+            CostTracker::format_tokens(summary.total_output)
+        ),
+        format!("  Cache:    {cache_summary}"),
+    ];
+
+    if let Some(diagnostic) = cache.diagnostic() {
+        lines.push(format!("  Cache note: {diagnostic}"));
+    }
+
+    lines.push(format!(
+        "  Cost:     {}",
+        CostTracker::format_usd(summary.total_cost_usd)
+    ));
+
+    lines.join("\n")
+}
+
+fn render_cache_health(cache: &crate::CacheHealth) -> String {
+    let created = CostTracker::format_tokens(cache.total_create_tokens);
+    let read = CostTracker::format_tokens(cache.total_read_tokens);
+    match cache.hit_rate_percent {
+        Some(hit_rate) => {
+            let recent = cache
+                .recent_hit_rate_percent
+                .map(|rate| format!(" · recent {rate}% hit"))
+                .unwrap_or_default();
+            format!(
+                "{created} created, {read} read · {hit_rate}% hit{recent} · {}",
+                cache.label()
+            )
+        }
+        None => format!("{} · no cache telemetry yet", cache.label()),
+    }
+}
+
+fn estimate_repl_context_tokens(messages: &[crate::ConversationMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| message.content.chars().count().div_ceil(4) + 4)
+        .sum()
+}
+
+fn git_branch(cwd: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(cwd)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!branch.is_empty()).then_some(branch)
 }
 
 fn render_permission_rules(rules: &PermissionRules) -> String {

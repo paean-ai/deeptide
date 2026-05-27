@@ -119,6 +119,31 @@ fn repl_cost_command_uses_agent_loop_usage() {
 }
 
 #[test]
+fn repl_status_command_reports_session_shape() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut repl = ReplSession::new(Box::new(StaticBackend))
+        .with_cwd(temp.path())
+        .with_model("deepseek-v4-flash")
+        .with_permission_mode(PermissionMode::Plan)
+        .with_max_turns(7);
+    let _ = repl.submit("hello");
+
+    let output = only_output(repl.submit("/status"));
+
+    assert!(output.contains("Deeptide session status"));
+    assert!(output.contains("Model:    deepseek-v4-flash"));
+    assert!(output.contains("Branch:   (no git)"));
+    assert!(output.contains("Session:  (not persisted)"));
+    assert!(output.contains("Turns:    1 / 7"));
+    assert!(output.contains("Messages: 2"));
+    assert!(output.contains("Context:  ~"));
+    assert!(output.contains("Mode:     plan"));
+    assert!(output.contains("In/Out:   4 / 2"));
+    assert!(output.contains("Cache:    warming"));
+    assert!(output.contains("Cost:     $"));
+}
+
+#[test]
 fn repl_honors_max_turns_setting() {
     let mut repl = ReplSession::new(Box::new(AlwaysToolBackend)).with_max_turns(1);
 
