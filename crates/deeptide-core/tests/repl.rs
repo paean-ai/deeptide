@@ -173,6 +173,39 @@ fn repl_context_command_reports_loaded_context_shape() {
 }
 
 #[test]
+fn repl_retry_resubmits_last_user_prompt() {
+    let mut repl = ReplSession::new(Box::new(EchoUserBackend));
+
+    assert_eq!(
+        repl.submit("please check status"),
+        vec![ReplEvent::Output(String::from("echo: please check status"))]
+    );
+
+    let retry = repl.submit("/retry");
+
+    assert_eq!(
+        retry,
+        vec![
+            ReplEvent::Output(String::from("Retrying: please check status")),
+            ReplEvent::Output(String::from("echo: please check status")),
+        ]
+    );
+    assert_eq!(repl.agent_loop().messages().len(), 4);
+}
+
+#[test]
+fn repl_retry_reports_missing_prompt() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/retry"),
+        vec![ReplEvent::Output(String::from(
+            "No previous prompt to retry."
+        ))]
+    );
+}
+
+#[test]
 fn repl_honors_max_turns_setting() {
     let mut repl = ReplSession::new(Box::new(AlwaysToolBackend)).with_max_turns(1);
 
@@ -286,6 +319,21 @@ impl AgentBackend for StaticBackend {
             usage: Some(AgentUsage::new(4, 2, 0, 0, 10)),
             tool_calls: Vec::new(),
         })
+    }
+}
+
+struct EchoUserBackend;
+
+impl AgentBackend for EchoUserBackend {
+    fn respond(&mut self, request: AgentRequest) -> Result<AgentResponse, String> {
+        let prompt = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, deeptide_core::MessageRole::User))
+            .map(|message| message.content.as_str())
+            .unwrap_or_default();
+        Ok(AgentResponse::text(format!("echo: {prompt}")))
     }
 }
 

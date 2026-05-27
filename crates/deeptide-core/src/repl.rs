@@ -6,7 +6,10 @@ use crate::{
     CommandCompletionSource, CommandContext, CommandResult, CompactCommand, CostCommand,
     CostTracker, HelpCommand, MemoryCommand, NewCommand, PermissionManager, PermissionMode,
     PermissionRules, RememberCommand, Rule, SlashCommand, Tool, ToolContext, ToolRegistry,
-    ToolResultSummaryFormatter, WriteTool, memory::MemorySystem, tools::model_context_window,
+    ToolResultSummaryFormatter, WriteTool,
+    agent_loop::{ConversationMessage, MessageRole},
+    memory::MemorySystem,
+    tools::model_context_window,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +124,7 @@ impl ReplSession {
             "cost" => CostCommand.execute(args, &context),
             "status" => self.execute_status_command(args),
             "context" | "ctx" => self.execute_context_command(args),
+            "retry" | "r" | "again" => return self.execute_retry_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
@@ -180,6 +184,28 @@ impl ReplSession {
         }
 
         CommandResult::Text(render_status(&self.agent_loop, &self.tool_context.cwd))
+    }
+
+    fn execute_retry_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        if !args.trim().is_empty() {
+            return vec![ReplEvent::Output(String::from("Usage: /retry"))];
+        }
+
+        let Some(prompt) = last_user_prompt(self.agent_loop.messages()) else {
+            return vec![ReplEvent::Output(String::from(
+                "No previous prompt to retry.",
+            ))];
+        };
+
+        let preview = truncate_chars(&prompt, 60);
+        let mut events = vec![ReplEvent::Output(format!("Retrying: {preview}"))];
+        events.extend(
+            self.agent_loop
+                .run(prompt)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
     }
 
     fn execute_context_command(&self, args: &str) -> CommandResult {
@@ -355,6 +381,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             ["ctx"],
             "Inspect what is loaded into the session",
             "/context",
+        ),
+        CommandCompletionSource::new(
+            "retry",
+            ["r", "again"],
+            "Re-submit the last user prompt",
+            "/retry",
         ),
         CommandCompletionSource::new(
             "read",
@@ -600,6 +632,25 @@ fn git_branch(cwd: &std::path::Path) -> Option<String> {
     }
     let branch = String::from_utf8(output.stdout).ok()?.trim().to_owned();
     (!branch.is_empty()).then_some(branch)
+}
+
+fn last_user_prompt(messages: &[ConversationMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+        .map(|message| message.content.trim().to_owned())
+        .filter(|content| !content.is_empty())
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 fn render_permission_rules(rules: &PermissionRules) -> String {
