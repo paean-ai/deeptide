@@ -144,6 +144,35 @@ fn repl_status_command_reports_session_shape() {
 }
 
 #[test]
+fn repl_context_command_reports_loaded_context_shape() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_dir = temp.path().join(".deeptide").join("agents");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::write(agent_dir.join("reviewer.md"), "# Reviewer\n").expect("agent definition");
+
+    let mut repl = ReplSession::new(Box::new(StaticBackend))
+        .with_cwd(temp.path())
+        .with_model("deepseek-v4-flash-q4k")
+        .with_permission_mode(PermissionMode::AcceptEdits);
+    let _ = repl.submit("hello");
+
+    let output = only_output(repl.submit("/context"));
+
+    assert!(output.contains("Session context"));
+    assert!(output.contains(&format!("CWD:      {}", temp.path().display())));
+    assert!(output.contains("+ dirs:   (none)"));
+    assert!(output.contains("Memory:"));
+    assert!(output.contains("Agents:   reviewer"));
+    assert!(output.contains("Settings:"));
+    assert!(output.contains("runtime  deepseek-v4-flash-q4k"));
+    assert!(output.contains("mode     accept-edits"));
+    assert!(output.contains("Tools:"));
+    assert!(output.contains("Agent"));
+    assert!(output.contains("Window:"));
+    assert!(output.contains("/ 1,000,000)"));
+}
+
+#[test]
 fn repl_honors_max_turns_setting() {
     let mut repl = ReplSession::new(Box::new(AlwaysToolBackend)).with_max_turns(1);
 

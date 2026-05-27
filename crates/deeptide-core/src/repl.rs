@@ -6,7 +6,7 @@ use crate::{
     CommandCompletionSource, CommandContext, CommandResult, CompactCommand, CostCommand,
     CostTracker, HelpCommand, MemoryCommand, NewCommand, PermissionManager, PermissionMode,
     PermissionRules, RememberCommand, Rule, SlashCommand, Tool, ToolContext, ToolRegistry,
-    ToolResultSummaryFormatter, WriteTool,
+    ToolResultSummaryFormatter, WriteTool, memory::MemorySystem, tools::model_context_window,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +120,7 @@ impl ReplSession {
             "compact" | "compress" => CompactCommand.execute(args, &context),
             "cost" => CostCommand.execute(args, &context),
             "status" => self.execute_status_command(args),
+            "context" | "ctx" => self.execute_context_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
@@ -179,6 +180,18 @@ impl ReplSession {
         }
 
         CommandResult::Text(render_status(&self.agent_loop, &self.tool_context.cwd))
+    }
+
+    fn execute_context_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /context"));
+        }
+
+        CommandResult::Text(render_context(
+            &self.agent_loop,
+            &self.tool_context.cwd,
+            self.tool_registry.names(),
+        ))
     }
 
     fn execute_permission_command(&mut self, args: &str) -> CommandResult {
@@ -338,6 +351,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "/status",
         ),
         CommandCompletionSource::new(
+            "context",
+            ["ctx"],
+            "Inspect what is loaded into the session",
+            "/context",
+        ),
+        CommandCompletionSource::new(
             "read",
             Vec::<&str>::new(),
             "Read a text file with optional line range",
@@ -402,6 +421,146 @@ fn render_status(agent_loop: &AgentLoop, cwd: &std::path::Path) -> String {
     ));
 
     lines.join("\n")
+}
+
+fn render_context(agent_loop: &AgentLoop, cwd: &std::path::Path, tool_names: Vec<&str>) -> String {
+    let context_tokens = estimate_repl_context_tokens(agent_loop.messages());
+    let context_window = model_context_window(agent_loop.model()) as usize;
+    let percent = (context_tokens * 100)
+        .checked_div(context_window)
+        .unwrap_or(0);
+    let bar_width = 20usize;
+    let filled = (bar_width * context_tokens)
+        .checked_div(context_window)
+        .unwrap_or(0)
+        .min(bar_width);
+    let bar = format!(
+        "{}{}",
+        "#".repeat(filled),
+        "-".repeat(bar_width.saturating_sub(filled))
+    );
+
+    let project_memory = MemorySystem::project_memory_index(cwd);
+    let global_memory = MemorySystem::global_memory_index();
+    let agents = discover_agent_names(cwd);
+    let tool_preview = tool_names
+        .iter()
+        .take(10)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tool_suffix = if tool_names.len() > 10 { ", ..." } else { "" };
+
+    let mut lines = vec![
+        String::from("Session context"),
+        format!("  CWD:      {}", cwd.display()),
+        String::from("  + dirs:   (none)"),
+        String::from("  Memory:"),
+        format!(
+            "    {} {}",
+            exists_mark(&project_memory),
+            project_memory.display()
+        ),
+        format!(
+            "    {} {}",
+            exists_mark(&global_memory),
+            global_memory.display()
+        ),
+        format!(
+            "  Agents:   {}",
+            if agents.is_empty() {
+                String::from("(none)")
+            } else {
+                agents.join(", ")
+            }
+        ),
+        String::from("  Settings:"),
+        format!("    runtime  {}", agent_loop.model()),
+        format!("    mode     {}", agent_loop.permission_mode().label()),
+        format!(
+            "  Tools:    {} - {tool_preview}{tool_suffix}",
+            tool_names.len()
+        ),
+        format!(
+            "  Window:   {bar} {percent}%  ({} / {})",
+            CostTracker::format_tokens(context_tokens),
+            CostTracker::format_tokens(context_window)
+        ),
+    ];
+
+    let suggestions = context_suggestions(context_tokens, context_window);
+    if !suggestions.is_empty() {
+        lines.push(String::new());
+        lines.push(String::from("Suggestions"));
+        lines.extend(
+            suggestions
+                .into_iter()
+                .map(|suggestion| format!("  {suggestion}")),
+        );
+    }
+
+    lines.join("\n")
+}
+
+fn exists_mark(path: &std::path::Path) -> &'static str {
+    if path.exists() { "*" } else { "o" }
+}
+
+fn context_suggestions(context_tokens: usize, context_window: usize) -> Vec<String> {
+    if context_window == 0 {
+        return Vec::new();
+    }
+    let percent = (context_tokens * 100) / context_window;
+    if percent >= 80 {
+        vec![format!(
+            "Context is {percent}% full - run /compact before starting a large edit."
+        )]
+    } else if percent >= 60 {
+        vec![format!(
+            "Context is {percent}% full - consider /status or /compact after the next large tool result."
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
+fn discover_agent_names(cwd: &std::path::Path) -> Vec<String> {
+    let mut dirs = vec![
+        MemorySystem::tide_config_dir()
+            .join("projects")
+            .join(MemorySystem::project_slug(cwd))
+            .join("agents"),
+        MemorySystem::tide_config_dir().join("agents"),
+        cwd.join(".deeptide").join("agents"),
+    ];
+    if let Some(home) = home_dir() {
+        dirs.push(home.join(".deeptide").join("agents"));
+    }
+
+    let mut names = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                names.push(stem.to_owned());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
 }
 
 fn render_cache_health(cache: &crate::CacheHealth) -> String {

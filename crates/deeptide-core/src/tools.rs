@@ -3160,7 +3160,7 @@ fn safe_inline(value: &str) -> String {
         .to_owned()
 }
 
-fn model_context_window(model: &str) -> u64 {
+pub(crate) fn model_context_window(model: &str) -> u64 {
     let lower = model.to_ascii_lowercase();
     if lower.contains("deepseek-v4-flash-q4") {
         1_000_000
