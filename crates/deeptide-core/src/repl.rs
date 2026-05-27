@@ -9,7 +9,7 @@ use crate::{
     ToolResultSummaryFormatter, WriteTool,
     agent_loop::{ConversationMessage, MessageRole},
     memory::MemorySystem,
-    tools::model_context_window,
+    tools::{ClipboardTool, model_context_window},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,11 +18,14 @@ pub enum ReplEvent {
     Exit,
 }
 
+type ClipboardWriter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
 pub struct ReplSession {
     agent_loop: AgentLoop,
     cost_display_enabled: Arc<AtomicBool>,
     tool_registry: ToolRegistry,
     tool_context: ToolContext,
+    clipboard_writer: ClipboardWriter,
 }
 
 impl ReplSession {
@@ -34,6 +37,7 @@ impl ReplSession {
             tool_context: ToolContext::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
+            clipboard_writer: Arc::new(write_to_system_clipboard),
         }
     }
 
@@ -68,6 +72,14 @@ impl ReplSession {
         F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,
     {
         self.agent_loop = self.agent_loop.with_subagent_backend_factory(factory);
+        self
+    }
+
+    pub fn with_clipboard_writer<F>(mut self, writer: F) -> Self
+    where
+        F: Fn(&str) -> Result<(), String> + Send + Sync + 'static,
+    {
+        self.clipboard_writer = Arc::new(writer);
         self
     }
 
@@ -125,6 +137,7 @@ impl ReplSession {
             "status" => self.execute_status_command(args),
             "context" | "ctx" => self.execute_context_command(args),
             "retry" | "r" | "again" => return self.execute_retry_command(args),
+            "copy" | "yank" => self.execute_copy_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
@@ -218,6 +231,27 @@ impl ReplSession {
             &self.tool_context.cwd,
             self.tool_registry.names(),
         ))
+    }
+
+    fn execute_copy_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /copy"));
+        }
+
+        let Some(reply) = last_assistant_reply(self.agent_loop.messages()) else {
+            return CommandResult::Text(String::from("No assistant reply yet to copy."));
+        };
+
+        if reply.is_empty() {
+            return CommandResult::Text(String::from(
+                "Last assistant turn had no text content (tool calls only).",
+            ));
+        }
+
+        match (self.clipboard_writer)(&reply) {
+            Ok(()) => CommandResult::Text(render_copy_summary(&reply)),
+            Err(error) => CommandResult::Text(format!("/copy: {error}")),
+        }
     }
 
     fn execute_permission_command(&mut self, args: &str) -> CommandResult {
@@ -387,6 +421,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             ["r", "again"],
             "Re-submit the last user prompt",
             "/retry",
+        ),
+        CommandCompletionSource::new(
+            "copy",
+            ["yank"],
+            "Copy the last assistant reply to the clipboard",
+            "/copy",
         ),
         CommandCompletionSource::new(
             "read",
@@ -641,6 +681,39 @@ fn last_user_prompt(messages: &[ConversationMessage]) -> Option<String> {
         .find(|message| message.role == MessageRole::User)
         .map(|message| message.content.trim().to_owned())
         .filter(|content| !content.is_empty())
+}
+
+fn last_assistant_reply(messages: &[ConversationMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::Assistant)
+        .map(|message| message.content.trim().to_owned())
+}
+
+fn render_copy_summary(content: &str) -> String {
+    let chars = content.chars().count();
+    let lines = content.split('\n').count();
+    let char_label = if chars == 1 { "char" } else { "chars" };
+    let line_label = if lines == 1 { "line" } else { "lines" };
+    format!("Copied last reply to clipboard ({chars} {char_label}, {lines} {line_label}).")
+}
+
+fn write_to_system_clipboard(content: &str) -> Result<(), String> {
+    let context =
+        ToolContext::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    let result = ClipboardTool.call(
+        serde_json::json!({
+            "operation": "write",
+            "content": content,
+        }),
+        &context,
+    );
+    if result.is_error {
+        Err(result.content)
+    } else {
+        Ok(())
+    }
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {

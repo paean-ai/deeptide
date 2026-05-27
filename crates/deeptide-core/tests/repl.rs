@@ -2,6 +2,7 @@ use deeptide_core::{
     AgentBackend, AgentRequest, AgentResponse, AgentUsage, PermissionManager, PermissionMode,
     PermissionRules, ReplEvent, ReplSession, ToolCall,
 };
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn repl_routes_plain_input_to_agent_loop() {
@@ -201,6 +202,81 @@ fn repl_retry_reports_missing_prompt() {
         repl.submit("/retry"),
         vec![ReplEvent::Output(String::from(
             "No previous prompt to retry."
+        ))]
+    );
+}
+
+#[test]
+fn repl_copy_writes_last_assistant_reply() {
+    let copied = Arc::new(Mutex::new(Vec::new()));
+    let copied_for_writer = Arc::clone(&copied);
+    let mut repl =
+        ReplSession::new(Box::new(StaticBackend)).with_clipboard_writer(move |content| {
+            copied_for_writer
+                .lock()
+                .expect("clipboard capture lock")
+                .push(content.to_owned());
+            Ok(())
+        });
+
+    repl.submit("hello");
+    let output = only_output(repl.submit("/copy"));
+
+    assert_eq!(output, "Copied last reply to clipboard (15 chars, 1 line).");
+    assert_eq!(
+        copied.lock().expect("clipboard capture lock").as_slice(),
+        ["assistant reply"]
+    );
+}
+
+#[test]
+fn repl_copy_supports_yank_alias() {
+    let copied = Arc::new(Mutex::new(Vec::new()));
+    let copied_for_writer = Arc::clone(&copied);
+    let mut repl =
+        ReplSession::new(Box::new(StaticBackend)).with_clipboard_writer(move |content| {
+            copied_for_writer
+                .lock()
+                .expect("clipboard capture lock")
+                .push(content.to_owned());
+            Ok(())
+        });
+
+    repl.submit("hello");
+    let output = only_output(repl.submit("/yank"));
+
+    assert_eq!(output, "Copied last reply to clipboard (15 chars, 1 line).");
+    assert_eq!(
+        copied.lock().expect("clipboard capture lock").as_slice(),
+        ["assistant reply"]
+    );
+}
+
+#[test]
+fn repl_copy_reports_missing_reply() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_clipboard_writer(|_| {
+        panic!("clipboard writer should not be called without an assistant reply")
+    });
+
+    assert_eq!(
+        repl.submit("/copy"),
+        vec![ReplEvent::Output(String::from(
+            "No assistant reply yet to copy."
+        ))]
+    );
+}
+
+#[test]
+fn repl_copy_reports_clipboard_errors() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend))
+        .with_clipboard_writer(|_| Err(String::from("clipboard unavailable")));
+
+    repl.submit("hello");
+
+    assert_eq!(
+        repl.submit("/copy"),
+        vec![ReplEvent::Output(String::from(
+            "/copy: clipboard unavailable"
         ))]
     );
 }
