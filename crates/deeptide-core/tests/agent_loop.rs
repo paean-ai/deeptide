@@ -267,6 +267,62 @@ fn agent_loop_executes_agent_tool_with_subagent_backend_factory() {
     }));
 }
 
+#[test]
+fn agent_loop_binds_context_state_to_ctx_inspect_tool() {
+    let mut loop_ = AgentLoop::new(Box::new(CtxInspectCallingBackend::default()))
+        .with_model("deepseek-v4-flash")
+        .with_max_turns(3);
+
+    let events = loop_.run("inspect this context please");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "CtxInspect"
+                && content.contains("Model: deepseek-v4-flash")
+                && content.contains("Active messages: 2")
+                && content.contains("Estimated usage:")
+        )
+    }));
+}
+
+#[test]
+fn agent_loop_snip_tool_trims_active_message_history() {
+    let mut loop_ = AgentLoop::new(Box::new(SnipCallingBackend::default())).with_max_turns(3);
+
+    let _ = loop_.run("first");
+    let _ = loop_.run("second");
+    let events = loop_.run("third");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: false,
+            } if tool_call.name == "Snip"
+                && content.contains("History trim requested: keeping last 2 messages.")
+        )
+    }));
+    assert!(loop_.messages().len() <= 5);
+    assert!(
+        loop_.messages()[0]
+            .content
+            .starts_with("[context trimmed by Snip:")
+    );
+    assert!(
+        loop_
+            .messages()
+            .iter()
+            .any(|message| message.content.contains("[tool_result id=toolu_snip"))
+    );
+}
+
 struct StaticBackend {
     content: String,
     usage: Option<AgentUsage>,
@@ -434,6 +490,54 @@ impl AgentBackend for AgentCallingBackend {
             })
         } else {
             Ok(AgentResponse::text("done after agent"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct CtxInspectCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for CtxInspectCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("I will inspect context."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_ctx",
+                    "CtxInspect",
+                    serde_json::json!({}),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done after context inspection"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct SnipCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for SnipCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 3 {
+            Ok(AgentResponse {
+                content: String::from("I will trim history."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_snip",
+                    "Snip",
+                    serde_json::json!({"keepLast": 2, "explanation": "Older turns are no longer needed."}),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text(format!("turn {}", self.calls)))
         }
     }
 }

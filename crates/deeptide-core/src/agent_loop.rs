@@ -344,6 +344,12 @@ impl AgentLoop {
                 {
                     return result;
                 }
+                if tool_call.name == "CtxInspect" {
+                    return self.execute_ctx_inspect_tool_call(tool_call);
+                }
+                if tool_call.name == "Snip" {
+                    return self.execute_snip_tool_call(tool_call);
+                }
                 self.tool_registry.call(
                     &tool_call.name,
                     tool_call.input.clone(),
@@ -433,6 +439,74 @@ fn render_subagent_result(kind: &str, model: &str, events: &[AgentLoopEvent]) ->
     }
 
     crate::ToolResult::text(lines.join("\n"))
+}
+
+impl AgentLoop {
+    fn execute_ctx_inspect_tool_call(&self, tool_call: &ToolCall) -> crate::ToolResult {
+        let mut input = tool_call
+            .input
+            .as_object()
+            .cloned()
+            .unwrap_or_else(serde_json::Map::new);
+        input
+            .entry(String::from("model"))
+            .or_insert_with(|| serde_json::Value::String(self.model.clone()));
+        input
+            .entry(String::from("estimated_tokens"))
+            .or_insert_with(|| serde_json::Value::from(estimate_context_tokens(&self.messages)));
+        input
+            .entry(String::from("message_count"))
+            .or_insert_with(|| serde_json::Value::from(self.messages.len()));
+
+        self.tool_registry.call(
+            &tool_call.name,
+            serde_json::Value::Object(input),
+            &self.tool_context,
+        )
+    }
+
+    fn execute_snip_tool_call(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
+        let result =
+            self.tool_registry
+                .call(&tool_call.name, tool_call.input.clone(), &self.tool_context);
+        if !result.is_error {
+            let keep_last = snip_keep_last(&tool_call.input);
+            self.trim_messages_for_snip(keep_last);
+        }
+        result
+    }
+
+    fn trim_messages_for_snip(&mut self, keep_last: usize) {
+        if self.messages.len() <= keep_last {
+            return;
+        }
+
+        let removed_count = self.messages.len() - keep_last;
+        let mut kept = self.messages.split_off(removed_count);
+        let marker = ConversationMessage::user(format!(
+            "[context trimmed by Snip: {removed_count} older messages removed; {keep_last} recent messages kept]"
+        ));
+        self.messages.clear();
+        self.messages.push(marker);
+        self.messages.append(&mut kept);
+    }
+}
+
+fn estimate_context_tokens(messages: &[ConversationMessage]) -> u64 {
+    messages
+        .iter()
+        .map(|message| (message.content.chars().count() as u64).div_ceil(4) + 4)
+        .sum()
+}
+
+fn snip_keep_last(input: &serde_json::Value) -> usize {
+    input
+        .get("keepLast")
+        .or_else(|| input.get("keep_last"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(10)
+        .clamp(1, 100)
 }
 
 #[derive(Debug, Default)]
