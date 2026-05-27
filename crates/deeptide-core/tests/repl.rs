@@ -282,6 +282,71 @@ fn repl_copy_reports_clipboard_errors() {
 }
 
 #[test]
+fn repl_export_writes_session_jsonl() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let export_path = temp.path().join("session.jsonl");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    repl.submit("hello");
+    let output = only_output(repl.submit(&format!("/export {}", export_path.display())));
+
+    assert_eq!(
+        output,
+        format!("Exported 2 messages -> {}", export_path.display())
+    );
+    let exported = std::fs::read_to_string(export_path).expect("exported transcript");
+    let lines = exported.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    let user: serde_json::Value = serde_json::from_str(lines[0]).expect("user json line");
+    let assistant: serde_json::Value = serde_json::from_str(lines[1]).expect("assistant json line");
+    assert_eq!(user["type"], "user");
+    assert_eq!(user["message"]["content"], "hello");
+    assert_eq!(assistant["type"], "assistant");
+    assert_eq!(assistant["message"]["content"], "assistant reply");
+}
+
+#[test]
+fn repl_export_rejects_extra_arguments() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/export one two"),
+        vec![ReplEvent::Output(String::from("Usage: /export [path]"))]
+    );
+}
+
+#[test]
+fn repl_diff_reports_empty_workspace_diff() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    git(temp.path(), ["init"]);
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    assert_eq!(
+        repl.submit("/diff"),
+        vec![ReplEvent::Output(String::from(
+            "No pending git diff in workspace."
+        ))]
+    );
+}
+
+#[test]
+fn repl_diff_reports_pending_workspace_diff() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    git(temp.path(), ["init"]);
+    std::fs::write(temp.path().join("notes.txt"), "before\n").expect("write initial file");
+    git(temp.path(), ["add", "notes.txt"]);
+    std::fs::write(temp.path().join("notes.txt"), "after\n").expect("modify tracked file");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    let output = only_output(repl.submit("/diff"));
+
+    assert!(output.starts_with("Pending workspace diff:\n"));
+    assert!(output.contains("diff --git a/notes.txt b/notes.txt"));
+    assert!(output.contains("-before"));
+    assert!(output.contains("+after"));
+}
+
+#[test]
 fn repl_honors_max_turns_setting() {
     let mut repl = ReplSession::new(Box::new(AlwaysToolBackend)).with_max_turns(1);
 
@@ -384,6 +449,16 @@ fn only_output(events: Vec<ReplEvent>) -> String {
         [ReplEvent::Output(output)] => output.clone(),
         other => panic!("expected one output event, got {other:?}"),
     }
+}
+
+fn git<const N: usize>(cwd: &std::path::Path, args: [&str; N]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .status()
+        .expect("git command should start");
+    assert!(status.success(), "git command should succeed");
 }
 
 struct StaticBackend;

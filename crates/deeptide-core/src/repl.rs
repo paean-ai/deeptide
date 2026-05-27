@@ -138,6 +138,8 @@ impl ReplSession {
             "context" | "ctx" => self.execute_context_command(args),
             "retry" | "r" | "again" => return self.execute_retry_command(args),
             "copy" | "yank" => self.execute_copy_command(args),
+            "export" => self.execute_export_command(args),
+            "diff" => self.execute_diff_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
@@ -252,6 +254,43 @@ impl ReplSession {
             Ok(()) => CommandResult::Text(render_copy_summary(&reply)),
             Err(error) => CommandResult::Text(format!("/copy: {error}")),
         }
+    }
+
+    fn execute_export_command(&self, args: &str) -> CommandResult {
+        let path = match export_path(args, &self.tool_context.cwd) {
+            Ok(path) => path,
+            Err(message) => return CommandResult::Text(message),
+        };
+
+        let content = render_session_jsonl(self.agent_loop.messages());
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            return CommandResult::Text(format!(
+                "/export: failed to create {}: {error}",
+                parent.display()
+            ));
+        }
+
+        match std::fs::write(&path, content) {
+            Ok(()) => CommandResult::Text(format!(
+                "Exported {} messages -> {}",
+                self.agent_loop.messages().len(),
+                path.display()
+            )),
+            Err(error) => CommandResult::Text(format!(
+                "/export: failed to write {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
+    fn execute_diff_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /diff"));
+        }
+
+        CommandResult::Text(render_workspace_diff(&self.tool_context.cwd))
     }
 
     fn execute_permission_command(&mut self, args: &str) -> CommandResult {
@@ -427,6 +466,18 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             ["yank"],
             "Copy the last assistant reply to the clipboard",
             "/copy",
+        ),
+        CommandCompletionSource::new(
+            "export",
+            Vec::<&str>::new(),
+            "Export session transcript to JSONL",
+            "/export [path]",
+        ),
+        CommandCompletionSource::new(
+            "diff",
+            Vec::<&str>::new(),
+            "Show pending workspace git diff",
+            "/diff",
         ),
         CommandCompletionSource::new(
             "read",
@@ -713,6 +764,83 @@ fn write_to_system_clipboard(content: &str) -> Result<(), String> {
         Err(result.content)
     } else {
         Ok(())
+    }
+}
+
+fn export_path(args: &str, cwd: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let trimmed = args.trim();
+    if trimmed.split_whitespace().count() > 1 {
+        return Err(String::from("Usage: /export [path]"));
+    }
+
+    let raw = if trimmed.is_empty() {
+        std::env::temp_dir().join("deeptide-session.jsonl")
+    } else if trimmed == "~" {
+        home_dir().ok_or_else(|| String::from("/export: could not resolve home directory"))?
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        home_dir()
+            .ok_or_else(|| String::from("/export: could not resolve home directory"))?
+            .join(rest)
+    } else {
+        std::path::PathBuf::from(trimmed)
+    };
+
+    if raw.is_absolute() {
+        Ok(raw)
+    } else {
+        Ok(cwd.join(raw))
+    }
+}
+
+fn render_session_jsonl(messages: &[ConversationMessage]) -> String {
+    let mut lines = messages
+        .iter()
+        .map(|message| {
+            let role = match message.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+            };
+            serde_json::json!({
+                "type": role,
+                "message": {
+                    "role": role,
+                    "content": message.content,
+                },
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    lines.push('\n');
+    lines
+}
+
+fn render_workspace_diff(cwd: &std::path::Path) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["diff", "--"])
+        .output();
+
+    let Ok(output) = output else {
+        return String::from("/diff: failed to run git diff");
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if stderr.is_empty() {
+            return format!("/diff: git diff exited with status {}", output.status);
+        }
+        return format!("/diff: {stderr}");
+    }
+
+    let diff = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_owned();
+    if diff.is_empty() {
+        String::from("No pending git diff in workspace.")
+    } else {
+        format!("Pending workspace diff:\n{diff}")
     }
 }
 
