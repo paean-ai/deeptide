@@ -3,6 +3,7 @@ use crate::{
     ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler, ToolContext, ToolRegistry,
     TurnUsage,
 };
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRole {
@@ -129,6 +130,8 @@ pub trait AgentBackend: Send {
     fn respond(&mut self, request: AgentRequest) -> Result<AgentResponse, String>;
 }
 
+pub type SubAgentBackendFactory = Arc<dyn Fn(&str) -> Box<dyn AgentBackend> + Send + Sync>;
+
 pub struct AgentLoop {
     backend: Box<dyn AgentBackend>,
     messages: Vec<ConversationMessage>,
@@ -139,6 +142,7 @@ pub struct AgentLoop {
     tool_registry: ToolRegistry,
     tool_context: ToolContext,
     permission_manager: PermissionManager,
+    subagent_backend_factory: Option<SubAgentBackendFactory>,
 }
 
 impl AgentLoop {
@@ -156,6 +160,7 @@ impl AgentLoop {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
             permission_manager: PermissionManager::new(PermissionMode::Default, rules),
+            subagent_backend_factory: None,
         }
     }
 
@@ -181,6 +186,14 @@ impl AgentLoop {
 
     pub fn with_permission_manager(mut self, permission_manager: PermissionManager) -> Self {
         self.permission_manager = permission_manager;
+        self
+    }
+
+    pub fn with_subagent_backend_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,
+    {
+        self.subagent_backend_factory = Some(Arc::new(factory));
         self
     }
 
@@ -314,7 +327,7 @@ impl AgentLoop {
         &self.model
     }
 
-    fn execute_tool_call(&self, tool_call: &ToolCall) -> crate::ToolResult {
+    fn execute_tool_call(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
         let permission = tool_call
             .input
             .as_object()
@@ -325,11 +338,18 @@ impl AgentLoop {
             });
 
         match permission {
-            PermissionDecision::Allow => self.tool_registry.call(
-                &tool_call.name,
-                tool_call.input.clone(),
-                &self.tool_context,
-            ),
+            PermissionDecision::Allow => {
+                if tool_call.name == "Agent"
+                    && let Some(result) = self.execute_subagent_tool_call(tool_call)
+                {
+                    return result;
+                }
+                self.tool_registry.call(
+                    &tool_call.name,
+                    tool_call.input.clone(),
+                    &self.tool_context,
+                )
+            }
             PermissionDecision::Deny { reason } => crate::ToolResult::error(format!(
                 "Permission denied for {}: {reason}",
                 tool_call.name
@@ -340,6 +360,79 @@ impl AgentLoop {
             )),
         }
     }
+
+    fn execute_subagent_tool_call(&self, tool_call: &ToolCall) -> Option<crate::ToolResult> {
+        let factory = self.subagent_backend_factory.as_ref()?;
+        let invocation = match crate::tools::parse_agent_invocation(&tool_call.input) {
+            Ok(invocation) => invocation,
+            Err(error) => return Some(crate::ToolResult::error(error)),
+        };
+
+        let subagent_model = invocation
+            .model
+            .as_deref()
+            .unwrap_or(self.model.as_str())
+            .to_owned();
+        let permission_mode = if invocation.definition.is_read_only {
+            PermissionMode::Plan
+        } else {
+            self.permission_manager.mode()
+        };
+        let mut subagent = AgentLoop::new(factory(&subagent_model))
+            .with_model(subagent_model.clone())
+            .with_max_turns(invocation.definition.max_turns)
+            .with_cwd(self.tool_context.cwd.clone())
+            .with_permission_mode(permission_mode);
+        let events = subagent.run(format!(
+            "Sub-agent task: {}\n\n{}",
+            invocation.description, invocation.prompt
+        ));
+
+        Some(render_subagent_result(
+            invocation.definition.kind,
+            &subagent_model,
+            &events,
+        ))
+    }
+}
+
+fn render_subagent_result(kind: &str, model: &str, events: &[AgentLoopEvent]) -> crate::ToolResult {
+    if let Some(AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error))) = events.last() {
+        return crate::ToolResult::error(format!("Sub-agent {kind} failed: {error}"));
+    }
+
+    let mut lines = vec![format!("Sub-agent {kind} completed with model {model}.")];
+    for event in events {
+        match event {
+            AgentLoopEvent::Assistant(message) if !message.content.trim().is_empty() => {
+                lines.push(String::new());
+                lines.push(message.content.trim().to_owned());
+            }
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error,
+            } => {
+                let status = if *is_error { "error" } else { "ok" };
+                lines.push(String::new());
+                lines.push(format!(
+                    "[tool_result name={} status={}]\n{}",
+                    tool_call.name,
+                    status,
+                    content.trim()
+                ));
+            }
+            AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => {
+                lines.push(String::new());
+                lines.push(String::from(
+                    "Sub-agent stopped after reaching the turn limit.",
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    crate::ToolResult::text(lines.join("\n"))
 }
 
 #[derive(Debug, Default)]

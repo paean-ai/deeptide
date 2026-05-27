@@ -769,80 +769,41 @@ impl Tool for AgentTool {
     }
 
     fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
-        let Some(description) = input.get("description").and_then(serde_json::Value::as_str) else {
-            return ToolResult::error("Missing description parameter");
+        let invocation = match parse_agent_invocation(&input) {
+            Ok(invocation) => invocation,
+            Err(error) => return ToolResult::error(error),
         };
-        let Some(prompt) = input.get("prompt").and_then(serde_json::Value::as_str) else {
-            return ToolResult::error("Missing prompt parameter");
-        };
-        let description = description.trim();
-        let prompt = prompt.trim();
-        if description.is_empty() {
-            return ToolResult::error("description must not be empty");
-        }
-        if prompt.chars().count() < 2 {
-            return ToolResult::error("prompt must be at least 2 characters");
-        }
-
-        let subagent_type = input
-            .get("subagent_type")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("general-purpose");
-        let Some(definition) = AgentDefinition::find(subagent_type) else {
-            return ToolResult::error(format!(
-                "Unknown agent type: {subagent_type}. Available: {}",
-                AgentDefinition::all_types().join(", ")
-            ));
-        };
-
-        if input
-            .get("run_in_background")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-            && input.get("isolation").and_then(serde_json::Value::as_str) == Some("worktree")
-        {
-            return ToolResult::error(
-                "Cannot combine run_in_background with isolation worktree in this version",
-            );
-        }
-
-        if let Some(isolation) = input.get("isolation").and_then(serde_json::Value::as_str)
-            && isolation != "worktree"
-        {
-            return ToolResult::error("isolation must be worktree when provided");
-        }
-
-        let model = input
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        let model = invocation
+            .model
+            .as_deref()
             .unwrap_or("(inherit parent model)");
-        let tool_policy = definition.tool_policy_label();
+        let tool_policy = invocation.definition.tool_policy_label();
 
         ToolResult::error(format!(
             "Sub-agent execution is not available in this Rust build yet.\n\
-             Requested: {description}\n\
+             Requested: {}\n\
              Type: {}\n\
              Model: {model}\n\
              Max turns: {}\n\
              Tools: {tool_policy}\n\
              Read-only: {}\n\n\
              Prompt:\n{prompt}",
-            definition.kind, definition.max_turns, definition.is_read_only
+            invocation.description,
+            invocation.definition.kind,
+            invocation.definition.max_turns,
+            invocation.definition.is_read_only,
+            prompt = invocation.prompt
         ))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentDefinition {
-    kind: &'static str,
-    max_turns: usize,
-    is_read_only: bool,
-    allowed_tools: Option<&'static [&'static str]>,
-    disallowed_tools: &'static [&'static str],
+pub(crate) struct AgentDefinition {
+    pub(crate) kind: &'static str,
+    pub(crate) max_turns: usize,
+    pub(crate) is_read_only: bool,
+    pub(crate) allowed_tools: Option<&'static [&'static str]>,
+    pub(crate) disallowed_tools: &'static [&'static str],
 }
 
 impl AgentDefinition {
@@ -924,6 +885,75 @@ impl AgentDefinition {
             )
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentInvocation {
+    pub(crate) description: String,
+    pub(crate) prompt: String,
+    pub(crate) definition: AgentDefinition,
+    pub(crate) model: Option<String>,
+}
+
+pub(crate) fn parse_agent_invocation(input: &serde_json::Value) -> Result<AgentInvocation, String> {
+    let Some(description) = input.get("description").and_then(serde_json::Value::as_str) else {
+        return Err(String::from("Missing description parameter"));
+    };
+    let Some(prompt) = input.get("prompt").and_then(serde_json::Value::as_str) else {
+        return Err(String::from("Missing prompt parameter"));
+    };
+    let description = description.trim();
+    let prompt = prompt.trim();
+    if description.is_empty() {
+        return Err(String::from("description must not be empty"));
+    }
+    if prompt.chars().count() < 2 {
+        return Err(String::from("prompt must be at least 2 characters"));
+    }
+
+    let subagent_type = input
+        .get("subagent_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("general-purpose");
+    let Some(definition) = AgentDefinition::find(subagent_type) else {
+        return Err(format!(
+            "Unknown agent type: {subagent_type}. Available: {}",
+            AgentDefinition::all_types().join(", ")
+        ));
+    };
+
+    if input
+        .get("run_in_background")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && input.get("isolation").and_then(serde_json::Value::as_str) == Some("worktree")
+    {
+        return Err(String::from(
+            "Cannot combine run_in_background with isolation worktree in this version",
+        ));
+    }
+
+    if let Some(isolation) = input.get("isolation").and_then(serde_json::Value::as_str)
+        && isolation != "worktree"
+    {
+        return Err(String::from("isolation must be worktree when provided"));
+    }
+
+    let model = input
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    Ok(AgentInvocation {
+        description: description.to_owned(),
+        prompt: prompt.to_owned(),
+        definition,
+        model,
+    })
 }
 
 #[derive(Debug, Default, Clone, Copy)]
