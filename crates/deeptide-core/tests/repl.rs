@@ -1,5 +1,6 @@
 use deeptide_core::{
-    AgentBackend, AgentRequest, AgentResponse, AgentUsage, ReplEvent, ReplSession, ToolCall,
+    AgentBackend, AgentRequest, AgentResponse, AgentUsage, PermissionManager, PermissionMode,
+    PermissionRules, ReplEvent, ReplSession, ToolCall,
 };
 
 #[test]
@@ -166,6 +167,53 @@ fn repl_write_command_writes_files() {
         std::fs::read_to_string(temp.path().join("notes.txt")).expect("read written file"),
         "hello from repl"
     );
+}
+
+#[test]
+fn repl_permission_command_lists_adds_and_removes_rules() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let rules_path = temp.path().join("permissions.json");
+    let permission_manager = PermissionManager::new(
+        PermissionMode::Default,
+        PermissionRules::load(Some(rules_path.clone())).expect("rules should load"),
+    );
+    let mut repl =
+        ReplSession::new(Box::new(StaticBackend)).with_permission_manager(permission_manager);
+
+    let empty = only_output(repl.submit("/permission"));
+    assert!(empty.contains("Permission rules:"));
+    assert!(empty.contains("  allow:\n    (none)"));
+    assert!(empty.contains("  deny:\n    (none)"));
+
+    assert_eq!(
+        only_output(repl.submit("/permission --allow Bash(cargo test*)")),
+        "+allow Bash(cargo test*)"
+    );
+    assert_eq!(
+        only_output(repl.submit("/permission --deny Write:secrets*")),
+        "+deny Write:secrets*"
+    );
+    assert_eq!(
+        only_output(repl.submit("/permission --allow npm:*")),
+        "+allow npm:*"
+    );
+
+    let listed = only_output(repl.submit("/permission"));
+    assert!(listed.contains("Bash(cargo test*)"));
+    assert!(listed.contains("Write(secrets*)"));
+    assert!(listed.contains("npm:*"));
+
+    assert_eq!(
+        only_output(repl.submit("/permission --remove cargo test*")),
+        "Removed cargo test*"
+    );
+    let after_remove = only_output(repl.submit("/permission"));
+    assert!(!after_remove.contains("Bash(cargo test*)"));
+    assert!(after_remove.contains("Write(secrets*)"));
+
+    let stored = std::fs::read_to_string(rules_path).expect("rules should be saved");
+    assert!(stored.contains("secrets*"));
+    assert!(!stored.contains("cargo test*"));
 }
 
 fn only_output(events: Vec<ReplEvent>) -> String {

@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, ClearCommand,
     CommandCompletionSource, CommandContext, CommandResult, CompactCommand, CostCommand,
-    HelpCommand, MemoryCommand, NewCommand, PermissionMode, RememberCommand, SlashCommand, Tool,
-    ToolContext, ToolRegistry, ToolResultSummaryFormatter, WriteTool,
+    HelpCommand, MemoryCommand, NewCommand, PermissionManager, PermissionMode, PermissionRules,
+    RememberCommand, Rule, SlashCommand, Tool, ToolContext, ToolRegistry,
+    ToolResultSummaryFormatter, WriteTool,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +47,11 @@ impl ReplSession {
 
     pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
         self.agent_loop = self.agent_loop.with_permission_mode(mode);
+        self
+    }
+
+    pub fn with_permission_manager(mut self, permission_manager: PermissionManager) -> Self {
+        self.agent_loop = self.agent_loop.with_permission_manager(permission_manager);
         self
     }
 
@@ -117,6 +123,7 @@ impl ReplSession {
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
             "remember" => RememberCommand.execute(args, &context),
+            "permission" | "perm" | "permissions" => self.execute_permission_command(args),
             _ => CommandResult::Text(format!(
                 "Unknown command: /{name}\nType /help for the full list."
             )),
@@ -163,6 +170,60 @@ impl ReplSession {
             &self.tool_context,
         );
         CommandResult::Text(result.content)
+    }
+
+    fn execute_permission_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            return CommandResult::Text(render_permission_rules(
+                self.agent_loop.permission_rules(),
+            ));
+        }
+
+        if let Some(raw) = trimmed.strip_prefix("--allow ") {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return CommandResult::Text(String::from(
+                    "Usage: /permission [--allow Tool(pattern) | --deny Tool(pattern) | --remove pattern]",
+                ));
+            }
+            let (tool, pattern) = parse_permission_rule_pattern(raw);
+            return match self.agent_loop.add_permission_rule(true, pattern, tool) {
+                Ok(()) => CommandResult::Text(format!("+allow {raw}")),
+                Err(error) => CommandResult::Text(format!("Failed: {error}")),
+            };
+        }
+
+        if let Some(raw) = trimmed.strip_prefix("--deny ") {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return CommandResult::Text(String::from(
+                    "Usage: /permission [--allow Tool(pattern) | --deny Tool(pattern) | --remove pattern]",
+                ));
+            }
+            let (tool, pattern) = parse_permission_rule_pattern(raw);
+            return match self.agent_loop.add_permission_rule(false, pattern, tool) {
+                Ok(()) => CommandResult::Text(format!("+deny {raw}")),
+                Err(error) => CommandResult::Text(format!("Failed: {error}")),
+            };
+        }
+
+        if let Some(raw) = trimmed.strip_prefix("--remove ") {
+            let pattern = raw.trim();
+            if pattern.is_empty() {
+                return CommandResult::Text(String::from(
+                    "Usage: /permission [--allow Tool(pattern) | --deny Tool(pattern) | --remove pattern]",
+                ));
+            }
+            return match self.agent_loop.remove_permission_rule(pattern) {
+                Ok(()) => CommandResult::Text(format!("Removed {pattern}")),
+                Err(error) => CommandResult::Text(format!("Failed: {error}")),
+            };
+        }
+
+        CommandResult::Text(String::from(
+            "Usage: /permission [--allow Tool(pattern) | --deny Tool(pattern) | --remove pattern]",
+        ))
     }
 
     fn command_context(&self) -> CommandContext {
@@ -275,7 +336,74 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
         ),
         CommandCompletionSource::from_command(&MemoryCommand),
         CommandCompletionSource::from_command(&RememberCommand),
+        CommandCompletionSource::new(
+            "permission",
+            ["perm", "permissions"],
+            "List or modify permission rules",
+            "/permission [--allow Pattern | --deny Pattern | --remove pattern]",
+        ),
     ]
+}
+
+fn render_permission_rules(rules: &PermissionRules) -> String {
+    let mut lines = vec![String::from("Permission rules:"), String::from("  allow:")];
+    append_permission_rules(&mut lines, rules.allow_list());
+    if !rules.session_allow_list().is_empty() {
+        lines.push(String::from("  session allow:"));
+        append_permission_rules(&mut lines, rules.session_allow_list());
+    }
+    lines.push(String::from("  deny:"));
+    append_permission_rules(&mut lines, rules.deny_list());
+    if !rules.session_deny_list().is_empty() {
+        lines.push(String::from("  session deny:"));
+        append_permission_rules(&mut lines, rules.session_deny_list());
+    }
+    lines.join("\n")
+}
+
+fn append_permission_rules(lines: &mut Vec<String>, rules: &[Rule]) {
+    if rules.is_empty() {
+        lines.push(String::from("    (none)"));
+        return;
+    }
+    for rule in rules {
+        lines.push(format!("    {}", format_permission_rule(rule)));
+    }
+}
+
+fn format_permission_rule(rule: &Rule) -> String {
+    rule.tool
+        .as_ref()
+        .map(|tool| format!("{tool}({})", rule.pattern))
+        .unwrap_or_else(|| rule.pattern.clone())
+}
+
+fn parse_permission_rule_pattern(raw: &str) -> (Option<String>, String) {
+    if let Some(open_index) = raw.find('(')
+        && raw.ends_with(')')
+    {
+        let tool = raw[..open_index].trim();
+        let pattern = raw[open_index + 1..raw.len() - 1].trim();
+        if !tool.is_empty() && !pattern.is_empty() {
+            return (Some(tool.to_owned()), pattern.to_owned());
+        }
+    }
+
+    if let Some((tool, pattern)) = raw.split_once(':') {
+        let tool = tool.trim();
+        let pattern = pattern.trim();
+        if !tool.is_empty()
+            && !pattern.is_empty()
+            && tool
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_uppercase())
+        {
+            return (Some(tool.to_owned()), pattern.to_owned());
+        }
+    }
+
+    (None, raw.to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

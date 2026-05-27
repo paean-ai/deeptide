@@ -3,6 +3,7 @@ use crate::{
     ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler, ToolContext, ToolRegistry,
     TurnUsage,
 };
+use std::io;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,6 +330,23 @@ impl AgentLoop {
 
     pub fn permission_mode(&self) -> PermissionMode {
         self.permission_manager.mode()
+    }
+
+    pub fn permission_rules(&self) -> &PermissionRules {
+        self.permission_manager.rules()
+    }
+
+    pub fn add_permission_rule(
+        &mut self,
+        allowed: bool,
+        pattern: impl Into<String>,
+        tool: Option<String>,
+    ) -> io::Result<()> {
+        self.permission_manager.add_rule(allowed, pattern, tool)
+    }
+
+    pub fn remove_permission_rule(&mut self, pattern: &str) -> io::Result<()> {
+        self.permission_manager.remove_rule(pattern)
     }
 
     fn execute_tool_call(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
