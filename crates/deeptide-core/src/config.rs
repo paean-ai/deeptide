@@ -97,6 +97,39 @@ pub struct McpServerConfig {
     pub name: Option<String>,
 }
 
+// ── Provider profiles ──────────────────────────────────────────────────────────
+
+/// A named API provider profile under the `providers` block.
+///
+/// Lets a user keep several Anthropic-compatible endpoints (e.g. DeepSeek,
+/// Anthropic, a self-hosted gateway) in one settings file and switch between
+/// them with `active_profile` or the `--profile` flag. Mirrors Swift's
+/// `ProviderProfile`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderProfile {
+    /// Base URL for this provider's Anthropic-compatible endpoint.
+    #[serde(rename = "base_url", skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    /// API key stored inline. Prefer an environment variable for secrets;
+    /// this is read only as a last resort.
+    #[serde(rename = "api_key", skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// macOS Keychain account holding the API key. Read on macOS only; other
+    /// platforms fall back to `api_key` or environment variables.
+    #[serde(rename = "keychain_account", skip_serializing_if = "Option::is_none")]
+    pub keychain_account: Option<String>,
+
+    /// Default model identifier for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Human-readable label shown in `/config`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
 // ── ConfigData ────────────────────────────────────────────────────────────────
 
 /// Parsed content of a `settings.json` file.
@@ -152,6 +185,14 @@ pub struct ConfigData {
     /// MCP server definitions.
     #[serde(rename = "mcp_servers", skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<HashMap<String, McpServerConfig>>,
+
+    /// Name of the active provider profile in `providers`.
+    #[serde(rename = "active_profile", skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<String>,
+
+    /// Named API provider profiles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub providers: Option<HashMap<String, ProviderProfile>>,
 }
 
 impl ConfigData {
@@ -170,7 +211,29 @@ impl ConfigData {
             hooks: other.hooks.or(self.hooks),
             env: merge_maps(self.env, other.env),
             mcp_servers: merge_maps(self.mcp_servers, other.mcp_servers),
+            active_profile: other.active_profile.or(self.active_profile),
+            providers: merge_maps(self.providers, other.providers),
         }
+    }
+
+    /// Look up a provider profile by name.
+    pub fn provider(&self, name: &str) -> Option<&ProviderProfile> {
+        self.providers.as_ref()?.get(name)
+    }
+
+    /// Resolve the active provider profile and its name.
+    ///
+    /// The profile name is taken from `explicit` (e.g. a `--profile` flag) when
+    /// non-empty, otherwise from the `active_profile` field. Returns `None` when
+    /// no name resolves or the named profile is absent.
+    pub fn active_provider(&self, explicit: Option<&str>) -> Option<(&str, &ProviderProfile)> {
+        let name = explicit
+            .filter(|value| !value.is_empty())
+            .or(self.active_profile.as_deref())?;
+        self.providers
+            .as_ref()?
+            .get_key_value(name)
+            .map(|(key, value)| (key.as_str(), value))
     }
 
     /// Apply environment variables from the `env` block.
@@ -406,6 +469,23 @@ impl ConfigStore {
             lines.push(kv("env", &format!("{} variables", env.len())));
         }
 
+        if let Some(ref active) = merged.active_profile {
+            lines.push(kv("active_profile", active));
+        }
+        if let Some(ref providers) = merged.providers {
+            lines.push(kv("providers", &format!("{} configured", providers.len())));
+            let mut names: Vec<&String> = providers.keys().collect();
+            names.sort();
+            for name in names {
+                let profile = &providers[name];
+                let active = merged.active_profile.as_deref() == Some(name.as_str());
+                let marker = if active { "*" } else { " " };
+                let base = profile.base_url.as_deref().unwrap_or("(default)");
+                let label = profile.label.as_deref().unwrap_or("");
+                lines.push(format!("    {marker} {name:<16} {base}  {label}"));
+            }
+        }
+
         lines.push(String::new());
         lines.push(String::from("Usage:"));
         lines.push(String::from(
@@ -560,5 +640,113 @@ mod tests {
         unsafe {
             std::env::remove_var("DEEPTIDE_TEST_UNIQUE_VAR_XYZ");
         }
+    }
+
+    #[test]
+    fn config_data_parses_provider_profiles() {
+        let raw = serde_json::json!({
+            "active_profile": "deepseek",
+            "providers": {
+                "deepseek": {
+                    "base_url": "https://api.deepseek.com/anthropic",
+                    "model": "deepseek-v4-pro",
+                    "label": "DeepSeek official",
+                    "keychain_account": "default"
+                },
+                "anthropic": {
+                    "base_url": "https://api.anthropic.com"
+                }
+            }
+        })
+        .to_string();
+        let data: ConfigData = serde_json::from_str(&raw).expect("parse providers");
+
+        assert_eq!(data.active_profile.as_deref(), Some("deepseek"));
+        let deepseek = data.provider("deepseek").expect("deepseek provider");
+        assert_eq!(
+            deepseek.base_url.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(deepseek.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(deepseek.keychain_account.as_deref(), Some("default"));
+        assert!(data.provider("missing").is_none());
+    }
+
+    #[test]
+    fn active_provider_prefers_explicit_then_active_profile() {
+        let data = ConfigData {
+            active_profile: Some(String::from("deepseek")),
+            providers: Some(HashMap::from([
+                (
+                    String::from("deepseek"),
+                    ProviderProfile {
+                        base_url: Some(String::from("https://api.deepseek.com/anthropic")),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    String::from("anthropic"),
+                    ProviderProfile {
+                        base_url: Some(String::from("https://api.anthropic.com")),
+                        ..Default::default()
+                    },
+                ),
+            ])),
+            ..Default::default()
+        };
+
+        // Falls back to active_profile when no explicit override.
+        let (name, profile) = data.active_provider(None).expect("active provider");
+        assert_eq!(name, "deepseek");
+        assert_eq!(
+            profile.base_url.as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+
+        // Explicit override wins.
+        let (name, _) = data
+            .active_provider(Some("anthropic"))
+            .expect("explicit provider");
+        assert_eq!(name, "anthropic");
+
+        // Empty explicit string is ignored, unknown name yields None.
+        assert_eq!(
+            data.active_provider(Some("")).map(|(n, _)| n),
+            Some("deepseek")
+        );
+        assert!(data.active_provider(Some("ghost")).is_none());
+    }
+
+    #[test]
+    fn merge_combines_provider_maps() {
+        let base = ConfigData {
+            active_profile: Some(String::from("deepseek")),
+            providers: Some(HashMap::from([(
+                String::from("deepseek"),
+                ProviderProfile {
+                    base_url: Some(String::from("https://api.deepseek.com/anthropic")),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+        let overlay = ConfigData {
+            providers: Some(HashMap::from([(
+                String::from("anthropic"),
+                ProviderProfile {
+                    base_url: Some(String::from("https://api.anthropic.com")),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+        let merged = base.merge(overlay);
+
+        let providers = merged.providers.expect("providers");
+        assert_eq!(providers.len(), 2);
+        assert!(providers.contains_key("deepseek"));
+        assert!(providers.contains_key("anthropic"));
+        // active_profile is preserved from base when overlay omits it.
+        assert_eq!(merged.active_profile.as_deref(), Some("deepseek"));
     }
 }
