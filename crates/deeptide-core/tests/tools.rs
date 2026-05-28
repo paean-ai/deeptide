@@ -1320,6 +1320,11 @@ fn skill_tool_expands_builtin_skill_prompts_and_reports_unknown_names() {
 
 #[test]
 fn publish_tool_renders_status_and_validates_option_conflicts() {
+    // PublishTool reads PAEAN_API_* / CLIDE_API_* env vars during dispatch.
+    // Other publish_tool_* tests mutate those vars under `publish_env_guard`,
+    // and concurrent read+write on std::env is undefined behaviour, so this
+    // read-only call must take the same lock to avoid corrupting the race.
+    let _guard = publish_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let context = ToolContext::new(temp.path());
 
@@ -1354,6 +1359,10 @@ fn publish_tool_renders_status_and_validates_option_conflicts() {
 
 #[test]
 fn publish_tool_dry_run_detects_static_output_and_writes_safety_ignore() {
+    // PublishTool reads PAEAN_API_* / CLIDE_API_* env vars during dispatch.
+    // Take the publish guard so we never observe a half-written env state
+    // from sibling tests under `install_publish_env`/`clear_publish_env`.
+    let _guard = publish_env_guard();
     let temp = tempfile::tempdir().expect("tempdir");
     let dist = temp.path().join("dist");
     std::fs::create_dir_all(&dist).expect("mkdir");
@@ -2386,6 +2395,34 @@ fn read_http_request(stream: &mut impl Read) {
     }
     let header_end = header_end.expect("header end") + 4;
     let headers = String::from_utf8_lossy(&buffer[..header_end]);
+
+    // reqwest multipart::Form::Part::reader produces a chunked-encoded body
+    // because the file Reader has no known length. Without this branch the
+    // server would read 0 body bytes, send `Connection: close`, and tear down
+    // the socket while the client was mid-upload — exactly the source of the
+    // flaky `publish_tool_uploads_archive_and_saves_state` failure.
+    let chunked = headers.lines().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+        })
+    });
+    if chunked {
+        let mut body = buffer.split_off(header_end);
+        loop {
+            if body.windows(5).any(|window| window == b"0\r\n\r\n") {
+                return;
+            }
+            let read = stream.read(&mut chunk).expect("read chunked body");
+            if read == 0 {
+                return;
+            }
+            body.extend_from_slice(&chunk[..read]);
+        }
+    }
+
     let content_length = headers
         .lines()
         .find_map(|line| {
@@ -2413,10 +2450,20 @@ fn todo_test_guard() -> MutexGuard<'static, ()> {
         .expect("todo test lock")
 }
 
+// `std::env::set_var` / `remove_var` are process-global and Rust 2024 marks
+// them `unsafe` precisely because they race with every other env reader in the
+// binary, regardless of which "group" of vars is being mutated. Originally
+// `publish_env_guard` and `memory_env_guard` were two independent mutexes, so
+// a memory test mutating HOME could race with a publish test mutating
+// PAEAN_API_TOKEN and corrupt either side. Both helpers now share a single
+// global lock so any env-mutating or env-reading test is fully serialised.
+fn env_test_lock() -> &'static Mutex<()> {
+    static ENV_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn publish_env_guard() -> MutexGuard<'static, ()> {
-    static PUBLISH_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    PUBLISH_TEST_LOCK
-        .get_or_init(|| Mutex::new(()))
+    env_test_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
 }
@@ -2442,9 +2489,7 @@ fn clear_publish_env() {
 }
 
 fn memory_env_guard() -> MutexGuard<'static, ()> {
-    static MEMORY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    MEMORY_TEST_LOCK
-        .get_or_init(|| Mutex::new(()))
+    env_test_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
 }
