@@ -372,11 +372,15 @@ printf 'Content-Length: %s\r\n\r\n%s' "${#body2}" "$body2"
             .content
             .contains("url: https://mcp.example.invalid")
     );
+    // The remote server now attempts a real HTTP request; the reserved
+    // `.invalid` host never resolves, so it surfaces a transport error rather
+    // than the old "not implemented" stub.
     assert!(
         resources
             .content
-            .contains("HTTP/SSE MCP transport is not implemented")
+            .contains("MCP HTTP request to remote failed")
     );
+    assert!(!resources.content.contains("not implemented"));
 
     let prompts = ListMcpPromptsTool.call(serde_json::json!({"server": "docs"}), &context);
     assert!(!prompts.is_error);
@@ -418,6 +422,147 @@ printf 'Content-Length: %s\r\n\r\n%s' "${#body2}" "$body2"
     assert!(search.content.contains("[MCP tools]"));
     assert!(search.content.contains("mcp__docs__lookup"));
     assert!(search.content.contains("Look up project facts"));
+}
+
+#[test]
+fn mcp_tools_call_configured_http_servers() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    fn json_rpc_http(id: Option<i64>, result: serde_json::Value) -> String {
+        let body = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock MCP server");
+    let port = listener.local_addr().expect("addr").port();
+
+    // Minimal Streamable HTTP MCP server: answers `initialize` with a session
+    // id, ack's the `notifications/initialized` notification, and returns
+    // method results as JSON (or SSE for prompts/list, to cover both paths).
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if reader.read_exact(&mut body).is_err() {
+                continue;
+            }
+            let request: serde_json::Value =
+                serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            let method = request
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let id = request.get("id").and_then(serde_json::Value::as_i64);
+
+            let response = match method {
+                "initialize" => {
+                    let payload = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "http-fake", "version": "1"}}
+                    })
+                    .to_string();
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: sess-123\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    )
+                }
+                "notifications/initialized" => String::from(
+                    "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                ),
+                "prompts/list" => {
+                    let payload = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {"prompts": [{"name": "review", "description": "Review code"}]}
+                    })
+                    .to_string();
+                    let sse = format!("event: message\ndata: {payload}\n\n");
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        sse.len(),
+                        sse
+                    )
+                }
+                "resources/list" => json_rpc_http(
+                    id,
+                    serde_json::json!({"resources": [{"uri": "file://guide.md", "name": "Guide"}]}),
+                ),
+                "resources/read" => json_rpc_http(
+                    id,
+                    serde_json::json!({"contents": [{"type": "text", "text": "hello"}]}),
+                ),
+                "tools/call" => json_rpc_http(
+                    id,
+                    serde_json::json!({"content": [{"type": "text", "text": "looked up"}]}),
+                ),
+                _ => json_rpc_http(id, serde_json::json!({})),
+            };
+            stream.write_all(response.as_bytes()).ok();
+            stream.flush().ok();
+        }
+    });
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join(".mcp.json"),
+        serde_json::json!({
+            "mcpServers": {
+                "remote": {
+                    "url": format!("http://127.0.0.1:{port}/mcp"),
+                    "headers": {"Authorization": "Bearer test-token"}
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write mcp fixture");
+    let context = ToolContext::new(temp.path());
+
+    let resources = ListMcpResourcesTool.call(serde_json::json!({}), &context);
+    assert!(!resources.is_error, "resources: {}", resources.content);
+    assert!(resources.content.contains("[remote]"));
+    assert!(resources.content.contains("file://guide.md - Guide"));
+
+    // prompts/list is served as SSE, exercising the event-stream parser.
+    let prompts = ListMcpPromptsTool.call(serde_json::json!({"server": "remote"}), &context);
+    assert!(!prompts.is_error, "prompts: {}", prompts.content);
+    assert!(prompts.content.contains("review - Review code"));
+
+    let read = ReadMcpResourceTool.call(
+        serde_json::json!({"server": "remote", "uri": "file://guide.md"}),
+        &context,
+    );
+    assert!(!read.is_error, "read: {}", read.content);
+    assert!(read.content.contains("\"text\": \"hello\""));
+
+    let dynamic = ToolRegistry::with_builtin_tools().call(
+        "mcp__remote__lookup",
+        serde_json::json!({"query": "guide"}),
+        &context,
+    );
+    assert!(!dynamic.is_error, "dynamic: {}", dynamic.content);
+    assert!(dynamic.content.contains("looked up"));
 }
 
 #[cfg(unix)]
