@@ -10294,7 +10294,7 @@ fn render_command_output(
         );
     }
 
-    let output = truncate_command_output(&output, 30_000, 500);
+    let output = truncate_command_output(&output, bash_max_output_chars(), 500);
     if failed {
         ToolResult::error(output)
     } else {
@@ -10302,20 +10302,47 @@ fn render_command_output(
     }
 }
 
+/// Default character ceiling for Bash output, matching the Swift BashTool.
+const DEFAULT_BASH_MAX_OUTPUT: usize = 30_000;
+
+/// Clamp a configured Bash output ceiling to the supported range, or fall back
+/// to the default. Mirrors Swift's `min(150_000, max(10_000, envMax)) ?? 30_000`.
+fn clamp_bash_max(value: Option<usize>) -> usize {
+    value
+        .map(|chars| chars.clamp(10_000, 150_000))
+        .unwrap_or(DEFAULT_BASH_MAX_OUTPUT)
+}
+
+/// Resolve the Bash output ceiling, honoring the `TIDE_BASH_MAX_OUTPUT`
+/// environment override (clamped to [10K, 150K]).
+fn bash_max_output_chars() -> usize {
+    clamp_bash_max(
+        std::env::var("TIDE_BASH_MAX_OUTPUT")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok()),
+    )
+}
+
 fn truncate_command_output(output: &str, max_chars: usize, max_lines: usize) -> String {
+    let total_lines = output.lines().count();
     let mut truncated = output
         .lines()
         .take(max_lines)
         .collect::<Vec<_>>()
         .join("\n");
-    if output.ends_with('\n') && output.lines().count() <= max_lines {
+    if output.ends_with('\n') && total_lines <= max_lines {
         truncated.push('\n');
     }
+    let mut did_truncate = total_lines > max_lines;
     if truncated.chars().count() > max_chars {
         truncated = truncate_chars(&truncated, max_chars);
-        truncated.push_str("\n[Output truncated]");
-    } else if output.lines().count() > max_lines {
-        truncated.push_str("\n[Output truncated]");
+        did_truncate = true;
+    }
+    if did_truncate {
+        // Report how many whole lines were dropped so the model knows to
+        // re-run narrowed (head/tail/grep). Matches the Swift truncation marker.
+        let elided = total_lines.saturating_sub(truncated.lines().count());
+        truncated.push_str(&format!("\n... [{elided} lines truncated]"));
     }
     truncated
 }
@@ -11235,5 +11262,50 @@ mod agent_definition_tests {
             prompt.contains(&definition.max_turns.to_string()),
             "turn budget is included"
         );
+    }
+}
+
+#[cfg(test)]
+mod bash_output_tests {
+    use super::{clamp_bash_max, truncate_command_output};
+
+    #[test]
+    fn short_output_is_untouched() {
+        let out = truncate_command_output("one\ntwo\nthree", 30_000, 500);
+        assert_eq!(out, "one\ntwo\nthree");
+        assert!(!out.contains("lines truncated"));
+    }
+
+    #[test]
+    fn line_cap_reports_elided_count() {
+        let body = (1..=600)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = truncate_command_output(&body, 30_000, 500);
+        assert!(out.contains("line 1"));
+        assert!(out.contains("line 500"));
+        assert!(!out.contains("line 501"));
+        // 600 total - 500 kept = 100 dropped whole lines.
+        assert!(
+            out.contains("... [100 lines truncated]"),
+            "marker should report the dropped line count: {out}"
+        );
+    }
+
+    #[test]
+    fn char_cap_truncates_a_single_huge_line() {
+        let body = "x".repeat(50_000);
+        let out = truncate_command_output(&body, 30_000, 500);
+        assert!(out.chars().count() <= 30_000 + 40);
+        assert!(out.contains("lines truncated"));
+    }
+
+    #[test]
+    fn clamp_bash_max_applies_range_and_default() {
+        assert_eq!(clamp_bash_max(None), 30_000);
+        assert_eq!(clamp_bash_max(Some(50_000)), 50_000);
+        assert_eq!(clamp_bash_max(Some(1_000)), 10_000);
+        assert_eq!(clamp_bash_max(Some(999_999)), 150_000);
     }
 }
