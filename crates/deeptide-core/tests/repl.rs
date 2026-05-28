@@ -115,6 +115,53 @@ fn repl_without_debug_emits_no_diagnostics() {
 }
 
 #[test]
+fn repl_compact_folds_older_messages() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    // Four prompts -> eight messages, beyond the default recent window.
+    for _ in 0..4 {
+        repl.submit("hello");
+    }
+    let before = repl.agent_loop().messages().len();
+    assert!(
+        before > 6,
+        "expected more than the window of messages, got {before}"
+    );
+
+    let output = only_output(repl.submit("/compact"));
+    assert!(
+        output.contains("Context compacted"),
+        "expected a compaction report, got: {output}"
+    );
+
+    let after = repl.agent_loop().messages().len();
+    assert!(
+        after < before,
+        "compaction should reduce the transcript: {before} -> {after}"
+    );
+    // The rewritten transcript must still open on a user message (the summary).
+    assert!(
+        repl.agent_loop()
+            .messages()
+            .first()
+            .is_some_and(|m| m.content.contains("[context-summary]")),
+        "compaction should prepend a summary message"
+    );
+}
+
+#[test]
+fn repl_compact_is_noop_for_short_transcripts() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    repl.submit("hello");
+
+    let output = only_output(repl.submit("/compact"));
+    assert!(
+        output.contains("Nothing to compact"),
+        "short transcripts should report nothing to compact, got: {output}"
+    );
+}
+
+#[test]
 fn repl_shows_tool_batch_summary_before_tool_output() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\n").expect("write fixture");

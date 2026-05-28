@@ -277,7 +277,7 @@ impl ReplSession {
                 self.agent_loop.reset();
                 NewCommand.execute(args, &context)
             }
-            "compact" | "compress" => CompactCommand.execute(args, &context),
+            "compact" | "compress" => self.execute_compact_command(args),
             "cost" => CostCommand.execute(args, &context),
             "model" | "m" => self.execute_model_command(args),
             "provider" | "profiles" => self.execute_provider_command(args),
@@ -452,6 +452,22 @@ impl ReplSession {
         } else {
             CommandResult::Text(crate::tps::render(&records))
         }
+    }
+
+    fn execute_compact_command(&mut self, _args: &str) -> CommandResult {
+        let report = self.agent_loop.compact();
+        let text = if report.did_compress {
+            format!(
+                "Context compacted: folded {} message(s) into a summary; ~{} tokens remain.",
+                report.compressed_messages, report.tokens_after
+            )
+        } else {
+            format!(
+                "Nothing to compact yet (~{} tokens; the transcript fits the recent window).",
+                report.tokens_after
+            )
+        };
+        CommandResult::Text(text)
     }
 
     fn execute_debug_command(&mut self, args: &str) -> CommandResult {
