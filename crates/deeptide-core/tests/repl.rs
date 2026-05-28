@@ -248,17 +248,16 @@ fn repl_swift_parity_convenience_commands_are_available() {
     assert!(keys.contains("Key bindings:"));
     assert!(keys.contains("Ctrl+C"));
 
-    assert_eq!(
-        only_output(repl.submit("/sessions")),
-        "No persisted sessions are available in the Rust REPL yet. Use /export [path] to save the current transcript."
+    // Sessions now uses real persistence; just verify the command is routed
+    // (exact output depends on what's in ~/.config/tide/ on the test machine)
+    let sessions_output = only_output(repl.submit("/sessions"));
+    assert!(
+        sessions_output.contains("sessions") || sessions_output.contains("Sessions"),
+        "sessions command should produce session-related output"
     );
     assert_eq!(
-        only_output(repl.submit("/resume")),
-        "No sessions to resume in this project."
-    );
-    assert_eq!(
-        only_output(repl.submit("/load missing-session")),
-        "Session not found: missing-session. Persisted session restore is not available in the Rust REPL yet."
+        only_output(repl.submit("/load nonexistent-session-abc123")),
+        "Cannot resume: Session not found: nonexistent-session-abc123"
     );
 }
 
@@ -374,7 +373,10 @@ fn repl_status_command_reports_session_shape() {
     assert!(output.contains("+ dirs:   (none)"));
     assert!(output.contains("Branch:   (no git)"));
     assert!(output.contains("Provider: legacy"));
-    assert!(output.contains("Session:  (not persisted)"));
+    assert!(
+        output.contains("Session:  "),
+        "status should show session ID"
+    );
     assert!(output.contains("Turns:    1 / 7"));
     assert!(output.contains("Messages: 2"));
     assert!(output.contains("Context:  ~"));
@@ -1140,4 +1142,97 @@ fn repl_cache_alias_kvcache_works() {
 
     let output = only_output(repl.submit("/kvcache"));
     assert!(output.contains("No cache diagnostics yet"));
+}
+
+// ── Session persistence integration tests ────────────────────────────────────
+
+#[test]
+fn repl_status_shows_real_session_id() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    let output = only_output(repl.submit("/status"));
+    assert!(
+        output.contains("Session:  "),
+        "status must have a Session: line"
+    );
+    let id_part = output
+        .lines()
+        .find(|l| l.trim_start().starts_with("Session:"))
+        .map(|l| {
+            l.trim_start_matches(' ')
+                .trim_start_matches("Session:")
+                .trim()
+                .to_owned()
+        })
+        .expect("Session: line in /status output");
+    assert!(!id_part.is_empty(), "session ID must not be empty");
+    assert!(
+        !id_part.contains("not persisted"),
+        "session ID must not be the old stub text; got: {id_part}"
+    );
+    // Session IDs look like YYYY-MM-DDTHH-MM-SS-... — starts with digits
+    assert!(
+        id_part.chars().next().is_some_and(|c| c.is_ascii_digit()),
+        "session ID should start with a digit (timestamp): {id_part}"
+    );
+}
+
+#[test]
+fn repl_resume_nonexistent_session_gives_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    let output = only_output(repl.submit("/resume totally-unknown-session-xyz"));
+    assert!(
+        output.contains("Cannot resume"),
+        "should report error for unknown session: {output}"
+    );
+}
+
+#[test]
+fn repl_sessions_command_is_routed_and_functional() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    // Before any turns: no saved sessions for this project
+    let output = only_output(repl.submit("/sessions"));
+    // May either show "No saved sessions" or list sessions from a previous test run —
+    // just verify the command is dispatched and returns text (not "unknown command")
+    assert!(
+        !output.contains("Unknown command"),
+        "/sessions should not return unknown-command error: {output}"
+    );
+}
+
+#[test]
+fn repl_session_saves_and_can_be_resumed() {
+    use deeptide_core::{SessionStore, new_session_id};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cwd = temp.path();
+
+    // Save a session directly through the store
+    let id = new_session_id();
+    let messages = vec![
+        deeptide_core::ConversationMessage::user("hello"),
+        deeptide_core::ConversationMessage::assistant("hi there"),
+    ];
+    SessionStore::save(cwd, &id, "test-model", "2024-01-01T00:00:00Z", &messages);
+
+    // A fresh REPL session can resume it
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(cwd);
+    let output = only_output(repl.submit(&format!("/resume {id}")));
+    assert!(
+        output.contains("Resumed session"),
+        "resume should succeed: {output}"
+    );
+    assert!(
+        output.contains("2 messages"),
+        "should report loaded message count: {output}"
+    );
+    assert_eq!(
+        repl.agent_loop().messages().len(),
+        2,
+        "agent loop should have 2 restored messages"
+    );
 }
