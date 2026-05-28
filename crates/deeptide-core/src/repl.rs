@@ -1068,7 +1068,7 @@ impl ReplSession {
             8usize
         } else {
             match raw.parse::<usize>() {
-                Ok(n) => n.max(1).min(50),
+                Ok(n) => n.clamp(1, 50),
                 Err(_) => return CommandResult::Text(String::from("Usage: /cache [limit]")),
             }
         };
