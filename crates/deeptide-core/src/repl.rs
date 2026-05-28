@@ -9,6 +9,7 @@ use crate::{
     ToolResultSummaryFormatter, WriteTool,
     agent_loop::{ConversationMessage, MessageRole},
     memory::MemorySystem,
+    session::{SessionStore, new_session_id},
     tools::{ClipboardTool, model_context_window},
     tui::{StatusLine, StatusSegment},
 };
@@ -57,6 +58,8 @@ pub struct ReplSession {
     provider_profile: ProviderProfile,
     debug_enabled: bool,
     active_goal: Option<String>,
+    session_id: String,
+    session_started_at: String,
 }
 
 impl ReplSession {
@@ -73,6 +76,10 @@ impl ReplSession {
             provider_profile: ProviderProfile::Legacy,
             debug_enabled: false,
             active_goal: None,
+            session_id: new_session_id(),
+            session_started_at: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z")),
         }
     }
 
@@ -128,11 +135,24 @@ impl ReplSession {
             return self.execute_command(command_line);
         }
 
-        self.agent_loop
+        let events: Vec<ReplEvent> = self
+            .agent_loop
             .run(trimmed)
             .into_iter()
             .filter_map(agent_event_to_repl_event)
-            .collect()
+            .collect();
+        self.autosave_session();
+        events
+    }
+
+    fn autosave_session(&self) {
+        SessionStore::save(
+            &self.tool_context.cwd,
+            &self.session_id,
+            self.agent_loop.model(),
+            &self.session_started_at,
+            self.agent_loop.messages(),
+        );
     }
 
     pub fn banner(&self) -> String {
@@ -288,6 +308,7 @@ impl ReplSession {
             &self.tool_context.cwd,
             &self.additional_dirs,
             self.provider_profile,
+            &self.session_id,
         ))
     }
 
@@ -395,23 +416,68 @@ impl ReplSession {
             return CommandResult::Text(String::from("Usage: /sessions [filter]"));
         }
 
-        CommandResult::Text(String::from(
-            "No persisted sessions are available in the Rust REPL yet. Use /export [path] to save the current transcript.",
-        ))
+        let entries = SessionStore::list(&self.tool_context.cwd);
+        if entries.is_empty() {
+            return CommandResult::Text(String::from(
+                "No saved sessions for this project. Sessions are saved automatically on each turn.",
+            ));
+        }
+
+        let filter = args.trim().to_ascii_lowercase();
+        let shown: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                filter.is_empty()
+                    || e.session_id.contains(&filter)
+                    || e.preview.to_ascii_lowercase().contains(&filter)
+            })
+            .take(20)
+            .collect();
+
+        if shown.is_empty() {
+            return CommandResult::Text(format!("No sessions match filter: {filter}"));
+        }
+
+        let mut lines = vec![format!("Sessions ({} saved):", shown.len())];
+        for entry in &shown {
+            let project = std::path::Path::new(&entry.cwd)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&entry.cwd);
+            let preview = if entry.preview.is_empty() {
+                "(empty)"
+            } else {
+                &entry.preview
+            };
+            lines.push(format!(
+                "  {}  {}  \"{}\"  ({} messages)",
+                entry.session_id, project, preview, entry.message_count
+            ));
+        }
+        lines.push(String::new());
+        lines.push(String::from("Use /resume <session-id> to restore."));
+        CommandResult::Text(lines.join("\n"))
     }
 
-    fn execute_resume_command(&self, args: &str) -> CommandResult {
+    fn execute_resume_command(&mut self, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.split_whitespace().count() > 1 {
             return CommandResult::Text(String::from("Usage: /resume [session-id]"));
         }
 
         if trimmed.is_empty() {
-            CommandResult::Text(String::from("No sessions to resume in this project."))
-        } else {
-            CommandResult::Text(format!(
-                "Session not found: {trimmed}. Persisted session restore is not available in the Rust REPL yet."
-            ))
+            return self.execute_sessions_command("");
+        }
+
+        match SessionStore::load(&self.tool_context.cwd, trimmed) {
+            Ok(messages) => {
+                let count = messages.len();
+                self.agent_loop.restore_messages(messages);
+                CommandResult::Text(format!(
+                    "Resumed session {trimmed}: loaded {count} messages into context."
+                ))
+            }
+            Err(e) => CommandResult::Text(format!("Cannot resume: {e}")),
         }
     }
 
@@ -1609,6 +1675,7 @@ fn render_status(
     cwd: &std::path::Path,
     additional_dirs: &[std::path::PathBuf],
     provider_profile: ProviderProfile,
+    session_id: &str,
 ) -> String {
     let summary = agent_loop.cost_tracker().summary();
     let cache = summary.cache_health();
@@ -1623,7 +1690,7 @@ fn render_status(
         format!("  + dirs:   {}", render_additional_dirs(additional_dirs)),
         format!("  Branch:   {branch}"),
         format!("  Provider: {}", provider_profile.name()),
-        String::from("  Session:  (not persisted)"),
+        format!("  Session:  {session_id}"),
         format!(
             "  Turns:    {} / {}",
             summary.turns.len(),
