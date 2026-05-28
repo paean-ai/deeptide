@@ -186,15 +186,46 @@ impl<S: Summarizer> ContextWindowManager<S> {
     ///
     /// If the transcript already fits the soft budget the function is a no-op.
     pub fn compress(&self, messages: &mut Vec<ConversationMessage>) -> CompressionReport {
-        if !self.should_compress(messages) {
-            return CompressionReport {
-                compressed_messages: 0,
-                tokens_after: self.estimate_total(messages),
-                did_compress: false,
-            };
+        self.compress_at(messages, false)
+    }
+
+    /// Compress unconditionally (subject only to there being messages older than
+    /// the window), ignoring the soft-token threshold. Used by the explicit
+    /// `/compact` command, which the user invokes on demand.
+    pub fn force_compress(&self, messages: &mut Vec<ConversationMessage>) -> CompressionReport {
+        self.compress_at(messages, true)
+    }
+
+    fn compress_at(
+        &self,
+        messages: &mut Vec<ConversationMessage>,
+        force: bool,
+    ) -> CompressionReport {
+        let no_op = |messages: &[ConversationMessage]| CompressionReport {
+            compressed_messages: 0,
+            tokens_after: self.estimate_total(messages),
+            did_compress: false,
+        };
+
+        // Nothing older than the preserved window to summarize.
+        if messages.len() <= self.config.window_size {
+            return no_op(messages);
+        }
+        if !force && !self.should_compress(messages) {
+            return no_op(messages);
         }
 
-        let split_at = messages.len().saturating_sub(self.config.window_size);
+        // Snap the boundary forward to the next assistant message. This keeps
+        // any tool_use / tool_result pair together (tool_result messages carry
+        // the user role, so they are folded into the summary alongside their
+        // originating tool_use) and ensures the kept window opens on an
+        // assistant turn — so the synthetic user summary still alternates
+        // user → assistant on the wire.
+        let mut split_at = messages.len().saturating_sub(self.config.window_size);
+        while split_at < messages.len() && messages[split_at].role != MessageRole::Assistant {
+            split_at += 1;
+        }
+
         let older: Vec<ConversationMessage> = messages.drain(..split_at).collect();
         let compressed_count = older.len();
 
@@ -334,6 +365,80 @@ mod tests {
         ];
         let report = mgr.compress(&mut history);
         assert!(report.did_compress);
-        assert!(history[0].content.contains("TAG:2"));
+        // The trailing user message is folded in too (the boundary snaps to an
+        // assistant turn), so all three earlier messages are summarized.
+        assert!(history[0].content.contains("TAG:3"));
+    }
+
+    #[test]
+    fn compress_snaps_boundary_to_assistant_and_keeps_tool_pairs_intact() {
+        use crate::ToolResultBlock;
+        use crate::agent_loop::ToolCall;
+
+        let cfg = ContextWindowConfig {
+            max_tokens: 10_000,
+            soft_tokens: 1,
+            window_size: 3,
+            summary_prefix: "[s]".into(),
+        };
+        let mgr = ContextWindowManager::new(cfg);
+
+        let mut tool_use = msg(MessageRole::Assistant, "calling a tool");
+        tool_use.tool_calls = vec![ToolCall::new("call-1", "Read", serde_json::json!({}))];
+        let mut tool_result = msg(MessageRole::User, "");
+        tool_result.tool_results = vec![ToolResultBlock::new("call-1", "file contents", false)];
+
+        // user, assistant(tool_use), user(tool_result), assistant(reply), user(follow up)
+        let mut history = vec![
+            msg(MessageRole::User, "open the file"),
+            tool_use,
+            tool_result,
+            msg(MessageRole::Assistant, "here is the summary"),
+            msg(MessageRole::User, "thanks"),
+        ];
+
+        // window_size=3 → raw boundary at index 2 (the tool_result, a user
+        // message); it must snap forward to the assistant at index 3.
+        let report = mgr.force_compress(&mut history);
+        assert!(report.did_compress);
+
+        // First kept message is the synthetic user summary; the next must be an
+        // assistant so user → assistant alternation holds on the wire.
+        assert_eq!(history[0].role, MessageRole::User);
+        assert!(history[0].content.starts_with("[s]"));
+        assert_eq!(history[1].role, MessageRole::Assistant);
+
+        // The tool_result was folded into the summary alongside its tool_use —
+        // no orphaned tool_result survives in the kept window.
+        assert!(
+            history.iter().all(|m| m.tool_results.is_empty()),
+            "tool_results must not be orphaned after compaction"
+        );
+    }
+
+    #[test]
+    fn force_compress_ignores_soft_threshold_but_needs_older_messages() {
+        let cfg = ContextWindowConfig {
+            max_tokens: 1_000_000,
+            soft_tokens: 1_000_000,
+            window_size: 2,
+            summary_prefix: "[s]".into(),
+        };
+        let mgr = ContextWindowManager::new(cfg);
+
+        // Below the soft threshold: regular compress is a no-op...
+        let mut history = vec![
+            msg(MessageRole::User, "one"),
+            msg(MessageRole::Assistant, "two"),
+            msg(MessageRole::User, "three"),
+            msg(MessageRole::Assistant, "four"),
+        ];
+        assert!(!mgr.compress(&mut history.clone()).did_compress);
+        // ...but a forced compact still runs because there are older messages.
+        assert!(mgr.force_compress(&mut history).did_compress);
+
+        // Nothing to do when the whole transcript fits in the window.
+        let mut tiny = vec![msg(MessageRole::User, "hi")];
+        assert!(!mgr.force_compress(&mut tiny).did_compress);
     }
 }
