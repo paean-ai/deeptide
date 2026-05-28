@@ -315,12 +315,12 @@ fn agent_loop_snip_tool_trims_active_message_history() {
             .content
             .starts_with("[context trimmed by Snip:")
     );
-    assert!(
-        loop_
-            .messages()
+    assert!(loop_.messages().iter().any(|message| {
+        message
+            .tool_results
             .iter()
-            .any(|message| message.content.contains("[tool_result id=toolu_snip"))
-    );
+            .any(|block| block.tool_use_id == "toolu_snip")
+    }));
 }
 
 #[test]

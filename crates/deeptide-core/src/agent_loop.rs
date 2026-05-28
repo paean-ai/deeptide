@@ -15,7 +15,19 @@ pub enum MessageRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationMessage {
     pub role: MessageRole,
+    /// Free-form text payload. Empty when the message only carries
+    /// structured `tool_calls` / `tool_results` blocks (Anthropic still
+    /// requires a non-empty `content` array — the wire layer will skip the
+    /// text block when this is empty).
     pub content: String,
+    /// Tool invocations produced by the assistant in this turn. Preserved so
+    /// the next API request can re-send the corresponding `tool_use` blocks
+    /// alongside the assistant's text — Anthropic rejects conversations where
+    /// a `tool_use` is not immediately followed by matching `tool_result`s.
+    pub tool_calls: Vec<ToolCall>,
+    /// Tool results synthesised by the agent loop for the next user turn,
+    /// carrying the matching `tool_use_id` Anthropic expects.
+    pub tool_results: Vec<ToolResultBlock>,
 }
 
 impl ConversationMessage {
@@ -23,6 +35,8 @@ impl ConversationMessage {
         Self {
             role: MessageRole::User,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
         }
     }
 
@@ -30,6 +44,55 @@ impl ConversationMessage {
         Self {
             role: MessageRole::Assistant,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+        }
+    }
+
+    /// Build an assistant turn that emitted both free-form text *and* one or
+    /// more `tool_use` blocks. The text may be empty if the assistant only
+    /// emitted tool calls.
+    pub fn assistant_with_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCall>,
+    ) -> Self {
+        Self {
+            role: MessageRole::Assistant,
+            content: content.into(),
+            tool_calls,
+            tool_results: Vec::new(),
+        }
+    }
+
+    /// Build a user turn whose sole purpose is to deliver `tool_result` blocks
+    /// back to the model. The text body is intentionally empty so the wire
+    /// layer emits a pure tool_result content array.
+    pub fn tool_results(blocks: Vec<ToolResultBlock>) -> Self {
+        Self {
+            role: MessageRole::User,
+            content: String::new(),
+            tool_calls: Vec::new(),
+            tool_results: blocks,
+        }
+    }
+}
+
+/// Structured tool-result payload mirroring Anthropic's `tool_result` content
+/// block. Stored on the user-role `ConversationMessage` synthesised after each
+/// batch of tool executions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultBlock {
+    pub tool_use_id: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+impl ToolResultBlock {
+    pub fn new(tool_use_id: impl Into<String>, content: impl Into<String>, is_error: bool) -> Self {
+        Self {
+            tool_use_id: tool_use_id.into(),
+            content: content.into(),
+            is_error,
         }
     }
 }
@@ -239,7 +302,11 @@ impl AgentLoop {
                         ));
                     }
 
-                    let assistant_message = ConversationMessage::assistant(response.content);
+                    let tool_calls_for_message = response.tool_calls.clone();
+                    let assistant_message = ConversationMessage::assistant_with_tool_calls(
+                        response.content,
+                        tool_calls_for_message,
+                    );
                     self.messages.push(assistant_message.clone());
                     events.push(AgentLoopEvent::Assistant(assistant_message));
 
@@ -284,16 +351,22 @@ impl AgentLoop {
                         failed_count,
                     });
 
+                    let mut result_blocks = Vec::with_capacity(tool_results.len());
                     for (tool_call, content, is_error) in tool_results {
                         events.push(AgentLoopEvent::ToolResult {
                             tool_call: tool_call.clone(),
                             content: content.clone(),
                             is_error,
                         });
-                        self.messages.push(ConversationMessage::user(format!(
-                            "[tool_result id={} name={} is_error={}]\n{}",
-                            tool_call.id, tool_call.name, is_error, content
-                        )));
+                        result_blocks.push(ToolResultBlock::new(
+                            tool_call.id.clone(),
+                            content,
+                            is_error,
+                        ));
+                    }
+                    if !result_blocks.is_empty() {
+                        self.messages
+                            .push(ConversationMessage::tool_results(result_blocks));
                     }
                 }
                 Err(error) => {

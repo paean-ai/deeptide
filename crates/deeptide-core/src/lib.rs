@@ -15,7 +15,7 @@ pub mod tui;
 
 pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
-    AgentUsage, ConversationMessage, LocalEchoBackend, MessageRole, ToolCall,
+    AgentUsage, ConversationMessage, LocalEchoBackend, MessageRole, ToolCall, ToolResultBlock,
 };
 pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig};
 pub use commands::{
