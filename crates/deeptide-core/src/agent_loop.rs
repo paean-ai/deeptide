@@ -195,6 +195,9 @@ pub enum AgentTerminalEvent {
     Complete,
     MaxTurnsReached,
     ModelError(String),
+    /// The transcript exceeded the model's hard context limit even after
+    /// compaction, so the run was stopped rather than issuing a doomed request.
+    Blocked,
 }
 
 pub trait AgentBackend: Send {
@@ -206,6 +209,11 @@ pub type SubAgentBackendFactory = Arc<dyn Fn(&str) -> Box<dyn AgentBackend> + Se
 /// Fallback context-window budget when the model is unknown. Matches
 /// [`ContextWindowConfig::default`] and Swift's `forModel` default.
 const DEFAULT_CONTEXT_WINDOW: usize = 128_000;
+
+/// Compact once the transcript exceeds this many messages, even when it is
+/// still under the token threshold. Matches Swift's
+/// `CompactionManager.maxMessagesBeforeCompact`.
+const MAX_MESSAGES_BEFORE_COMPACT: usize = 200;
 
 pub struct AgentLoop {
     backend: Box<dyn AgentBackend>,
@@ -371,11 +379,15 @@ impl AgentLoop {
         let mut events = vec![AgentLoopEvent::User(user_message)];
 
         loop {
-            // Auto-compact the transcript before assembling the next request
-            // when it exceeds the context-window threshold, mirroring the Swift
-            // turn loop's checkAndCompact step. A PreCompact hook fires after a
-            // compaction actually happens (observational).
-            let report = self.context_window.compress(&mut self.messages);
+            // Auto-compact the transcript before assembling the next request,
+            // mirroring the Swift turn loop's checkAndCompact step: compress
+            // when over the token threshold, or when the message count alone
+            // grows too large. A PreCompact hook fires after a compaction
+            // actually happens (observational).
+            let mut report = self.context_window.compress(&mut self.messages);
+            if !report.did_compress && self.messages.len() > MAX_MESSAGES_BEFORE_COMPACT {
+                report = self.context_window.force_compress(&mut self.messages);
+            }
             if report.did_compress {
                 events.push(AgentLoopEvent::Compaction(report));
                 if self.hooks.has_hooks(crate::hooks::HookEvent::PreCompact) {
@@ -383,6 +395,14 @@ impl AgentLoop {
                         .hooks
                         .run(crate::hooks::HookEvent::PreCompact, None, None);
                 }
+            }
+
+            // Circuit breaker: if the transcript is still over the hard limit
+            // after compaction, stop instead of issuing a request the model
+            // will reject. Mirrors Swift's isBlocked terminal.
+            if self.context_window.is_blocked(&self.messages) {
+                events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::Blocked));
+                return events;
             }
 
             if self.current_run_step >= self.max_turns {
