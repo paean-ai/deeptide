@@ -38,6 +38,45 @@ fn read_tool_reads_text_file_with_line_numbers() {
 }
 
 #[test]
+fn read_tools_block_sensitive_files_until_opened() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join(".env"), "API_KEY=super-secret\n").expect("write .env");
+    std::fs::write(temp.path().join("notes.txt"), "ok\n").expect("write notes");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(temp.path());
+
+    // Read refuses the sensitive file and points the user at /open.
+    let blocked = registry.call("Read", serde_json::json!({"file_path": ".env"}), &context);
+    assert!(blocked.is_error, "reading .env should be blocked");
+    assert!(blocked.content.contains("sensitive"));
+    assert!(blocked.content.contains("/open"));
+    assert!(
+        !blocked.content.contains("super-secret"),
+        "the secret value must not leak in the denial"
+    );
+
+    // ReadFiles denies the sensitive entry per-file but still reads the rest.
+    let multi = registry.call(
+        "ReadFiles",
+        serde_json::json!({"paths": [".env", "notes.txt"]}),
+        &context,
+    );
+    assert!(multi.content.contains("sensitive"));
+    assert!(!multi.content.contains("super-secret"));
+    assert!(
+        multi.content.contains("ok"),
+        "non-sensitive file still read"
+    );
+
+    // After /open marks it readable, Read succeeds. Mark the same resolved
+    // path the Read tool computes so normalization can't cause a mismatch.
+    deeptide_core::sensitive_file::mark_open(&context.resolve_path(".env"));
+    let allowed = registry.call("Read", serde_json::json!({"file_path": ".env"}), &context);
+    assert!(!allowed.is_error, "opened .env should read");
+    assert!(allowed.content.contains("API_KEY=super-secret"));
+}
+
+#[test]
 fn read_tool_respects_offset_and_limit() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("notes.txt");

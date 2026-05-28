@@ -191,6 +191,9 @@ impl Tool for ReadTool {
         }
 
         let path = context.resolve_path(file_path);
+        if !crate::sensitive_file::is_allowed(&path) {
+            return ToolResult::error(crate::sensitive_file::denial_message(&path));
+        }
         let offset = input
             .get("offset")
             .and_then(serde_json::Value::as_u64)
@@ -270,6 +273,13 @@ impl Tool for ReadFilesTool {
                 continue;
             };
             let path = context.resolve_path(file_path);
+            if !crate::sensitive_file::is_allowed(&path) {
+                sections.push(format!(
+                    "===== {file_path} =====\n[Error: {}]",
+                    crate::sensitive_file::denial_message(&path)
+                ));
+                continue;
+            }
             let section = match read_text_file_limited(&path, Some(2_000)) {
                 Ok(content) => format!("===== {file_path} =====\n{content}"),
                 Err(message) => format!("===== {file_path} =====\n[Error: {message}]"),
