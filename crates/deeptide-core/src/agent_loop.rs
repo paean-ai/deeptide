@@ -229,6 +229,12 @@ pub struct AgentLoop {
     system_prompt: Option<String>,
     context_window: ContextWindowManager,
     hooks: crate::hooks::HookEngine,
+    /// When `Some`, only these tools may be called (allowlist). `None` allows
+    /// every tool. Mirrors a sub-agent definition's `allowedTools`.
+    allowed_tools: Option<Vec<String>>,
+    /// Tools that may never be called, even if present in `allowed_tools`.
+    /// Mirrors a sub-agent definition's `disallowedTools`.
+    disallowed_tools: Vec<String>,
 }
 
 impl AgentLoop {
@@ -250,6 +256,8 @@ impl AgentLoop {
             system_prompt: None,
             context_window: ContextWindowManager::new(ContextWindowConfig::default()),
             hooks: crate::hooks::HookEngine::empty(),
+            allowed_tools: None,
+            disallowed_tools: Vec::new(),
         }
     }
 
@@ -258,6 +266,31 @@ impl AgentLoop {
     pub fn with_hooks(mut self, hooks: crate::hooks::HookEngine) -> Self {
         self.hooks = hooks;
         self
+    }
+
+    /// Restrict which tools this loop may call, mirroring a sub-agent
+    /// definition's `allowedTools`/`disallowedTools`. `allowed = None` permits
+    /// every tool except those in `disallowed`; `allowed = Some(list)` permits
+    /// only `list` minus `disallowed`.
+    pub fn with_tool_restrictions(
+        mut self,
+        allowed: Option<Vec<String>>,
+        disallowed: Vec<String>,
+    ) -> Self {
+        self.allowed_tools = allowed;
+        self.disallowed_tools = disallowed;
+        self
+    }
+
+    /// Whether `tool` may be called under the configured restrictions. Uses the
+    /// same logic as the Swift `AgentDefinition.filterTools`.
+    fn is_tool_permitted(&self, tool: &str) -> bool {
+        if let Some(allowed) = &self.allowed_tools
+            && !allowed.iter().any(|name| name == tool)
+        {
+            return false;
+        }
+        !self.disallowed_tools.iter().any(|name| name == tool)
     }
 
     /// Compact the in-memory transcript on demand (the `/compact` command),
@@ -571,6 +604,16 @@ impl AgentLoop {
     }
 
     fn execute_tool_call(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
+        // Enforce sub-agent tool restrictions before any dispatch (including the
+        // special-cased EnterPlanMode/ExitPlanMode/Agent/Brief/Snip/CtxInspect
+        // paths), so a restricted agent cannot reach a forbidden tool.
+        if !self.is_tool_permitted(&tool_call.name) {
+            return crate::ToolResult::error(format!(
+                "Tool {} is not available to this agent.",
+                tool_call.name
+            ));
+        }
+
         if tool_call.name == "EnterPlanMode" {
             return self.execute_plan_mode_transition(tool_call, PermissionMode::Plan);
         }
@@ -660,11 +703,22 @@ impl AgentLoop {
         } else {
             self.permission_manager.mode()
         };
+        let allowed_tools = invocation
+            .definition
+            .allowed_tools
+            .map(|tools| tools.iter().map(|tool| (*tool).to_owned()).collect());
+        let disallowed_tools = invocation
+            .definition
+            .disallowed_tools
+            .iter()
+            .map(|tool| (*tool).to_owned())
+            .collect();
         let mut subagent = AgentLoop::new(factory(&subagent_model))
             .with_model(subagent_model.clone())
             .with_max_turns(invocation.definition.max_turns)
             .with_cwd(self.tool_context.cwd.clone())
-            .with_permission_mode(permission_mode);
+            .with_permission_mode(permission_mode)
+            .with_tool_restrictions(allowed_tools, disallowed_tools);
         let events = subagent.run(format!(
             "Sub-agent task: {}\n\n{}",
             invocation.description, invocation.prompt
