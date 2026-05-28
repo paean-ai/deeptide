@@ -90,7 +90,62 @@ fn read_tool_respects_offset_and_limit() {
     );
 
     assert!(!result.is_error);
+    // An explicit limit truncates silently — no continuation notice is added.
     assert_eq!(result.content, "2\tbeta\n3\tgamma");
+}
+
+#[test]
+fn read_tool_applies_default_line_limit_and_reports_continuation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut body = String::new();
+    for n in 1..=2_050 {
+        body.push_str(&format!("line {n}\n"));
+    }
+    std::fs::write(temp.path().join("big.txt"), body).expect("write fixture");
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let result = registry.call(
+        "Read",
+        serde_json::json!({"file_path": "big.txt"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("1\tline 1"));
+    assert!(result.content.contains("2000\tline 2000"));
+    // The default limit stops at 2000 lines and never reaches 2001.
+    assert!(!result.content.contains("2001\tline 2001"));
+    assert!(
+        result
+            .content
+            .contains("Read stopped at the default 2000-line limit")
+    );
+    assert!(result.content.contains("offset: 2001"));
+}
+
+#[test]
+fn read_tool_rejects_output_exceeding_token_cap() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    // ~1500 lines of 100 chars ≈ 150k chars ≈ 37k tokens, over the 25k cap but
+    // within the 2000-line window so the token guard is what trips.
+    let mut body = String::new();
+    let filler = "x".repeat(100);
+    for _ in 0..1_500 {
+        body.push_str(&filler);
+        body.push('\n');
+    }
+    std::fs::write(temp.path().join("wide.txt"), body).expect("write fixture");
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let result = registry.call(
+        "Read",
+        serde_json::json!({"file_path": "wide.txt"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error, "oversized output should be an error");
+    assert!(result.content.contains("too large to return safely"));
+    assert!(result.content.contains("Grep"));
 }
 
 #[test]

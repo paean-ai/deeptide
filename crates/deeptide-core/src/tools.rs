@@ -9635,25 +9635,17 @@ impl Tool for EditTool {
     }
 }
 
-fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> ToolResult {
-    let content = match read_text_file_limited(path, None) {
-        Ok(content) => content,
-        Err(message) => return ToolResult::error(message),
-    };
+/// Default number of lines a single `Read` returns when no explicit limit is
+/// given, matching the Swift `FileReadTool.defaultLineLimit`.
+const DEFAULT_READ_LINES: usize = 2_000;
+/// Maximum estimated tokens a single `Read` will return. Above this the tool
+/// reports an error with guidance rather than flooding the context, matching
+/// the Swift `FileReadTool.maxTextOutputTokens`.
+const MAX_READ_OUTPUT_TOKENS: usize = 25_000;
 
-    let start = offset.unwrap_or(1).saturating_sub(1);
-    let needed = limit.unwrap_or(usize::MAX);
-    let output = content
-        .lines()
-        .skip(start)
-        .take(needed)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    ToolResult::text(output)
-}
-
-fn read_text_file_limited(path: &Path, line_limit: Option<usize>) -> Result<String, String> {
+/// Validate that `path` is a readable regular file and open it, returning the
+/// same not-found / directory / special-file errors the Read tools surface.
+fn open_readable_file(path: &Path) -> Result<fs::File, String> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -9681,12 +9673,74 @@ fn read_text_file_limited(path: &Path, line_limit: Option<usize>) -> Result<Stri
         return Err(unsupported_special_file_message(path, kind, metadata.len()));
     }
 
-    let file = match fs::File::open(path) {
+    fs::File::open(path).map_err(|error| format!("Failed to open {}: {error}", path.display()))
+}
+
+fn read_text_file(path: &Path, offset: Option<usize>, limit: Option<usize>) -> ToolResult {
+    let file = match open_readable_file(path) {
         Ok(file) => file,
-        Err(error) => {
-            return Err(format!("Failed to open {}: {error}", path.display()));
-        }
+        Err(message) => return ToolResult::error(message),
     };
+
+    let start = offset.unwrap_or(1).saturating_sub(1);
+    let requested_limit = limit.unwrap_or(DEFAULT_READ_LINES).max(1);
+
+    let mut selected = Vec::new();
+    let mut line_number = 0usize;
+    let mut has_more = false;
+    for line in io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                return ToolResult::error(format!("Failed to read {}: {error}", path.display()));
+            }
+        };
+        line_number += 1;
+        if line_number <= start {
+            continue;
+        }
+        if selected.len() < requested_limit {
+            selected.push((line_number, line));
+        } else {
+            // We read one line past the window, so more content remains.
+            has_more = true;
+            break;
+        }
+    }
+
+    let output = selected
+        .iter()
+        .map(|(line_number, line)| format!("{line_number}\t{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Never silently crop: if the selected range is too large, tell the model
+    // exactly how to narrow the read instead of returning a flood of tokens.
+    let tokens = estimate_tokens(&output);
+    if tokens > MAX_READ_OUTPUT_TOKENS {
+        let end_hint = start + selected.len().max(1);
+        return ToolResult::error(format!(
+            "File content for {} is too large to return safely ({tokens} estimated tokens; max {MAX_READ_OUTPUT_TOKENS}).\nUse offset and limit to read a smaller range, or use Grep to locate specific content first.\nAttempted range: lines {}-{end_hint}.",
+            path.display(),
+            start + 1
+        ));
+    }
+
+    // Only advise continuation when the default limit kicked in. An explicit
+    // `limit` is a deliberate truncation, so the model already knows more may
+    // remain and a trailing notice would only distort result summaries.
+    if has_more && limit.is_none() {
+        let next_offset = start + selected.len() + 1;
+        return ToolResult::text(format!(
+            "{output}\n\n[Read stopped at the default {DEFAULT_READ_LINES}-line limit. More content may exist. Continue with offset: {next_offset}, limit: {DEFAULT_READ_LINES}, or use Grep to search within the file.]"
+        ));
+    }
+
+    ToolResult::text(output)
+}
+
+fn read_text_file_limited(path: &Path, line_limit: Option<usize>) -> Result<String, String> {
+    let file = open_readable_file(path)?;
 
     let mut selected = Vec::new();
     let mut total_lines = 0usize;
