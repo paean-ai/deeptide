@@ -58,6 +58,7 @@ pub struct ReplSession {
     additional_dirs: Vec<std::path::PathBuf>,
     provider_profile: ProviderProfile,
     debug_enabled: bool,
+    fast_mode: bool,
     tps_samples: Vec<crate::tps::TpsSample>,
     tps_store_dir: Option<std::path::PathBuf>,
     active_goal: Option<String>,
@@ -119,6 +120,7 @@ impl ReplSession {
             additional_dirs: Vec::new(),
             provider_profile: ProviderProfile::Legacy,
             debug_enabled: false,
+            fast_mode: false,
             tps_samples: Vec::new(),
             tps_store_dir: None,
             active_goal: None,
@@ -174,6 +176,19 @@ impl ReplSession {
     /// cost diagnostics; `/debug` toggles it at runtime.
     pub fn with_debug(mut self, debug: bool) -> Self {
         self.debug_enabled = debug;
+        self
+    }
+
+    /// Enable fast mode (the `--fast` flag / `fast_mode` config). Same model,
+    /// biased toward faster/terser output via a system-prompt hint, mirroring
+    /// the Swift implementation's fast-mode prompt section.
+    pub fn with_fast_mode(mut self, fast: bool) -> Self {
+        self.fast_mode = fast;
+        if fast {
+            let base = self.agent_loop.system_prompt().unwrap_or("").to_owned();
+            let prompt = format!("{base}\n\n{FAST_MODE_PROMPT}");
+            self.agent_loop = self.agent_loop.with_system_prompt(prompt);
+        }
         self
     }
 
@@ -521,9 +536,17 @@ impl ReplSession {
             return CommandResult::Text(String::from("Usage: /fast"));
         }
 
-        CommandResult::Text(String::from(
-            "Fast mode: use the --fast CLI flag at launch. Runtime toggle coming in a future update.",
-        ))
+        if self.fast_mode {
+            CommandResult::Text(String::from(
+                "Fast mode is ON: same model, biased toward faster/terser output. \
+                 Set at launch with --fast or `fast_mode: true` in settings.json.",
+            ))
+        } else {
+            CommandResult::Text(String::from(
+                "Fast mode is OFF. Enable it with --fast at launch or `fast_mode: true` \
+                 in settings.json (same model, faster/terser output).",
+            ))
+        }
     }
 
     fn execute_tps_command(&mut self, args: &str) -> CommandResult {
@@ -1616,6 +1639,10 @@ impl ReplSession {
 }
 
 const MAX_GOAL_CONTINUATION_TURNS: usize = 20;
+
+/// System-prompt hint appended when fast mode is enabled. Mirrors the Swift
+/// implementation's fast-mode section.
+const FAST_MODE_PROMPT: &str = "- Fast mode for Deeptide uses the same model with faster output. It does NOT switch to a different model. It can be toggled with /fast.";
 
 fn default_editor() -> String {
     // On Windows, default to notepad when no $EDITOR is set.

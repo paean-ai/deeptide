@@ -101,6 +101,30 @@ fn repl_tps_persists_across_sessions_with_store_dir() {
 }
 
 #[test]
+fn repl_fast_mode_adds_prompt_hint_and_reports_status() {
+    let fast = ReplSession::new(Box::new(StaticBackend)).with_fast_mode(true);
+    assert!(
+        fast.agent_loop()
+            .system_prompt()
+            .is_some_and(|prompt| prompt.contains("Fast mode for Deeptide")),
+        "enabling fast mode should append the fast-mode system-prompt hint"
+    );
+
+    let mut fast = fast;
+    assert!(only_output(fast.submit("/fast")).contains("Fast mode is ON"));
+
+    // Default session does not get the hint and reports OFF.
+    let mut plain = ReplSession::new(Box::new(StaticBackend));
+    assert!(
+        !plain
+            .agent_loop()
+            .system_prompt()
+            .is_some_and(|prompt| prompt.contains("Fast mode for Deeptide"))
+    );
+    assert!(only_output(plain.submit("/fast")).contains("Fast mode is OFF"));
+}
+
+#[test]
 fn repl_without_debug_emits_no_diagnostics() {
     let mut repl = ReplSession::new(Box::new(StaticBackend));
 
@@ -377,14 +401,10 @@ fn repl_swift_parity_convenience_commands_are_available() {
         assert!(help.contains(command), "help should list {command}");
     }
 
-    assert_eq!(
-        only_output(repl.submit("/fast")),
-        "Fast mode: use the --fast CLI flag at launch. Runtime toggle coming in a future update."
-    );
-    assert_eq!(
-        only_output(repl.submit("/faster")),
-        "Fast mode: use the --fast CLI flag at launch. Runtime toggle coming in a future update."
-    );
+    // Default session: fast mode is off, and the message no longer references a
+    // nonexistent flag.
+    assert!(only_output(repl.submit("/fast")).contains("Fast mode is OFF"));
+    assert!(only_output(repl.submit("/faster")).contains("Fast mode is OFF"));
     assert_eq!(only_output(repl.submit("/debug")), "Debug mode: on");
     assert_eq!(only_output(repl.submit("/dbg")), "Debug mode: off");
 
