@@ -58,6 +58,121 @@ impl StatusLine {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputState {
+    value: String,
+    cursor: usize,
+}
+
+impl InputState {
+    pub fn new(value: impl Into<String>) -> Self {
+        let value = value.into();
+        let cursor = value.chars().count();
+        Self { value, cursor }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            value: String::new(),
+            cursor: 0,
+        }
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    pub fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.char_len());
+    }
+
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor = self.char_len();
+    }
+
+    pub fn insert_char(&mut self, ch: char) {
+        self.insert_str(&ch.to_string());
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    pub fn insert_str(&mut self, text: &str) {
+        let byte_index = self.byte_index(self.cursor);
+        self.value.insert_str(byte_index, text);
+        self.cursor += text.chars().count();
+    }
+
+    pub fn backspace(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+
+        let start = self.byte_index(self.cursor - 1);
+        let end = self.byte_index(self.cursor);
+        self.value.replace_range(start..end, "");
+        self.cursor -= 1;
+        true
+    }
+
+    pub fn delete(&mut self) -> bool {
+        if self.cursor >= self.char_len() {
+            return false;
+        }
+
+        let start = self.byte_index(self.cursor);
+        let end = self.byte_index(self.cursor + 1);
+        self.value.replace_range(start..end, "");
+        true
+    }
+
+    pub fn input_bar(&self, prompt: impl Into<String>, hint: Option<String>) -> InputBar {
+        InputBar {
+            prompt: prompt.into(),
+            value: self.value.clone(),
+            cursor: self.cursor,
+            hint,
+        }
+    }
+
+    fn char_len(&self) -> usize {
+        self.value.chars().count()
+    }
+
+    fn byte_index(&self, char_index: usize) -> usize {
+        if char_index == self.char_len() {
+            return self.value.len();
+        }
+        self.value
+            .char_indices()
+            .nth(char_index)
+            .map(|(index, _)| index)
+            .unwrap_or(self.value.len())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputBar {
     pub prompt: String,
     pub value: String,
@@ -75,13 +190,13 @@ impl InputBar {
         let width = width.max(12);
         let cursor = self.cursor.min(self.value.chars().count());
         let mut content = self.prompt.clone();
-        let cursor_cell = if self.value.is_empty() {
-            display_width(&content)
+        let cursor_char = if self.value.is_empty() {
+            content.chars().count()
         } else {
             content.push_str(&take_chars(&self.value, cursor));
-            let cell = display_width(&content);
+            let char_index = content.chars().count();
             content.push_str(&skip_chars(&self.value, cursor));
-            cell
+            char_index
         };
 
         if self.value.is_empty()
@@ -94,7 +209,7 @@ impl InputBar {
             content = self.prompt.clone();
         }
 
-        let wrapped = wrap_line_with_cursor(&content, width, cursor_cell);
+        let wrapped = wrap_text_with_cursor(&content, width, cursor_char);
         InputLayout {
             lines: wrapped.lines,
             cursor_row: wrapped.cursor_row,
@@ -226,6 +341,73 @@ struct WrappedLine {
 
 fn wrap_line(line: &str, width: usize) -> Vec<String> {
     wrap_line_with_cursor(line, width, usize::MAX).lines
+}
+
+fn wrap_text_with_cursor(text: &str, width: usize, cursor_char: usize) -> WrappedLine {
+    let mut lines = Vec::new();
+    let mut cursor_position = None;
+    let mut segment = String::new();
+    let mut segment_start = 0;
+    let cursor_char = cursor_char.min(text.chars().count());
+
+    for (char_index, ch) in text.chars().enumerate() {
+        if ch == '\n' {
+            append_wrapped_segment(
+                &mut lines,
+                &mut cursor_position,
+                &segment,
+                width,
+                segment_start,
+                cursor_char,
+            );
+            segment.clear();
+            segment_start = char_index + 1;
+        } else {
+            segment.push(ch);
+        }
+    }
+
+    append_wrapped_segment(
+        &mut lines,
+        &mut cursor_position,
+        &segment,
+        width,
+        segment_start,
+        cursor_char,
+    );
+
+    let last_row = lines.len().saturating_sub(1);
+    let fallback_col = lines.last().map(|line| display_width(line)).unwrap_or(0);
+    let (cursor_row, cursor_col) = cursor_position.unwrap_or((last_row, fallback_col));
+    WrappedLine {
+        lines,
+        cursor_row,
+        cursor_col,
+    }
+}
+
+fn append_wrapped_segment(
+    lines: &mut Vec<String>,
+    cursor_position: &mut Option<(usize, usize)>,
+    segment: &str,
+    width: usize,
+    segment_start: usize,
+    cursor_char: usize,
+) {
+    let segment_len = segment.chars().count();
+    let cursor_cell = if cursor_char >= segment_start && cursor_char <= segment_start + segment_len
+    {
+        display_width(&take_chars(segment, cursor_char - segment_start))
+    } else {
+        usize::MAX
+    };
+
+    let wrapped = wrap_line_with_cursor(segment, width, cursor_cell);
+    let row_offset = lines.len();
+    if cursor_cell != usize::MAX && cursor_position.is_none() {
+        *cursor_position = Some((row_offset + wrapped.cursor_row, wrapped.cursor_col));
+    }
+    lines.extend(wrapped.lines);
 }
 
 fn wrap_line_with_cursor(line: &str, width: usize, cursor_cell: usize) -> WrappedLine {
@@ -383,7 +565,8 @@ fn strip_ansi(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        InputBar, StatusLine, StatusSegment, TranscriptItem, TuiFrame, render_output_panel,
+        InputBar, InputState, StatusLine, StatusSegment, TranscriptItem, TuiFrame,
+        render_output_panel,
     };
 
     #[test]
@@ -462,6 +645,71 @@ mod tests {
         assert_eq!(layout.lines, vec!["deeptide> 输入任务".to_owned()]);
         assert_eq!(layout.cursor_row, 0);
         assert_eq!(layout.cursor_col, "deeptide> ".len());
+    }
+
+    #[test]
+    fn input_bar_places_cursor_after_explicit_newline() {
+        let input = InputBar {
+            prompt: "deeptide> ".to_owned(),
+            value: "first\n你好".to_owned(),
+            cursor: 7,
+            hint: None,
+        };
+
+        let layout = input.layout(80);
+
+        assert_eq!(
+            layout.lines,
+            vec!["deeptide> first".to_owned(), "你好".to_owned()]
+        );
+        assert_eq!(layout.cursor_row, 1);
+        assert_eq!(layout.cursor_col, 2);
+    }
+
+    #[test]
+    fn input_state_inserts_and_moves_across_cjk_text() {
+        let mut input = InputState::new("你好");
+
+        input.move_left();
+        input.insert_char('，');
+        input.insert_str("世界");
+
+        assert_eq!(input.value(), "你，世界好");
+        assert_eq!(input.cursor(), 4);
+    }
+
+    #[test]
+    fn input_state_backspace_and_delete_keep_unicode_boundaries() {
+        let mut input = InputState::new("a你b");
+
+        input.move_left();
+        assert!(input.backspace());
+        assert_eq!(input.value(), "ab");
+        assert_eq!(input.cursor(), 1);
+        assert!(input.delete());
+        assert_eq!(input.value(), "a");
+        assert!(!input.delete());
+    }
+
+    #[test]
+    fn input_state_supports_newlines_and_input_bar_projection() {
+        let mut input = InputState::empty();
+
+        input.insert_str("line one");
+        input.insert_newline();
+        input.insert_str("第二行");
+
+        let bar = input.input_bar("deeptide> ", None);
+        let layout = bar.layout(80);
+
+        assert_eq!(input.value(), "line one\n第二行");
+        assert_eq!(input.cursor(), 12);
+        assert_eq!(
+            layout.lines,
+            vec!["deeptide> line one".to_owned(), "第二行".to_owned()]
+        );
+        assert_eq!(layout.cursor_row, 1);
+        assert_eq!(layout.cursor_col, 6);
     }
 
     #[test]
