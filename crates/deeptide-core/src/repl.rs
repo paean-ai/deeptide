@@ -58,6 +58,8 @@ pub struct ReplSession {
     additional_dirs: Vec<std::path::PathBuf>,
     provider_profile: ProviderProfile,
     debug_enabled: bool,
+    tps_samples: Vec<crate::tps::TpsSample>,
+    tps_store_dir: Option<std::path::PathBuf>,
     active_goal: Option<String>,
     session_id: String,
     session_started_at: String,
@@ -76,6 +78,8 @@ impl ReplSession {
             additional_dirs: Vec::new(),
             provider_profile: ProviderProfile::Legacy,
             debug_enabled: false,
+            tps_samples: Vec::new(),
+            tps_store_dir: None,
             active_goal: None,
             session_id: new_session_id(),
             session_started_at: time::OffsetDateTime::now_utc()
@@ -114,6 +118,30 @@ impl ReplSession {
         self
     }
 
+    pub fn with_pricing_overrides(
+        mut self,
+        overrides: std::collections::HashMap<String, crate::ModelPricing>,
+    ) -> Self {
+        self.agent_loop = self.agent_loop.with_pricing_overrides(overrides);
+        self
+    }
+
+    /// Set the initial debug-output state (the `--debug` flag / `debug`
+    /// config). When enabled, each prompt is followed by per-turn token and
+    /// cost diagnostics; `/debug` toggles it at runtime.
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug_enabled = debug;
+        self
+    }
+
+    /// Persist TPS samples to `dir` so `/tps` reports throughput across
+    /// sessions. When unset (the default), `/tps` reflects only the current
+    /// session's in-memory samples.
+    pub fn with_tps_store_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.tps_store_dir = Some(dir.into());
+        self
+    }
+
     pub fn with_subagent_backend_factory<F>(mut self, factory: F) -> Self
     where
         F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,
@@ -140,12 +168,37 @@ impl ReplSession {
             return self.execute_command(command_line);
         }
 
-        let events: Vec<ReplEvent> = self
+        let turns_before = self.agent_loop.cost_tracker().summary().turns.len();
+        let mut events: Vec<ReplEvent> = self
             .agent_loop
             .run(trimmed)
             .into_iter()
             .filter_map(agent_event_to_repl_event)
             .collect();
+
+        // Record per-turn throughput and (optionally) emit debug diagnostics
+        // for the turns this run produced, reading the cost summary once.
+        let summary = self.agent_loop.cost_tracker().summary();
+        let new_turns = summary.turns.get(turns_before..).unwrap_or(&[]);
+        for turn in new_turns {
+            if turn.output_tokens > 0 && turn.duration_ms > 0 {
+                let sample = crate::tps::TpsSample {
+                    model: turn.model.clone(),
+                    output_tokens: turn.output_tokens,
+                    duration_ms: turn.duration_ms,
+                };
+                if let Some(dir) = &self.tps_store_dir {
+                    crate::tps::TpsStore::record(dir, &sample);
+                }
+                self.tps_samples.push(sample);
+            }
+        }
+        if self.debug_enabled
+            && let Some(debug) = format_debug_turns(new_turns)
+        {
+            events.push(ReplEvent::Output(debug));
+        }
+
         self.autosave_session();
         events
     }
@@ -193,6 +246,15 @@ impl ReplSession {
 
     pub fn agent_loop(&self) -> &AgentLoop {
         &self.agent_loop
+    }
+
+    /// Return all registered slash-command sources.
+    ///
+    /// Exposes the list so embedders (e.g. the CLI readline helper) can build
+    /// tab-completion candidates without depending on the private
+    /// `repl_command_sources` function.
+    pub fn command_sources(&self) -> Vec<CommandCompletionSource> {
+        repl_command_sources()
     }
 
     fn execute_command(&mut self, command_line: &str) -> Vec<ReplEvent> {
@@ -361,24 +423,34 @@ impl ReplSession {
         ))
     }
 
-    fn execute_tps_command(&self, args: &str) -> CommandResult {
+    fn execute_tps_command(&mut self, args: &str) -> CommandResult {
         let flags = args.split_whitespace().collect::<Vec<_>>();
-        if flags.contains(&"--reset") {
-            return CommandResult::Text(String::from(
-                "No model TPS samples are recorded by the Rust REPL yet.",
-            ));
-        }
-
-        if flags.iter().any(|flag| *flag != "--json") {
+        if flags
+            .iter()
+            .any(|flag| !matches!(*flag, "--json" | "--reset"))
+        {
             return CommandResult::Text(String::from("Usage: /tps [--json | --reset]"));
         }
 
+        if flags.contains(&"--reset") {
+            let cleared = self.tps_samples.len();
+            self.tps_samples.clear();
+            if let Some(dir) = &self.tps_store_dir {
+                crate::tps::TpsStore::reset(dir);
+            }
+            return CommandResult::Text(format!("Cleared {cleared} TPS sample(s)."));
+        }
+
+        // Prefer the persisted (cross-session) store when configured, otherwise
+        // fall back to this session's in-memory samples.
+        let records = match &self.tps_store_dir {
+            Some(dir) => crate::tps::TpsStore::load(dir),
+            None => crate::tps::aggregate(&self.tps_samples),
+        };
         if flags.contains(&"--json") {
-            CommandResult::Text(String::from("[]"))
+            CommandResult::Text(crate::tps::to_json(&records))
         } else {
-            CommandResult::Text(String::from(
-                "No model TPS samples recorded yet. Run a streamed model session to collect speed telemetry.",
-            ))
+            CommandResult::Text(crate::tps::render(&records))
         }
     }
 
@@ -577,22 +649,109 @@ impl ReplSession {
     }
 
     fn execute_config_command(&self, args: &str) -> CommandResult {
-        match args.trim() {
-            "" | "show" => CommandResult::Text(render_config_overview(&self.tool_context.cwd)),
-            _ => CommandResult::Text(String::from(
-                "Usage: /config [show]\nSetting values from the Rust REPL is not available yet; edit the displayed settings files directly.",
-            )),
+        use crate::config::{ConfigScope, ConfigStore};
+
+        let trimmed = args.trim();
+        if trimmed.is_empty() || trimmed == "show" {
+            return CommandResult::Text(ConfigStore::show(&self.tool_context.cwd));
         }
+
+        // /config set key=value [--project | --local]
+        if let Some(rest) = trimmed.strip_prefix("set ") {
+            let rest = rest.trim();
+            let (rest, scope) = if let Some(r) = rest.strip_suffix("--project") {
+                (r.trim(), ConfigScope::Project)
+            } else if let Some(r) = rest.strip_suffix("--local") {
+                (r.trim(), ConfigScope::Local)
+            } else {
+                (rest, ConfigScope::Global)
+            };
+
+            let Some((key, value)) = rest.split_once('=') else {
+                return CommandResult::Text(String::from(
+                    "Usage: /config set key=value [--project | --local]",
+                ));
+            };
+            let (key, value) = (key.trim(), value.trim());
+            let path = ConfigStore::scope_path(scope, &self.tool_context.cwd);
+            return match ConfigStore::set_value(key, value, &path) {
+                Ok(()) => CommandResult::Text(format!("Set {key}={value} in {}", path.display())),
+                Err(e) => CommandResult::Text(format!("Error: {e}")),
+            };
+        }
+
+        // /config unset key [--project | --local]
+        if let Some(rest) = trimmed.strip_prefix("unset ") {
+            let rest = rest.trim();
+            let (key, scope) = if let Some(k) = rest.strip_suffix("--project") {
+                (k.trim(), ConfigScope::Project)
+            } else if let Some(k) = rest.strip_suffix("--local") {
+                (k.trim(), ConfigScope::Local)
+            } else {
+                (rest, ConfigScope::Global)
+            };
+            let path = ConfigStore::scope_path(scope, &self.tool_context.cwd);
+            return match ConfigStore::unset_value(key, &path) {
+                Ok(()) => CommandResult::Text(format!("Removed {key} from {}", path.display())),
+                Err(e) => CommandResult::Text(format!("Error: {e}")),
+            };
+        }
+
+        CommandResult::Text(String::from(
+            "Usage: /config [show | set key=value [--project|--local] | unset key [--project|--local]]",
+        ))
     }
 
     fn execute_hooks_command(&self, args: &str) -> CommandResult {
+        use crate::config::ConfigStore;
+
         if !args.trim().is_empty() {
             return CommandResult::Text(String::from("Usage: /hooks"));
         }
 
-        CommandResult::Text(String::from(
-            "No hooks configured. Add a `hooks` block to settings.json when Rust config persistence lands.",
-        ))
+        let hooks = ConfigStore::load(&self.tool_context.cwd).hooks;
+        let Some(hooks) = hooks else {
+            return CommandResult::Text(String::from(
+                "No hooks configured in settings.json. Add a `hooks` block to enable pre/post-tool hooks.",
+            ));
+        };
+
+        let mut lines = vec![String::from("Configured hooks:")];
+        let mut add = |event: &str, entries: &[crate::config::HookEntry]| {
+            for h in entries {
+                if h.is_disabled() {
+                    continue;
+                }
+                let name = h.name.as_deref().unwrap_or("(unnamed)");
+                lines.push(format!(
+                    "  {event:<18} {name:<20} matcher={} timeout={}ms",
+                    h.matcher,
+                    h.effective_timeout_ms()
+                ));
+                lines.push(format!("    command: {}", h.command));
+            }
+        };
+
+        if let Some(ref v) = hooks.pre_tool_use {
+            add("PreToolUse", v);
+        }
+        if let Some(ref v) = hooks.post_tool_use {
+            add("PostToolUse", v);
+        }
+        if let Some(ref v) = hooks.user_prompt_submit {
+            add("UserPromptSubmit", v);
+        }
+        if let Some(ref v) = hooks.session_start {
+            add("SessionStart", v);
+        }
+        if let Some(ref v) = hooks.session_end {
+            add("SessionEnd", v);
+        }
+
+        if lines.len() == 1 {
+            lines.push(String::from("  (all hooks are disabled)"));
+        }
+        CommandResult::Text(lines.join("\n"))
     }
 
     fn execute_init_command(&self, args: &str) -> CommandResult {
@@ -1375,6 +1534,32 @@ fn build_goal_continuation_prompt(goal: &str) -> String {
     )
 }
 
+/// Format per-turn token and cost diagnostics for the supplied turns. Returns
+/// `None` when there are no turns (e.g. a model error or a backend that
+/// reports no usage), so callers can skip emitting an empty debug line.
+fn format_debug_turns(turns: &[crate::TurnRecord]) -> Option<String> {
+    if turns.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = turns
+        .iter()
+        .map(|turn| {
+            format!(
+                "[debug] turn {} · {} · in {} out {} · cache +{}/{} · {}ms · {}",
+                turn.turn,
+                turn.model,
+                CostTracker::format_tokens(turn.input_tokens),
+                CostTracker::format_tokens(turn.output_tokens),
+                CostTracker::format_tokens(turn.cache_create),
+                CostTracker::format_tokens(turn.cache_read),
+                turn.duration_ms,
+                CostTracker::format_usd(turn.cost_usd),
+            )
+        })
+        .collect();
+    Some(lines.join("\n"))
+}
+
 fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
     match event {
         AgentLoopEvent::Assistant(message) => Some(ReplEvent::Output(message.content)),
@@ -1705,44 +1890,6 @@ fn find_executable(command: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn render_config_overview(cwd: &std::path::Path) -> String {
-    let mut lines = vec![String::from("Settings files:")];
-    for (label, path) in candidate_config_files(cwd) {
-        let status = if path.exists() { "present" } else { "missing" };
-        lines.push(format!("  {label:<8} {status:<7} {}", path.display()));
-    }
-    lines.push(String::new());
-    lines.push(String::from(
-        "Rust config editing is intentionally read-only for now; align cloud API behavior with zero-cli launch environment variables.",
-    ));
-    lines.join("\n")
-}
-
-fn candidate_config_files(cwd: &std::path::Path) -> Vec<(&'static str, std::path::PathBuf)> {
-    let mut files = vec![
-        ("project", cwd.join(".deeptide").join("settings.json")),
-        ("local", cwd.join(".deeptide").join("settings.local.json")),
-    ];
-    if let Some(home) = repl_home_dir() {
-        files.push((
-            "global",
-            home.join(".config").join("tide").join("settings.json"),
-        ));
-    }
-    files
-}
-
-fn repl_home_dir() -> Option<std::path::PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(std::path::PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(std::path::PathBuf::from)
-    }
 }
 
 fn render_status(

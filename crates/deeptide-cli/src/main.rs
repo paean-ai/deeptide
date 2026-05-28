@@ -1,13 +1,24 @@
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{ArgAction, Parser, ValueEnum};
+use deeptide_core::config::ConfigStore;
 use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
-    LocalEchoBackend, ReplEvent, ReplSession, tui,
+    CommandCompletionSource, CompletionEngine, LocalEchoBackend, ModelPricing, ReplEvent,
+    ReplSession, StreamingEvent, StreamingHandler, ThinkingConfig, tui,
 };
+use rustyline::completion::{Completer, Pair};
+use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
+use rustyline::{Context, Editor, Helper};
 
 const DEFAULT_MODEL: &str = "deepseek-v4-pro";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -77,6 +88,38 @@ struct Cli {
     #[arg(long, env = "DEEPTIDE_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
+    #[arg(
+        long,
+        env = "DEEPTIDE_PROFILE",
+        value_name = "NAME",
+        help = "Active provider profile from settings.json `providers`. Falls back to TIDE_PROFILE, then the config's active_profile."
+    )]
+    profile: Option<String>,
+
+    #[arg(
+        long = "fallback-model",
+        env = "DEEPTIDE_FALLBACK_MODEL",
+        value_name = "MODEL",
+        help = "Model to retry with once when the primary model is transiently overloaded (HTTP 529/503)."
+    )]
+    fallback_model: Option<String>,
+
+    #[arg(
+        long,
+        env = "DEEPTIDE_THINKING",
+        value_name = "LEVEL",
+        help = "Extended thinking: low, medium/enabled, high, disabled, or auto (omit to let the provider decide)."
+    )]
+    thinking: Option<String>,
+
+    #[arg(
+        long,
+        env = "DEEPTIDE_EFFORT",
+        value_name = "LEVEL",
+        help = "Reasoning effort (low, medium, high); used when --thinking is unset."
+    )]
+    effort: Option<String>,
+
     #[arg(long, default_value_t = 4096)]
     max_output_tokens: usize,
 
@@ -114,6 +157,22 @@ struct Cli {
     no_prompt_cache: bool,
 
     #[arg(
+        long = "no-color",
+        env = "DEEPTIDE_NO_COLOR",
+        action = ArgAction::SetTrue,
+        help = "Disable ANSI color output. Also honored via the NO_COLOR environment variable and settings.json `no_color`."
+    )]
+    no_color: bool,
+
+    #[arg(
+        long,
+        env = "DEEPTIDE_DEBUG",
+        action = ArgAction::SetTrue,
+        help = "Start the REPL with debug diagnostics (per-turn token/cost) enabled. Toggle at runtime with /debug."
+    )]
+    debug: bool,
+
+    #[arg(
         long = "stream",
         env = "DEEPTIDE_STREAM",
         action = ArgAction::SetTrue,
@@ -132,23 +191,123 @@ fn main() {
 fn run(mut cli: Cli) -> Result<(), String> {
     normalize_embedded_mode(&mut cli);
 
-    let Some(permission_mode) = PermissionMode::parse(&cli.permission_mode) else {
-        return Err(format!("invalid permission mode: {}", cli.permission_mode));
-    };
-
     if let Some(cwd) = cli.cwd.as_ref() {
         std::env::set_current_dir(cwd)
             .map_err(|error| format!("invalid --cwd {}: {error}", cwd.display()))?;
     }
 
+    // Load settings.json (global ← project ← local) and apply as fallbacks.
+    // Explicit CLI flags and environment variables always take precedence.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cfg = ConfigStore::load(&cwd);
+    cfg.apply_env();
+    apply_config_fallbacks(&mut cli, &cfg);
+
+    let Some(permission_mode) = PermissionMode::parse(&cli.permission_mode) else {
+        return Err(format!("invalid permission mode: {}", cli.permission_mode));
+    };
+
     validate_formats(&cli)?;
     if !cli.print_mode && cli.input_format == InputFormat::Text {
-        return run_interactive(&cli, permission_mode);
+        // Per-model pricing overrides from settings.json, converted to the
+        // per-token rates the cost tracker consumes. Only the interactive REPL
+        // surfaces cost (`/cost`, status line), so print mode skips this.
+        let pricing_overrides = cfg.pricing_overrides();
+        return run_interactive(&cli, permission_mode, pricing_overrides);
     }
 
     let stdin = read_stdin_if_needed(&cli)?;
     let prompt = collect_prompt(&cli, stdin.as_deref())?;
     emit_output(&cli, &prompt, permission_mode)
+}
+
+/// Apply `settings.json` values as fallbacks for CLI fields that were not
+/// explicitly set by the user.  CLI flags and env vars always win.
+fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
+    // Resolve the active provider profile. The profile name comes from
+    // --profile (or DEEPTIDE_PROFILE via clap), then TIDE_PROFILE, then the
+    // config's active_profile. A selected provider supplies model/base_url/
+    // api_key that take precedence over the top-level config fields, matching
+    // the Swift implementation's `provider ?? fileConfig` resolution order.
+    let profile_name = cli
+        .profile
+        .clone()
+        .filter(|name| !name.is_empty())
+        .or_else(|| env_first_non_empty(&["TIDE_PROFILE"]));
+    let provider = cfg.active_provider(profile_name.as_deref()).map(|(_, p)| p);
+    let cfg_model = provider
+        .and_then(|p| p.model.as_ref())
+        .or(cfg.model.as_ref());
+    let cfg_base_url = provider
+        .and_then(|p| p.base_url.as_ref())
+        .or(cfg.base_url.as_ref());
+    let cfg_api_key = provider
+        .and_then(|p| p.api_key.as_ref())
+        .or(cfg.api_key.as_ref());
+
+    // model: CLI default is DEFAULT_MODEL; treat that as "not set" and let
+    // config override it.
+    if cli.model == DEFAULT_MODEL
+        && let Some(m) = cfg_model
+    {
+        cli.model = m.clone();
+    }
+    if cli.base_url == DEFAULT_BASE_URL
+        && let Some(u) = cfg_base_url
+    {
+        cli.base_url = u.clone();
+    }
+    if cli.max_turns == 25
+        && let Some(t) = cfg.max_turns
+    {
+        cli.max_turns = t;
+    }
+    if cli.max_output_tokens == 4096
+        && let Some(t) = cfg.max_tokens
+    {
+        cli.max_output_tokens = t;
+    }
+    if cli.permission_mode == "default"
+        && let Some(ref m) = cfg.permission_mode
+    {
+        cli.permission_mode = m.clone();
+    }
+    if cli.api_key.is_none()
+        && let Some(key) = cfg_api_key
+    {
+        cli.api_key = Some(key.clone());
+    }
+    if cli.fallback_model.is_none()
+        && let Some(fallback) = cfg.fallback_model.as_ref()
+    {
+        cli.fallback_model = Some(fallback.clone());
+    }
+    if cli.thinking.is_none()
+        && let Some(thinking) = cfg.thinking.as_ref()
+    {
+        cli.thinking = Some(thinking.clone());
+    }
+    if cli.effort.is_none()
+        && let Some(effort) = cfg.effort.as_ref()
+    {
+        cli.effort = Some(effort.clone());
+    }
+    if let Some(false) = cfg.prompt_cache {
+        cli.no_prompt_cache = true;
+    }
+    if let Some(true) = cfg.no_color {
+        cli.no_color = true;
+    }
+    if let Some(true) = cfg.debug {
+        cli.debug = true;
+    }
+}
+
+/// Whether ANSI color output should be emitted. Color is disabled by the
+/// `--no-color` flag (which also absorbs settings.json `no_color` and the
+/// `DEEPTIDE_NO_COLOR` env var) or by the conventional `NO_COLOR` env var.
+fn use_color(cli: &Cli) -> bool {
+    !(cli.no_color || std::env::var_os("NO_COLOR").is_some())
 }
 
 fn normalize_embedded_mode(cli: &mut Cli) {
@@ -215,21 +374,143 @@ fn collect_prompt(cli: &Cli, stdin: Option<&str>) -> Result<String, String> {
     }
 }
 
-fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), String> {
-    let stdin = io::stdin();
+/// Rustyline helper that provides tab-completion for `/command` prefixes
+/// using `CompletionEngine` and the REPL's registered command list.
+struct ReplHelper {
+    commands: Vec<CommandCompletionSource>,
+    use_color: bool,
+}
+
+impl ReplHelper {
+    fn new(commands: Vec<CommandCompletionSource>, use_color: bool) -> Self {
+        Self {
+            commands,
+            use_color,
+        }
+    }
+}
+
+impl Helper for ReplHelper {}
+impl Highlighter for ReplHelper {}
+
+impl Validator for ReplHelper {
+    fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
+        // Allow multi-line continuation when the line ends with a backslash.
+        // The user types `hello \<Enter>` and rustyline asks for more input.
+        if ctx.input().trim_end().ends_with('\\') {
+            Ok(ValidationResult::Incomplete)
+        } else {
+            Ok(ValidationResult::Valid(None))
+        }
+    }
+    fn validate_while_typing(&self) -> bool {
+        false
+    }
+}
+
+impl Hinter for ReplHelper {
+    type Hint = String;
+    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        None
+    }
+}
+
+impl Completer for ReplHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let Some(result) = CompletionEngine::command_completions(line, pos, &self.commands, 8)
+        else {
+            return Ok((pos, vec![]));
+        };
+
+        let pairs = result
+            .candidates
+            .iter()
+            .map(|c| {
+                let repl = c.replacement();
+                let display = if self.use_color {
+                    format!("{repl:<26}\x1b[90m {}\x1b[0m", c.description)
+                } else {
+                    format!("{repl:<26} {}", c.description)
+                };
+                Pair {
+                    display,
+                    replacement: repl,
+                }
+            })
+            .collect();
+
+        Ok((result.token_start, pairs))
+    }
+}
+
+/// Path to the persistent readline history file.
+fn history_file_path() -> Option<PathBuf> {
+    let base = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
+    Some(base.join(".deeptide").join("history"))
+}
+
+fn run_interactive(
+    cli: &Cli,
+    permission_mode: PermissionMode,
+    pricing_overrides: HashMap<String, ModelPricing>,
+) -> Result<(), String> {
     let mut stdout = io::stdout();
-    let configured = configured_backend(cli)?;
+
+    // In interactive mode, always enable streaming so text appears live rather
+    // than appearing all-at-once after the full response is assembled.  Track
+    // whether anything was streamed so we can suppress the duplicate full-text
+    // print from `ReplEvent::Output`.
+    let use_color = use_color(cli);
+    let did_stream: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let did_stream_handler = Arc::clone(&did_stream);
+    let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
+        if let StreamingEvent::TextDelta { delta, .. } = event {
+            // Write the delta directly; no buffering so text appears immediately.
+            let _ = io::stdout().write_all(delta.as_bytes());
+            let _ = io::stdout().flush();
+            did_stream_handler.store(true, Ordering::Relaxed);
+        }
+    });
+
+    let configured = configured_backend_with_handler(cli, Some(streaming_handler))?;
     let is_configured = configured.is_configured;
     let mut repl = ReplSession::new(configured.backend)
         .with_model(configured.model)
         .with_permission_mode(permission_mode)
         .with_max_turns(cli.max_turns)
+        .with_pricing_overrides(pricing_overrides)
+        .with_debug(cli.debug)
+        .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
+
+    let rl_config = rustyline::config::Config::builder()
+        .history_ignore_space(true)
+        .completion_type(rustyline::config::CompletionType::List)
+        .build();
+    let helper = ReplHelper::new(repl.command_sources(), use_color);
+    let mut rl: Editor<ReplHelper, rustyline::history::DefaultHistory> =
+        Editor::with_config(rl_config).map_err(|error| error.to_string())?;
+    rl.set_helper(Some(helper));
+
+    let history_path = history_file_path();
+    if let Some(ref path) = history_path {
+        // Non-fatal if the file doesn't exist yet
+        let _ = rl.load_history(path);
+    }
 
     writeln!(stdout, "{}", repl.banner()).map_err(|error| error.to_string())?;
     writeln!(
         stdout,
-        "Permission mode: {}. Type /help for commands, /exit to quit.",
+        "Permission mode: {}. Type /help for commands, Ctrl+D to exit.",
         permission_mode.label()
     )
     .map_err(|error| error.to_string())?;
@@ -242,42 +523,95 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
     }
 
     loop {
+        // Print the status bar above the prompt line.
         writeln!(
             stdout,
             "{}",
             repl.status_line().render(terminal_width().unwrap_or(100))
         )
         .map_err(|error| error.to_string())?;
-        write!(stdout, "{}", repl.prompt()).map_err(|error| error.to_string())?;
         stdout.flush().map_err(|error| error.to_string())?;
 
-        let mut line = String::new();
-        let bytes = stdin
-            .read_line(&mut line)
-            .map_err(|error| error.to_string())?;
-        if bytes == 0 {
-            writeln!(stdout).map_err(|error| error.to_string())?;
-            return Ok(());
-        }
-
-        for event in repl.submit(&line) {
-            match event {
-                ReplEvent::Output(text) => {
-                    writeln!(
-                        stdout,
-                        "{}",
-                        tui::render_output_panel(
-                            &text,
-                            terminal_width().unwrap_or(100),
-                            std::env::var_os("NO_COLOR").is_none(),
-                        )
-                    )
-                    .map_err(|error| error.to_string())?;
+        let readline = rl.readline(&repl.prompt());
+        match readline {
+            Ok(line) => {
+                let trimmed = line.trim().to_owned();
+                if trimmed.is_empty() {
+                    continue;
                 }
-                ReplEvent::Exit => return Ok(()),
+                // Join multi-line continuation: "hello \\\nworld" → "hello world"
+                let content = trimmed
+                    .split("\\\n")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if content.is_empty() {
+                    continue;
+                }
+
+                if let Err(err) = rl.add_history_entry(content.as_str()) {
+                    let _ = err;
+                }
+
+                // Reset the streaming flag before each submission.
+                did_stream.store(false, Ordering::Relaxed);
+
+                for event in repl.submit(&content) {
+                    match event {
+                        ReplEvent::Output(text) => {
+                            if did_stream.swap(false, Ordering::Relaxed) {
+                                // The streaming handler already printed the text
+                                // incrementally.  Print a blank line to visually
+                                // separate the streamed output from the next prompt.
+                                writeln!(stdout).map_err(|error| error.to_string())?;
+                            } else {
+                                writeln!(
+                                    stdout,
+                                    "{}",
+                                    tui::render_output_panel(
+                                        &text,
+                                        terminal_width().unwrap_or(100),
+                                        use_color,
+                                    )
+                                )
+                                .map_err(|error| error.to_string())?;
+                            }
+                        }
+                        ReplEvent::Exit => {
+                            if let Some(ref path) = history_path {
+                                save_history(&mut rl, path);
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
             }
+            Err(ReadlineError::Interrupted) => {
+                // Ctrl+C — echo ^C and continue (matches Swift/zero-cli behaviour)
+                writeln!(stdout, "^C").map_err(|error| error.to_string())?;
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                // Ctrl+D on empty line — exit gracefully
+                writeln!(stdout).map_err(|error| error.to_string())?;
+                break;
+            }
+            Err(error) => return Err(error.to_string()),
         }
     }
+
+    if let Some(ref path) = history_path {
+        save_history(&mut rl, path);
+    }
+    Ok(())
+}
+
+fn save_history(rl: &mut Editor<ReplHelper, rustyline::history::DefaultHistory>, path: &PathBuf) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = rl.save_history(path);
 }
 
 fn terminal_width() -> Option<usize> {
@@ -297,7 +631,7 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
                 tui::render_output_panel(
                     &response,
                     terminal_width().unwrap_or(100),
-                    std::env::var_os("NO_COLOR").is_none(),
+                    use_color(cli),
                 )
             );
         }
@@ -372,6 +706,20 @@ fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resul
 }
 
 fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
+    configured_backend_with_handler(cli, None)
+}
+
+/// Build the configured backend, optionally installing a streaming handler.
+///
+/// When `streaming_handler` is `Some`, the backend is forced into streaming
+/// mode regardless of the `--stream` flag (the handler is only useful when
+/// streaming is active).  Callers that supply a handler typically also want
+/// to suppress re-printing the assembled text from `ReplEvent::Output` because
+/// the handler already wrote it incrementally.
+fn configured_backend_with_handler(
+    cli: &Cli,
+    streaming_handler: Option<StreamingHandler>,
+) -> Result<ConfiguredBackend, String> {
     let credential = effective_credential(cli);
     let Some(credential) = credential else {
         return Ok(ConfiguredBackend {
@@ -392,11 +740,22 @@ fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
     };
     config.max_tokens = cli.max_output_tokens;
     config.enable_prompt_caching = !cli.no_prompt_cache;
-    config.enable_streaming = cli.stream;
+    config.enable_streaming = cli.stream || streaming_handler.is_some();
+    config.fallback_model = cli.fallback_model.clone();
+    // --thinking takes precedence over --effort; both already absorb config
+    // fallbacks. An unset/`auto` value leaves thinking omitted from requests.
+    config.thinking = cli
+        .thinking
+        .as_deref()
+        .or(cli.effort.as_deref())
+        .and_then(ThinkingConfig::from_label);
     if let Some(system_prompt) = resolve_system_prompt(cli)? {
         config = config.with_system_prompt(system_prompt);
     }
-    let backend = AnthropicBackend::new(config.clone())?;
+    let mut backend = AnthropicBackend::new(config.clone())?;
+    if let Some(handler) = streaming_handler {
+        backend = backend.with_streaming_handler(handler);
+    }
     Ok(ConfiguredBackend {
         backend: Box::new(backend),
         model,
@@ -532,12 +891,13 @@ impl EnumValue for OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, collect_prompt,
-        configured_backend, effective_base_url, effective_model, normalize_embedded_mode,
-        validate_formats,
+        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
+        collect_prompt, configured_backend, effective_base_url, effective_model,
+        normalize_embedded_mode, use_color, validate_formats,
     };
     use clap::Parser;
-    use deeptide_core::AnthropicAuthMode;
+    use deeptide_core::{AnthropicAuthMode, ConfigData, ProviderProfile, ThinkingConfig};
+    use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn sample_cli() -> Cli {
@@ -553,11 +913,17 @@ mod tests {
             model: "deepseek-v4-pro".to_owned(),
             base_url: "https://api.anthropic.com".to_owned(),
             api_key: None,
+            profile: None,
+            fallback_model: None,
+            thinking: None,
+            effort: None,
             max_output_tokens: 4096,
             max_turns: 25,
             system_prompt: None,
             system_prompt_file: None,
             no_prompt_cache: false,
+            no_color: false,
+            debug: false,
             stream: false,
         }
     }
@@ -587,6 +953,213 @@ mod tests {
                 std::env::remove_var(name);
             }
         }
+    }
+
+    #[test]
+    fn config_fallbacks_apply_active_provider() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::remove_var("TIDE_PROFILE");
+        }
+
+        let mut cli = sample_cli();
+        // Simulate "unset" CLI values so config/provider fallbacks apply.
+        cli.model = DEFAULT_MODEL.to_owned();
+        cli.base_url = DEFAULT_BASE_URL.to_owned();
+
+        let cfg = ConfigData {
+            active_profile: Some(String::from("deepseek")),
+            base_url: Some(String::from("https://top-level.example")),
+            providers: Some(HashMap::from([(
+                String::from("deepseek"),
+                ProviderProfile {
+                    base_url: Some(String::from("https://api.deepseek.com/anthropic")),
+                    api_key: Some(String::from("provider-key")),
+                    model: Some(String::from("provider-model-xyz")),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+
+        apply_config_fallbacks(&mut cli, &cfg);
+
+        // The active provider's values win over the top-level config base_url.
+        assert_eq!(cli.base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(cli.model, "provider-model-xyz");
+        assert_eq!(cli.api_key.as_deref(), Some("provider-key"));
+    }
+
+    #[test]
+    fn config_fallbacks_explicit_profile_overrides_active_profile() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::remove_var("TIDE_PROFILE");
+        }
+
+        let mut cli = sample_cli();
+        cli.model = DEFAULT_MODEL.to_owned();
+        cli.base_url = DEFAULT_BASE_URL.to_owned();
+        cli.profile = Some(String::from("anthropic"));
+
+        let cfg = ConfigData {
+            active_profile: Some(String::from("deepseek")),
+            providers: Some(HashMap::from([
+                (
+                    String::from("deepseek"),
+                    ProviderProfile {
+                        base_url: Some(String::from("https://api.deepseek.com/anthropic")),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    String::from("anthropic"),
+                    ProviderProfile {
+                        base_url: Some(String::from("https://api.anthropic.com")),
+                        ..Default::default()
+                    },
+                ),
+            ])),
+            ..Default::default()
+        };
+
+        apply_config_fallbacks(&mut cli, &cfg);
+        assert_eq!(cli.base_url, "https://api.anthropic.com");
+    }
+
+    #[test]
+    fn config_fallbacks_explicit_cli_flags_beat_provider() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::remove_var("TIDE_PROFILE");
+        }
+
+        let mut cli = sample_cli();
+        // A user-supplied --base-url (non-default) must not be overridden.
+        cli.base_url = "https://user-supplied.example".to_owned();
+
+        let cfg = ConfigData {
+            active_profile: Some(String::from("deepseek")),
+            providers: Some(HashMap::from([(
+                String::from("deepseek"),
+                ProviderProfile {
+                    base_url: Some(String::from("https://api.deepseek.com/anthropic")),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+
+        apply_config_fallbacks(&mut cli, &cfg);
+        assert_eq!(cli.base_url, "https://user-supplied.example");
+    }
+
+    #[test]
+    fn use_color_respects_flag_and_env() {
+        let _guard = env_guard();
+        unsafe {
+            std::env::remove_var("NO_COLOR");
+        }
+
+        let mut cli = sample_cli();
+        // Default: color enabled.
+        assert!(use_color(&cli));
+
+        // --no-color flag disables color.
+        cli.no_color = true;
+        assert!(!use_color(&cli));
+
+        // NO_COLOR env disables color even without the flag.
+        cli.no_color = false;
+        unsafe {
+            std::env::set_var("NO_COLOR", "1");
+        }
+        assert!(!use_color(&cli));
+        unsafe {
+            std::env::remove_var("NO_COLOR");
+        }
+    }
+
+    #[test]
+    fn config_no_color_folds_into_cli_flag() {
+        let _guard = env_guard();
+        unsafe {
+            std::env::remove_var("TIDE_PROFILE");
+        }
+        let mut cli = sample_cli();
+        assert!(!cli.no_color);
+
+        let cfg = ConfigData {
+            no_color: Some(true),
+            ..Default::default()
+        };
+        apply_config_fallbacks(&mut cli, &cfg);
+        assert!(cli.no_color);
+    }
+
+    #[test]
+    fn config_debug_folds_into_cli_flag() {
+        let _guard = env_guard();
+        unsafe {
+            std::env::remove_var("TIDE_PROFILE");
+        }
+        let mut cli = sample_cli();
+        assert!(!cli.debug);
+
+        let cfg = ConfigData {
+            debug: Some(true),
+            ..Default::default()
+        };
+        apply_config_fallbacks(&mut cli, &cfg);
+        assert!(cli.debug);
+    }
+
+    #[test]
+    fn configured_backend_resolves_thinking_from_flag() {
+        let _guard = env_guard();
+        clear_api_env();
+        let mut cli = sample_cli();
+        cli.api_key = Some("k".to_owned());
+        cli.thinking = Some("high".to_owned());
+
+        let config = configured_backend(&cli)
+            .expect("backend")
+            .subagent_config
+            .expect("config");
+        assert_eq!(config.thinking, Some(ThinkingConfig::high()));
+    }
+
+    #[test]
+    fn configured_backend_uses_effort_when_thinking_unset() {
+        let _guard = env_guard();
+        clear_api_env();
+        let mut cli = sample_cli();
+        cli.api_key = Some("k".to_owned());
+        cli.effort = Some("low".to_owned());
+
+        let config = configured_backend(&cli)
+            .expect("backend")
+            .subagent_config
+            .expect("config");
+        assert_eq!(config.thinking, Some(ThinkingConfig::low()));
+    }
+
+    #[test]
+    fn configured_backend_omits_thinking_for_auto() {
+        let _guard = env_guard();
+        clear_api_env();
+        let mut cli = sample_cli();
+        cli.api_key = Some("k".to_owned());
+        cli.thinking = Some("auto".to_owned());
+
+        let config = configured_backend(&cli)
+            .expect("backend")
+            .subagent_config
+            .expect("config");
+        assert_eq!(config.thinking, None);
     }
 
     #[test]

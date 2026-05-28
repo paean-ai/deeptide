@@ -2,6 +2,7 @@ pub mod agent_loop;
 pub mod api;
 pub mod commands;
 pub mod completion;
+pub mod config;
 pub mod context_window;
 pub mod cost;
 pub mod embedded_protocol;
@@ -16,13 +17,14 @@ pub mod streaming;
 pub mod tool_batch_labeler;
 pub mod tool_result_summary;
 pub mod tools;
+pub mod tps;
 pub mod tui;
 
 pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
     AgentUsage, ConversationMessage, LocalEchoBackend, MessageRole, ToolCall, ToolResultBlock,
 };
-pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ToolChoice};
+pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ThinkingConfig, ToolChoice};
 pub use commands::{
     ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, HelpCommand,
     MemoryCommand, NewCommand, RememberCommand, SlashCommand,
@@ -30,6 +32,10 @@ pub use commands::{
 pub use completion::{
     CommandCompletionCandidate, CommandCompletionResult, CommandCompletionSource, CompletionEngine,
     Replacement,
+};
+pub use config::{
+    ConfigData, ConfigScope, ConfigStore, HookEntry, McpServerConfig, ModelPricingConfig,
+    ProviderProfile, SettingsHooks, SettingsPermissions, SettingsRule,
 };
 pub use context_window::{
     CompressionReport, ContextWindowConfig, ContextWindowManager, HeuristicSummarizer, Summarizer,
@@ -63,6 +69,7 @@ pub use tools::{
     ToolContext, ToolRegistry, ToolResult, ToolSearchTool, VerifyPlanExecutionTool,
     VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool,
 };
+pub use tps::{TpsRecord, TpsSample};
 pub use tui::{
     InputBar, InputLayout, StatusLine, StatusSegment, TranscriptItem, TranscriptKind, TuiFrame,
 };

@@ -18,6 +18,103 @@ fn repl_routes_plain_input_to_agent_loop() {
 }
 
 #[test]
+fn repl_debug_mode_emits_per_turn_diagnostics() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_debug(true);
+
+    let outputs: Vec<String> = repl
+        .submit("hello")
+        .into_iter()
+        .filter_map(|event| match event {
+            ReplEvent::Output(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        outputs.iter().any(|text| text.contains("[debug] turn")),
+        "expected a per-turn debug line, got: {outputs:?}"
+    );
+    assert!(
+        outputs.iter().any(|text| text.contains("in 4 out 2")),
+        "debug line should report token usage, got: {outputs:?}"
+    );
+}
+
+#[test]
+fn repl_tps_records_samples_and_resets() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    // No samples before any prompt.
+    assert!(only_output(repl.submit("/tps")).contains("No model TPS samples"));
+
+    // A completed turn (StaticBackend reports usage) records a sample.
+    repl.submit("hello");
+    let listing = only_output(repl.submit("/tps"));
+    assert!(
+        listing.contains("Model TPS samples:"),
+        "expected a TPS listing, got: {listing}"
+    );
+
+    let json = only_output(repl.submit("/tps --json"));
+    assert!(
+        json.contains("\"best_tps\"") && json.contains("\"samples\""),
+        "expected TPS JSON, got: {json}"
+    );
+
+    // Reset clears the recorded samples.
+    assert!(only_output(repl.submit("/tps --reset")).contains("Cleared"));
+    assert!(
+        only_output(repl.submit("/tps")).contains("No model TPS samples"),
+        "samples should be cleared after --reset"
+    );
+
+    // Unknown flags are rejected with usage.
+    assert!(only_output(repl.submit("/tps --bogus")).contains("Usage: /tps"));
+}
+
+#[test]
+fn repl_tps_persists_across_sessions_with_store_dir() {
+    let store = tempfile::tempdir().expect("tempdir");
+
+    // First session: record a turn, then end the session.
+    {
+        let mut repl = ReplSession::new(Box::new(StaticBackend)).with_tps_store_dir(store.path());
+        repl.submit("hello");
+    }
+
+    // A new session pointed at the same store sees the persisted sample before
+    // submitting anything.
+    let mut next = ReplSession::new(Box::new(StaticBackend)).with_tps_store_dir(store.path());
+    let listing = only_output(next.submit("/tps"));
+    assert!(
+        listing.contains("Model TPS samples:"),
+        "persisted TPS should survive across sessions, got: {listing}"
+    );
+
+    // Reset clears the persisted store too.
+    assert!(only_output(next.submit("/tps --reset")).contains("Cleared"));
+    let mut fresh = ReplSession::new(Box::new(StaticBackend)).with_tps_store_dir(store.path());
+    assert!(
+        only_output(fresh.submit("/tps")).contains("No model TPS samples"),
+        "reset should clear the persisted store"
+    );
+}
+
+#[test]
+fn repl_without_debug_emits_no_diagnostics() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    let events = repl.submit("hello");
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ReplEvent::Output(text) if text.contains("[debug]"))),
+        "debug diagnostics must not appear unless debug mode is enabled"
+    );
+}
+
+#[test]
 fn repl_shows_tool_batch_summary_before_tool_output() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\n").expect("write fixture");
@@ -267,12 +364,12 @@ fn repl_tps_command_matches_swift_flags_with_empty_rust_store() {
 
     assert_eq!(
         only_output(repl.submit("/tps")),
-        "No model TPS samples recorded yet. Run a streamed model session to collect speed telemetry."
+        "No model TPS samples yet. Run a streamed model prompt, then /tps again."
     );
     assert_eq!(only_output(repl.submit("/speed --json")), "[]");
     assert_eq!(
         only_output(repl.submit("/tps --reset")),
-        "No model TPS samples are recorded by the Rust REPL yet."
+        "Cleared 0 TPS sample(s)."
     );
     assert_eq!(
         repl.submit("/tps --bogus"),
@@ -317,11 +414,16 @@ fn repl_swift_parity_support_commands_are_available() {
 
     let config = only_output(repl.submit("/config"));
     assert!(config.contains("Settings files:"));
-    assert!(config.contains("zero-cli launch environment variables"));
+    assert!(config.contains("Merged values:"));
+    assert!(config.contains("Usage:"));
 
-    assert_eq!(
-        only_output(repl.submit("/hooks")),
-        "No hooks configured. Add a `hooks` block to settings.json when Rust config persistence lands."
+    // `/hooks` reads the merged settings; assert it reports hook state in either
+    // shape ("No hooks configured…" or "Configured hooks:") without depending on
+    // the developer's real global settings content.
+    let hooks = only_output(repl.submit("/hooks"));
+    assert!(
+        hooks.contains("hooks"),
+        "/hooks should report hook state, got: {hooks}"
     );
     assert!(only_output(repl.submit("/init")).contains("Project bootstrap is model-driven"));
     assert!(
@@ -375,10 +477,12 @@ fn repl_support_commands_validate_usage() {
         repl.submit("/paste now"),
         vec![ReplEvent::Output(String::from("Usage: /paste"))]
     );
+    // `set` with no `key=value` pair is a usage error and must not write any
+    // file, so this case stays hermetic without touching the global config.
     assert_eq!(
-        repl.submit("/config set model=foo"),
+        repl.submit("/config set model"),
         vec![ReplEvent::Output(String::from(
-            "Usage: /config [show]\nSetting values from the Rust REPL is not available yet; edit the displayed settings files directly."
+            "Usage: /config set key=value [--project | --local]"
         ))]
     );
     assert_eq!(

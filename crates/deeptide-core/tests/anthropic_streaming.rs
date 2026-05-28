@@ -163,7 +163,8 @@ fn streaming_backend_delivers_text_deltas_and_assembles_response() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let request = String::from_utf8_lossy(&raw);
     assert!(
-        request.contains("Accept: text/event-stream") || request.contains("accept: text/event-stream"),
+        request.contains("Accept: text/event-stream")
+            || request.contains("accept: text/event-stream"),
         "missing Accept header for SSE: {request:.500}"
     );
     let body_idx = request.find("\r\n\r\n").expect("body separator");

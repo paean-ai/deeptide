@@ -203,6 +203,15 @@ impl CostTracker {
         if let Some(pricing) = self.pricing_overrides.get(model) {
             return *pricing;
         }
+        Self::base_pricing(model)
+    }
+
+    /// Built-in pricing for `model`, ignoring any configured overrides.
+    ///
+    /// Resolves by exact match, then by known model-family prefix, falling back
+    /// to all-zero rates for unknown models. Useful as the base for partial
+    /// pricing overrides that only set some of the four rates.
+    pub fn base_pricing(model: &str) -> ModelPricing {
         if let Some(pricing) = default_pricing(model) {
             return pricing;
         }
