@@ -36,6 +36,8 @@ pub struct AnthropicConfig {
     /// server-overload error (HTTP 529 or 503). `None` disables the fallback.
     /// Mirrors the Swift implementation's `fallback_model` behavior.
     pub fallback_model: Option<String>,
+    /// Extended-thinking directive. `None` omits the field (provider default).
+    pub thinking: Option<ThinkingConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +61,70 @@ pub enum ToolChoice {
     Tool(String),
 }
 
+/// Extended-thinking / reasoning-effort directive sent on the wire as
+/// `{"type": "enabled"|"disabled", "budget_tokens": N}`. Mirrors the Swift
+/// implementation's `ThinkingConfig`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ThinkingConfig {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(rename = "budget_tokens", skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<usize>,
+}
+
+impl ThinkingConfig {
+    /// `low` reasoning budget (4 000 tokens).
+    pub fn low() -> Self {
+        Self::enabled(4_000)
+    }
+
+    /// `medium` reasoning budget (16 000 tokens). The default when a generic
+    /// "enabled" value is requested.
+    pub fn medium() -> Self {
+        Self::enabled(16_000)
+    }
+
+    /// `high` reasoning budget (32 000 tokens).
+    pub fn high() -> Self {
+        Self::enabled(32_000)
+    }
+
+    fn enabled(budget_tokens: usize) -> Self {
+        Self {
+            kind: String::from("enabled"),
+            budget_tokens: Some(budget_tokens),
+        }
+    }
+
+    /// Thinking explicitly turned off.
+    pub fn disabled() -> Self {
+        Self {
+            kind: String::from("disabled"),
+            budget_tokens: None,
+        }
+    }
+
+    /// Parse a `thinking`/`effort` label into a config, mirroring Swift's
+    /// `ThinkingConfig.from`. Returns `None` for unset/`auto`/`default`, which
+    /// means "omit the field and let the provider decide".
+    pub fn from_label(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" | "default" => None,
+            "disabled" | "disable" | "off" | "none" | "false" => Some(Self::disabled()),
+            "low" => Some(Self::low()),
+            "high" => Some(Self::high()),
+            // "medium"/"enabled"/"enable"/"on"/"true" and any other non-empty value.
+            _ => Some(Self::medium()),
+        }
+    }
+
+    /// Whether this directive actually enables thinking (vs. an explicit
+    /// `disabled`).
+    pub fn is_enabled(&self) -> bool {
+        self.kind == "enabled"
+    }
+}
+
 impl AnthropicConfig {
     pub fn new(
         base_url: impl Into<String>,
@@ -76,6 +142,7 @@ impl AnthropicConfig {
             enable_prompt_caching: true,
             enable_streaming: false,
             fallback_model: None,
+            thinking: None,
         }
     }
 
@@ -95,6 +162,7 @@ impl AnthropicConfig {
             enable_prompt_caching: true,
             enable_streaming: false,
             fallback_model: None,
+            thinking: None,
         }
     }
 
@@ -132,6 +200,12 @@ impl AnthropicConfig {
         } else {
             Some(model)
         };
+        self
+    }
+
+    /// Set the extended-thinking directive. `None` omits it from the request.
+    pub fn with_thinking(mut self, thinking: Option<ThinkingConfig>) -> Self {
+        self.thinking = thinking;
         self
     }
 }
@@ -236,6 +310,7 @@ impl AnthropicBackend {
             &self.config.tool_choice,
             self.config.enable_prompt_caching,
         );
+        apply_thinking(&mut body, self.config.thinking.as_ref());
         body.stream = self.config.enable_streaming;
         let url = messages_url(&self.config.base_url);
 
@@ -313,6 +388,9 @@ struct MessagesRequest<'a> {
     /// declared so behaviour is explicit and stable across API defaults.
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<WireToolChoice>,
+    /// Extended-thinking directive. Omitted unless configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -447,7 +525,24 @@ fn build_messages_request<'a>(
         stream: false,
         system,
         tool_choice: Some(WireToolChoice::from(tool_choice)),
+        thinking: None,
     }
+}
+
+/// Apply a thinking directive to a request, bumping `max_tokens` above the
+/// thinking budget. Anthropic requires `max_tokens > thinking.budget_tokens`,
+/// so we reserve the configured output budget on top of the thinking budget
+/// (capped to a sane ceiling) when thinking is enabled.
+fn apply_thinking(body: &mut MessagesRequest<'_>, thinking: Option<&ThinkingConfig>) {
+    let Some(thinking) = thinking else {
+        return;
+    };
+    if thinking.is_enabled()
+        && let Some(budget) = thinking.budget_tokens
+    {
+        body.max_tokens = budget.saturating_add(body.max_tokens).min(64_000);
+    }
+    body.thinking = Some(thinking.clone());
 }
 
 fn wire_message_from(message: &ConversationMessage) -> WireMessage {
@@ -1513,10 +1608,10 @@ fn api_error_hint(status: u16, error_type: Option<&str>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        WireContentBlock, build_messages_request, classify_error, messages_url,
+        WireContentBlock, apply_thinking, build_messages_request, classify_error, messages_url,
         parse_messages_response,
     };
-    use crate::{ConversationMessage, ToolCall, ToolChoice, ToolResultBlock};
+    use crate::{ConversationMessage, ThinkingConfig, ToolCall, ToolChoice, ToolResultBlock};
     use std::time::Duration;
 
     #[test]
@@ -2194,5 +2289,101 @@ mod tests {
         let cfg = AnthropicConfig::new("https://example.test", "key", "model")
             .with_system_prompt("hello");
         assert_eq!(cfg.system_prompt.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn thinking_config_from_label_matches_swift_mapping() {
+        assert_eq!(ThinkingConfig::from_label(""), None);
+        assert_eq!(ThinkingConfig::from_label("auto"), None);
+        assert_eq!(ThinkingConfig::from_label("DEFAULT"), None);
+        assert_eq!(
+            ThinkingConfig::from_label("off"),
+            Some(ThinkingConfig::disabled())
+        );
+        assert_eq!(
+            ThinkingConfig::from_label("none"),
+            Some(ThinkingConfig::disabled())
+        );
+        assert_eq!(
+            ThinkingConfig::from_label("low"),
+            Some(ThinkingConfig::low())
+        );
+        assert_eq!(
+            ThinkingConfig::from_label("Medium"),
+            Some(ThinkingConfig::medium())
+        );
+        assert_eq!(
+            ThinkingConfig::from_label("enabled"),
+            Some(ThinkingConfig::medium())
+        );
+        assert_eq!(
+            ThinkingConfig::from_label("high"),
+            Some(ThinkingConfig::high())
+        );
+        // Unknown non-empty values default to medium, matching Swift.
+        assert_eq!(
+            ThinkingConfig::from_label("turbo"),
+            Some(ThinkingConfig::medium())
+        );
+
+        assert_eq!(ThinkingConfig::low().budget_tokens, Some(4_000));
+        assert_eq!(ThinkingConfig::medium().budget_tokens, Some(16_000));
+        assert_eq!(ThinkingConfig::high().budget_tokens, Some(32_000));
+        assert!(ThinkingConfig::high().is_enabled());
+        assert!(!ThinkingConfig::disabled().is_enabled());
+    }
+
+    #[test]
+    fn apply_thinking_sets_field_and_bumps_max_tokens() {
+        let mut body = build_messages_request(
+            "test-model",
+            &[ConversationMessage::user("hi")],
+            4_096,
+            None,
+            &ToolChoice::Auto,
+            false,
+        );
+        apply_thinking(&mut body, Some(&ThinkingConfig::high()));
+
+        // max_tokens must exceed the thinking budget (32000): 32000 + 4096.
+        assert_eq!(body.max_tokens, 36_096);
+        let payload = serde_json::to_value(&body).expect("serialise request");
+        assert_eq!(payload["thinking"]["type"], "enabled");
+        assert_eq!(payload["thinking"]["budget_tokens"], 32_000);
+    }
+
+    #[test]
+    fn apply_thinking_disabled_keeps_max_tokens_and_omits_budget() {
+        let mut body = build_messages_request(
+            "test-model",
+            &[ConversationMessage::user("hi")],
+            4_096,
+            None,
+            &ToolChoice::Auto,
+            false,
+        );
+        apply_thinking(&mut body, Some(&ThinkingConfig::disabled()));
+
+        assert_eq!(body.max_tokens, 4_096);
+        let payload = serde_json::to_value(&body).expect("serialise request");
+        assert_eq!(payload["thinking"]["type"], "disabled");
+        assert!(payload["thinking"].get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn thinking_omitted_from_request_by_default() {
+        let body = build_messages_request(
+            "test-model",
+            &[ConversationMessage::user("hi")],
+            4_096,
+            None,
+            &ToolChoice::Auto,
+            false,
+        );
+        let payload = serde_json::to_value(&body).expect("serialise request");
+        assert!(
+            payload.get("thinking").is_none(),
+            "thinking must be omitted unless configured"
+        );
     }
 }
