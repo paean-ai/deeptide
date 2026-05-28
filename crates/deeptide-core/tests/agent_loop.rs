@@ -430,6 +430,49 @@ fn agent_loop_context_window_limit_is_model_aware() {
 }
 
 #[test]
+fn agent_loop_denylist_blocks_a_restricted_tool() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\n").expect("write fixture");
+    let mut loop_ = AgentLoop::new(Box::new(ToolCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_tool_restrictions(None, vec![String::from("Read")])
+        .with_max_turns(3);
+
+    let events = loop_.run("read notes");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentLoopEvent::ToolResult { tool_call, content, is_error: true }
+                if tool_call.name == "Read" && content.contains("not available to this agent")
+        )),
+        "a disallowed tool must be rejected before execution"
+    );
+}
+
+#[test]
+fn agent_loop_allowlist_excludes_unlisted_tools() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\n").expect("write fixture");
+    // Only Bash is allowed, so the Read call the backend makes is rejected.
+    let mut loop_ = AgentLoop::new(Box::new(ToolCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_tool_restrictions(Some(vec![String::from("Bash")]), Vec::new())
+        .with_max_turns(3);
+
+    let events = loop_.run("read notes");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentLoopEvent::ToolResult { tool_call, content, is_error: true }
+                if tool_call.name == "Read" && content.contains("not available to this agent")
+        )),
+        "a tool outside the allowlist must be rejected"
+    );
+}
+
+#[test]
 fn agent_loop_blocks_when_transcript_exceeds_hard_limit() {
     // window_size is large enough that a single oversized message cannot be
     // compacted away, so the transcript stays over the 98% blocking threshold.
