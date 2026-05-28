@@ -904,6 +904,9 @@ impl ReplSession {
         if let Some(ref v) = hooks.session_end {
             add("SessionEnd", v);
         }
+        if let Some(ref v) = hooks.pre_compact {
+            add("PreCompact", v);
+        }
 
         if lines.len() == 1 {
             lines.push(String::from("  (all hooks are disabled)"));
@@ -1810,6 +1813,10 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
             &tool_call.id,
             &content,
             is_error,
+        ))),
+        AgentLoopEvent::Compaction(report) => Some(ReplEvent::Output(format!(
+            "Context auto-compacted: folded {} earlier message(s); ~{} tokens now.",
+            report.compressed_messages, report.tokens_after
         ))),
         AgentLoopEvent::User(_) | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => None,
     }

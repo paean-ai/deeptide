@@ -26,6 +26,7 @@ pub enum HookEvent {
     UserPromptSubmit,
     SessionStart,
     SessionEnd,
+    PreCompact,
 }
 
 impl HookEvent {
@@ -36,6 +37,7 @@ impl HookEvent {
             HookEvent::UserPromptSubmit => "UserPromptSubmit",
             HookEvent::SessionStart => "SessionStart",
             HookEvent::SessionEnd => "SessionEnd",
+            HookEvent::PreCompact => "PreCompact",
         }
     }
 }
@@ -87,6 +89,7 @@ impl HookEngine {
             HookEvent::UserPromptSubmit => &self.hooks.user_prompt_submit,
             HookEvent::SessionStart => &self.hooks.session_start,
             HookEvent::SessionEnd => &self.hooks.session_end,
+            HookEvent::PreCompact => &self.hooks.pre_compact,
         };
         group.as_deref().unwrap_or(&[])
     }
