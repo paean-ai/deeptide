@@ -102,10 +102,7 @@ pub struct HeuristicSummarizer;
 impl Summarizer for HeuristicSummarizer {
     fn summarize(&self, messages: &[ConversationMessage]) -> String {
         let mut lines = Vec::with_capacity(messages.len() + 1);
-        lines.push(format!(
-            "Condensed {} earlier message(s):",
-            messages.len()
-        ));
+        lines.push(format!("Condensed {} earlier message(s):", messages.len()));
         for msg in messages {
             let role = match msg.role {
                 MessageRole::User => "user",
@@ -170,10 +167,7 @@ impl<S: Summarizer> ContextWindowManager<S> {
 
     /// Estimate the total token cost of an existing transcript.
     pub fn estimate_total(&self, messages: &[ConversationMessage]) -> usize {
-        messages
-            .iter()
-            .map(|m| estimate_tokens(&m.content))
-            .sum()
+        messages.iter().map(|m| estimate_tokens(&m.content)).sum()
     }
 
     /// Returns `true` when the transcript should be compressed.
@@ -205,10 +199,8 @@ impl<S: Summarizer> ContextWindowManager<S> {
         let compressed_count = older.len();
 
         let digest = self.summarizer.summarize(&older);
-        let summary = ConversationMessage::user(format!(
-            "{} {}",
-            self.config.summary_prefix, digest
-        ));
+        let summary =
+            ConversationMessage::user(format!("{} {}", self.config.summary_prefix, digest));
         messages.insert(0, summary);
 
         // If we're still over the hard limit, fall back to dropping the oldest
