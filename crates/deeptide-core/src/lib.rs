@@ -2,6 +2,7 @@ pub mod agent_loop;
 pub mod api;
 pub mod commands;
 pub mod completion;
+pub mod context_window;
 pub mod cost;
 pub mod embedded_protocol;
 pub mod markdown;
@@ -25,6 +26,10 @@ pub use commands::{
 pub use completion::{
     CommandCompletionCandidate, CommandCompletionResult, CommandCompletionSource, CompletionEngine,
     Replacement,
+};
+pub use context_window::{
+    CompressionReport, ContextWindowConfig, ContextWindowManager, HeuristicSummarizer, Summarizer,
+    estimate_tokens,
 };
 pub use cost::{CacheHealth, CostSummary, CostTracker, ModelPricing, TurnRecord, TurnUsage};
 pub use markdown::{MarkdownRenderOptions, MarkdownRenderer};
