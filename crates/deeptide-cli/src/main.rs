@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,8 +10,8 @@ use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
-    CommandCompletionSource, CompletionEngine, LocalEchoBackend, ReplEvent, ReplSession,
-    StreamingEvent, StreamingHandler, ThinkingConfig, tui,
+    CommandCompletionSource, CompletionEngine, LocalEchoBackend, ModelPricing, ReplEvent,
+    ReplSession, StreamingEvent, StreamingHandler, ThinkingConfig, tui,
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -192,7 +193,11 @@ fn run(mut cli: Cli) -> Result<(), String> {
 
     validate_formats(&cli)?;
     if !cli.print_mode && cli.input_format == InputFormat::Text {
-        return run_interactive(&cli, permission_mode);
+        // Per-model pricing overrides from settings.json, converted to the
+        // per-token rates the cost tracker consumes. Only the interactive REPL
+        // surfaces cost (`/cost`, status line), so print mode skips this.
+        let pricing_overrides = cfg.pricing_overrides();
+        return run_interactive(&cli, permission_mode, pricing_overrides);
     }
 
     let stdin = read_stdin_if_needed(&cli)?;
@@ -424,7 +429,11 @@ fn history_file_path() -> Option<PathBuf> {
     Some(base.join(".deeptide").join("history"))
 }
 
-fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), String> {
+fn run_interactive(
+    cli: &Cli,
+    permission_mode: PermissionMode,
+    pricing_overrides: HashMap<String, ModelPricing>,
+) -> Result<(), String> {
     let mut stdout = io::stdout();
     let use_color = std::env::var_os("NO_COLOR").is_none();
 
@@ -449,6 +458,7 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
         .with_model(configured.model)
         .with_permission_mode(permission_mode)
         .with_max_turns(cli.max_turns)
+        .with_pricing_overrides(pricing_overrides)
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
     let rl_config = rustyline::config::Config::builder()
