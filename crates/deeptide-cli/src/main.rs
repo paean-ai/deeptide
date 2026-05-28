@@ -1,18 +1,21 @@
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{ArgAction, Parser, ValueEnum};
 use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
-    CommandCompletionSource, CompletionEngine, LocalEchoBackend, ReplEvent, ReplSession, tui,
+    CommandCompletionSource, CompletionEngine, LocalEchoBackend, ReplEvent, ReplSession,
+    StreamingEvent, StreamingHandler, tui,
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
-use rustyline::validate::Validator;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Context, Editor, Helper};
 
 const DEFAULT_MODEL: &str = "deepseek-v4-pro";
@@ -239,7 +242,22 @@ impl ReplHelper {
 
 impl Helper for ReplHelper {}
 impl Highlighter for ReplHelper {}
-impl Validator for ReplHelper {}
+
+impl Validator for ReplHelper {
+    fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
+        // Allow multi-line continuation when the line ends with a backslash.
+        // The user types `hello \<Enter>` and rustyline asks for more input.
+        if ctx.input().trim_end().ends_with('\\') {
+            Ok(ValidationResult::Incomplete)
+        } else {
+            Ok(ValidationResult::Valid(None))
+        }
+    }
+    fn validate_while_typing(&self) -> bool {
+        false
+    }
+}
+
 impl Hinter for ReplHelper {
     type Hint = String;
     fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
@@ -292,7 +310,24 @@ fn history_file_path() -> Option<PathBuf> {
 
 fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), String> {
     let mut stdout = io::stdout();
-    let configured = configured_backend(cli)?;
+    let use_color = std::env::var_os("NO_COLOR").is_none();
+
+    // In interactive mode, always enable streaming so text appears live rather
+    // than appearing all-at-once after the full response is assembled.  Track
+    // whether anything was streamed so we can suppress the duplicate full-text
+    // print from `ReplEvent::Output`.
+    let did_stream: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let did_stream_handler = Arc::clone(&did_stream);
+    let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
+        if let StreamingEvent::TextDelta { delta, .. } = event {
+            // Write the delta directly; no buffering so text appears immediately.
+            let _ = io::stdout().write_all(delta.as_bytes());
+            let _ = io::stdout().flush();
+            did_stream_handler.store(true, Ordering::Relaxed);
+        }
+    });
+
+    let configured = configured_backend_with_handler(cli, Some(streaming_handler))?;
     let is_configured = configured.is_configured;
     let mut repl = ReplSession::new(configured.backend)
         .with_model(configured.model)
@@ -300,7 +335,6 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
         .with_max_turns(cli.max_turns)
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
-    let use_color = std::env::var_os("NO_COLOR").is_none();
     let rl_config = rustyline::config::Config::builder()
         .history_ignore_space(true)
         .completion_type(rustyline::config::CompletionType::List)
@@ -348,24 +382,44 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
                 if trimmed.is_empty() {
                     continue;
                 }
-                if let Err(err) = rl.add_history_entry(trimmed.as_str()) {
-                    // History errors are non-fatal
+                // Join multi-line continuation: "hello \\\nworld" → "hello world"
+                let content = trimmed
+                    .split("\\\n")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if content.is_empty() {
+                    continue;
+                }
+
+                if let Err(err) = rl.add_history_entry(content.as_str()) {
                     let _ = err;
                 }
 
-                for event in repl.submit(&trimmed) {
+                // Reset the streaming flag before each submission.
+                did_stream.store(false, Ordering::Relaxed);
+
+                for event in repl.submit(&content) {
                     match event {
                         ReplEvent::Output(text) => {
-                            writeln!(
-                                stdout,
-                                "{}",
-                                tui::render_output_panel(
-                                    &text,
-                                    terminal_width().unwrap_or(100),
-                                    use_color
+                            if did_stream.swap(false, Ordering::Relaxed) {
+                                // The streaming handler already printed the text
+                                // incrementally.  Print a blank line to visually
+                                // separate the streamed output from the next prompt.
+                                writeln!(stdout).map_err(|error| error.to_string())?;
+                            } else {
+                                writeln!(
+                                    stdout,
+                                    "{}",
+                                    tui::render_output_panel(
+                                        &text,
+                                        terminal_width().unwrap_or(100),
+                                        use_color,
+                                    )
                                 )
-                            )
-                            .map_err(|error| error.to_string())?;
+                                .map_err(|error| error.to_string())?;
+                            }
                         }
                         ReplEvent::Exit => {
                             if let Some(ref path) = history_path {
@@ -495,6 +549,20 @@ fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resul
 }
 
 fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
+    configured_backend_with_handler(cli, None)
+}
+
+/// Build the configured backend, optionally installing a streaming handler.
+///
+/// When `streaming_handler` is `Some`, the backend is forced into streaming
+/// mode regardless of the `--stream` flag (the handler is only useful when
+/// streaming is active).  Callers that supply a handler typically also want
+/// to suppress re-printing the assembled text from `ReplEvent::Output` because
+/// the handler already wrote it incrementally.
+fn configured_backend_with_handler(
+    cli: &Cli,
+    streaming_handler: Option<StreamingHandler>,
+) -> Result<ConfiguredBackend, String> {
     let credential = effective_credential(cli);
     let Some(credential) = credential else {
         return Ok(ConfiguredBackend {
@@ -515,11 +583,14 @@ fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
     };
     config.max_tokens = cli.max_output_tokens;
     config.enable_prompt_caching = !cli.no_prompt_cache;
-    config.enable_streaming = cli.stream;
+    config.enable_streaming = cli.stream || streaming_handler.is_some();
     if let Some(system_prompt) = resolve_system_prompt(cli)? {
         config = config.with_system_prompt(system_prompt);
     }
-    let backend = AnthropicBackend::new(config.clone())?;
+    let mut backend = AnthropicBackend::new(config.clone())?;
+    if let Some(handler) = streaming_handler {
+        backend = backend.with_streaming_handler(handler);
+    }
     Ok(ConfiguredBackend {
         backend: Box::new(backend),
         model,
