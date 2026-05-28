@@ -157,6 +157,14 @@ struct Cli {
     no_prompt_cache: bool,
 
     #[arg(
+        long = "no-color",
+        env = "DEEPTIDE_NO_COLOR",
+        action = ArgAction::SetTrue,
+        help = "Disable ANSI color output. Also honored via the NO_COLOR environment variable and settings.json `no_color`."
+    )]
+    no_color: bool,
+
+    #[arg(
         long = "stream",
         env = "DEEPTIDE_STREAM",
         action = ArgAction::SetTrue,
@@ -279,6 +287,16 @@ fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
     if let Some(false) = cfg.prompt_cache {
         cli.no_prompt_cache = true;
     }
+    if let Some(true) = cfg.no_color {
+        cli.no_color = true;
+    }
+}
+
+/// Whether ANSI color output should be emitted. Color is disabled by the
+/// `--no-color` flag (which also absorbs settings.json `no_color` and the
+/// `DEEPTIDE_NO_COLOR` env var) or by the conventional `NO_COLOR` env var.
+fn use_color(cli: &Cli) -> bool {
+    !(cli.no_color || std::env::var_os("NO_COLOR").is_some())
 }
 
 fn normalize_embedded_mode(cli: &mut Cli) {
@@ -435,12 +453,12 @@ fn run_interactive(
     pricing_overrides: HashMap<String, ModelPricing>,
 ) -> Result<(), String> {
     let mut stdout = io::stdout();
-    let use_color = std::env::var_os("NO_COLOR").is_none();
 
     // In interactive mode, always enable streaming so text appears live rather
     // than appearing all-at-once after the full response is assembled.  Track
     // whether anything was streamed so we can suppress the duplicate full-text
     // print from `ReplEvent::Output`.
+    let use_color = use_color(cli);
     let did_stream: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let did_stream_handler = Arc::clone(&did_stream);
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
@@ -600,7 +618,7 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
                 tui::render_output_panel(
                     &response,
                     terminal_width().unwrap_or(100),
-                    std::env::var_os("NO_COLOR").is_none(),
+                    use_color(cli),
                 )
             );
         }
@@ -862,7 +880,7 @@ mod tests {
     use super::{
         Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
         collect_prompt, configured_backend, effective_base_url, effective_model,
-        normalize_embedded_mode, validate_formats,
+        normalize_embedded_mode, use_color, validate_formats,
     };
     use clap::Parser;
     use deeptide_core::{AnthropicAuthMode, ConfigData, ProviderProfile, ThinkingConfig};
@@ -891,6 +909,7 @@ mod tests {
             system_prompt: None,
             system_prompt_file: None,
             no_prompt_cache: false,
+            no_color: false,
             stream: false,
         }
     }
@@ -1022,6 +1041,49 @@ mod tests {
 
         apply_config_fallbacks(&mut cli, &cfg);
         assert_eq!(cli.base_url, "https://user-supplied.example");
+    }
+
+    #[test]
+    fn use_color_respects_flag_and_env() {
+        let _guard = env_guard();
+        unsafe {
+            std::env::remove_var("NO_COLOR");
+        }
+
+        let mut cli = sample_cli();
+        // Default: color enabled.
+        assert!(use_color(&cli));
+
+        // --no-color flag disables color.
+        cli.no_color = true;
+        assert!(!use_color(&cli));
+
+        // NO_COLOR env disables color even without the flag.
+        cli.no_color = false;
+        unsafe {
+            std::env::set_var("NO_COLOR", "1");
+        }
+        assert!(!use_color(&cli));
+        unsafe {
+            std::env::remove_var("NO_COLOR");
+        }
+    }
+
+    #[test]
+    fn config_no_color_folds_into_cli_flag() {
+        let _guard = env_guard();
+        unsafe {
+            std::env::remove_var("TIDE_PROFILE");
+        }
+        let mut cli = sample_cli();
+        assert!(!cli.no_color);
+
+        let cfg = ConfigData {
+            no_color: Some(true),
+            ..Default::default()
+        };
+        apply_config_fallbacks(&mut cli, &cfg);
+        assert!(cli.no_color);
     }
 
     #[test]

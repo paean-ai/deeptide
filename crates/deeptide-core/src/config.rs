@@ -189,6 +189,11 @@ pub struct ConfigData {
     #[serde(rename = "prompt_cache", skip_serializing_if = "Option::is_none")]
     pub prompt_cache: Option<bool>,
 
+    /// Disable ANSI color output when `true`. Unset leaves color enabled
+    /// (unless the `NO_COLOR` environment variable is set).
+    #[serde(rename = "no_color", skip_serializing_if = "Option::is_none")]
+    pub no_color: Option<bool>,
+
     /// Model retried once when the primary model is transiently overloaded.
     #[serde(rename = "fallback_model", skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
@@ -244,6 +249,7 @@ impl ConfigData {
             max_tokens: other.max_tokens.or(self.max_tokens),
             permission_mode: other.permission_mode.or(self.permission_mode),
             prompt_cache: other.prompt_cache.or(self.prompt_cache),
+            no_color: other.no_color.or(self.no_color),
             fallback_model: other.fallback_model.or(self.fallback_model),
             thinking: other.thinking.or(self.thinking),
             effort: other.effort.or(self.effort),
@@ -515,6 +521,13 @@ impl ConfigStore {
                 .prompt_cache
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "(unset — true)".to_owned()),
+        ));
+        lines.push(kv(
+            "no_color",
+            &merged
+                .no_color
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(unset — false)".to_owned()),
         ));
         lines.push(kv(
             "api_key",
@@ -828,6 +841,28 @@ mod tests {
             base.merge(ConfigData::default()).fallback_model.as_deref(),
             Some("base-fallback")
         );
+    }
+
+    #[test]
+    fn config_data_parses_and_merges_no_color() {
+        let data: ConfigData = serde_json::from_str(r#"{"no_color": true}"#).expect("parse");
+        assert_eq!(data.no_color, Some(true));
+
+        let base = ConfigData {
+            no_color: Some(true),
+            ..Default::default()
+        };
+        // Base value is preserved when the overlay omits it.
+        assert_eq!(
+            base.clone().merge(ConfigData::default()).no_color,
+            Some(true)
+        );
+        // Overlay wins when set.
+        let overlay = ConfigData {
+            no_color: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(base.merge(overlay).no_color, Some(false));
     }
 
     #[test]
