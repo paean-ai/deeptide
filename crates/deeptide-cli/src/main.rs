@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -216,20 +216,22 @@ fn run(mut cli: Cli) -> Result<(), String> {
     };
 
     validate_formats(&cli)?;
+
+    // Lifecycle hooks (settings.json `hooks`) fire around the agent loop in
+    // both interactive and print modes; PreToolUse hooks can block a tool.
+    let hooks = deeptide_core::HookEngine::new(cfg.hooks.clone().unwrap_or_default(), &cwd);
+
     if !cli.print_mode && cli.input_format == InputFormat::Text {
         // Per-model pricing overrides from settings.json, converted to the
         // per-token rates the cost tracker consumes. Only the interactive REPL
         // surfaces cost (`/cost`, status line), so print mode skips this.
         let pricing_overrides = cfg.pricing_overrides();
-        // Lifecycle hooks (settings.json `hooks`) fire around tool calls in the
-        // REPL; PreToolUse hooks can block a tool.
-        let hooks = deeptide_core::HookEngine::new(cfg.hooks.clone().unwrap_or_default(), &cwd);
         return run_interactive(&cli, permission_mode, pricing_overrides, hooks);
     }
 
     let stdin = read_stdin_if_needed(&cli)?;
     let prompt = collect_prompt(&cli, stdin.as_deref())?;
-    emit_output(&cli, &prompt, permission_mode)
+    emit_output(&cli, &prompt, permission_mode, &cwd, hooks)
 }
 
 /// Apply `settings.json` values as fallbacks for CLI fields that were not
@@ -660,8 +662,14 @@ fn terminal_width() -> Option<usize> {
         .filter(|width| *width >= 20)
 }
 
-fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Result<(), String> {
-    let response = run_prompt(cli, prompt, permission_mode)?;
+fn emit_output(
+    cli: &Cli,
+    prompt: &str,
+    permission_mode: PermissionMode,
+    cwd: &Path,
+    hooks: deeptide_core::HookEngine,
+) -> Result<(), String> {
+    let response = run_prompt(cli, prompt, permission_mode, cwd, hooks)?;
 
     match cli.output_format {
         OutputFormat::Text => {
@@ -717,13 +725,28 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
     Ok(())
 }
 
-fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Result<String, String> {
+fn run_prompt(
+    cli: &Cli,
+    prompt: &str,
+    permission_mode: PermissionMode,
+    cwd: &Path,
+    hooks: deeptide_core::HookEngine,
+) -> Result<String, String> {
     let configured = configured_backend(cli)?;
     let mut loop_ = AgentLoop::new(configured.backend)
         .with_model(configured.model)
         .with_permission_mode(permission_mode)
         .with_max_turns(cli.max_turns)
+        .with_hooks(hooks)
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
+
+    // Give print mode the same project context (CLAUDE.md/TIDE.md/AGENTS.md +
+    // memory) as the interactive REPL. An explicit --system-prompt flag still
+    // wins: it is applied to the backend config and used when the loop carries
+    // no system prompt of its own.
+    if let Some(system_prompt) = print_mode_system_prompt(cli, cwd)? {
+        loop_ = loop_.with_system_prompt(system_prompt);
+    }
 
     let events = loop_.run(prompt);
     let mut assistant = None;
@@ -818,6 +841,19 @@ enum CloudCredential {
 /// or `--system-prompt`. Whitespace-only files/values are treated as "no
 /// prompt" — `AnthropicConfig::with_system_prompt` does the same upstream,
 /// but reporting it here gives clearer error semantics for typo-ed paths.
+/// Decide the project system prompt to install on the print-mode agent loop.
+///
+/// Returns `None` when the user supplied an explicit `--system-prompt` /
+/// `--system-prompt-file` (that override is applied to the backend config and
+/// must win), otherwise `Some(build_system_prompt(cwd))` so non-interactive
+/// runs get the same CLAUDE.md/memory context as the interactive REPL.
+fn print_mode_system_prompt(cli: &Cli, cwd: &Path) -> Result<Option<String>, String> {
+    if resolve_system_prompt(cli)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(deeptide_core::build_system_prompt(cwd)))
+}
+
 fn resolve_system_prompt(cli: &Cli) -> Result<Option<String>, String> {
     if let Some(path) = cli.system_prompt_file.as_ref() {
         let content = std::fs::read_to_string(path)
@@ -1459,6 +1495,32 @@ mod tests {
         let mut cli = sample_cli();
         cli.system_prompt_file = Some(path);
         assert!(super::resolve_system_prompt(&cli).expect("ok").is_none());
+    }
+
+    #[test]
+    fn print_mode_uses_project_prompt_when_no_flag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = sample_cli();
+        let resolved = super::print_mode_system_prompt(&cli, dir.path()).expect("ok");
+        let prompt = resolved.expect("project prompt should be installed when no flag is set");
+        assert!(
+            !prompt.trim().is_empty(),
+            "build_system_prompt always carries at least the identity preamble"
+        );
+    }
+
+    #[test]
+    fn print_mode_defers_to_explicit_system_prompt_flag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cli = sample_cli();
+        cli.system_prompt = Some("custom override".to_owned());
+        // With an explicit flag the loop installs no project prompt; the flag is
+        // applied to the backend config instead and therefore wins.
+        assert!(
+            super::print_mode_system_prompt(&cli, dir.path())
+                .expect("ok")
+                .is_none()
+        );
     }
 
     #[test]
