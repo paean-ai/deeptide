@@ -194,6 +194,11 @@ pub struct ConfigData {
     #[serde(rename = "no_color", skip_serializing_if = "Option::is_none")]
     pub no_color: Option<bool>,
 
+    /// Start the REPL with debug diagnostics (per-turn token/cost) enabled.
+    /// `/debug` toggles it at runtime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<bool>,
+
     /// Model retried once when the primary model is transiently overloaded.
     #[serde(rename = "fallback_model", skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
@@ -250,6 +255,7 @@ impl ConfigData {
             permission_mode: other.permission_mode.or(self.permission_mode),
             prompt_cache: other.prompt_cache.or(self.prompt_cache),
             no_color: other.no_color.or(self.no_color),
+            debug: other.debug.or(self.debug),
             fallback_model: other.fallback_model.or(self.fallback_model),
             thinking: other.thinking.or(self.thinking),
             effort: other.effort.or(self.effort),
@@ -526,6 +532,13 @@ impl ConfigStore {
             "no_color",
             &merged
                 .no_color
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(unset — false)".to_owned()),
+        ));
+        lines.push(kv(
+            "debug",
+            &merged
+                .debug
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "(unset — false)".to_owned()),
         ));
@@ -863,6 +876,23 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(base.merge(overlay).no_color, Some(false));
+    }
+
+    #[test]
+    fn config_data_parses_and_merges_debug() {
+        let data: ConfigData = serde_json::from_str(r#"{"debug": true}"#).expect("parse");
+        assert_eq!(data.debug, Some(true));
+
+        let base = ConfigData {
+            debug: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(base.clone().merge(ConfigData::default()).debug, Some(true));
+        let overlay = ConfigData {
+            debug: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(base.merge(overlay).debug, Some(false));
     }
 
     #[test]
