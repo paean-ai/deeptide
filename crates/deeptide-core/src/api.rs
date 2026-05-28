@@ -257,7 +257,14 @@ impl AgentBackend for AnthropicBackend {
             .or(self.config.system_prompt.as_deref())
             .map(ToOwned::to_owned);
 
-        let primary = self.config.model.clone();
+        // Prefer the per-request model — this is how a runtime model switch
+        // (e.g. the REPL `/model` command, via AgentLoop::set_model) reaches the
+        // wire — falling back to the configured default when unset.
+        let primary = if request.model.trim().is_empty() {
+            self.config.model.clone()
+        } else {
+            request.model.clone()
+        };
         match self.try_model(&primary, &request, effective_system.as_deref()) {
             Ok(response) => Ok(response),
             Err(failure) => {

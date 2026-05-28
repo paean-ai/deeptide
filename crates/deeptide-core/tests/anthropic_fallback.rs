@@ -1,12 +1,13 @@
-//! End-to-end coverage for `AnthropicBackend`'s fallback-model retry: a real
-//! `reqwest::blocking::Client` is pointed at a local TCP mock server that
-//! replies with a transient overload before succeeding. Validates that:
+//! End-to-end coverage for `AnthropicBackend`'s request behavior: a real
+//! `reqwest::blocking::Client` is pointed at a local TCP mock server. Validates:
 //!
 //! 1. A `529 overloaded` response triggers a single retry with the configured
 //!    fallback model, and the assembled response is returned.
 //! 2. The retry request carries the fallback model on the wire.
 //! 3. A non-retryable error (HTTP 400) is surfaced without any retry.
 //! 4. With no fallback configured, an overload error is surfaced as-is.
+//! 5. The per-request model (e.g. a runtime `/model` switch) reaches the wire,
+//!    and an empty per-request model falls back to the configured default.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -177,4 +178,61 @@ fn overload_without_fallback_surfaces_error() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert_eq!(requests.len(), 1, "without a fallback there is no retry");
+}
+
+#[test]
+fn per_request_model_reaches_the_wire() {
+    let (base_url, captured) = serve_sequence(vec![(200, SUCCESS_BODY)]);
+
+    // Config default differs from the per-request model (as after a runtime
+    // `/model` switch, where AgentLoop::set_model updates AgentRequest.model).
+    let mut config = AnthropicConfig::new(base_url, "test-key", "config-model");
+    config.enable_prompt_caching = false;
+
+    let mut backend = AnthropicBackend::new(config).expect("build backend");
+    let response = backend
+        .respond(AgentRequest {
+            messages: vec![ConversationMessage::user("hi")],
+            model: "request-model".to_owned(),
+            step: 0,
+            max_turns: 1,
+            system: None,
+        })
+        .expect("respond");
+    assert_eq!(response.content, "recovered");
+
+    let requests = captured
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        requests[0].contains("\"model\":\"request-model\""),
+        "the per-request model should win over the configured default"
+    );
+}
+
+#[test]
+fn empty_per_request_model_falls_back_to_config_model() {
+    let (base_url, captured) = serve_sequence(vec![(200, SUCCESS_BODY)]);
+
+    let mut config = AnthropicConfig::new(base_url, "test-key", "config-model");
+    config.enable_prompt_caching = false;
+
+    let mut backend = AnthropicBackend::new(config).expect("build backend");
+    backend
+        .respond(AgentRequest {
+            messages: vec![ConversationMessage::user("hi")],
+            model: String::new(),
+            step: 0,
+            max_turns: 1,
+            system: None,
+        })
+        .expect("respond");
+
+    let requests = captured
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        requests[0].contains("\"model\":\"config-model\""),
+        "an empty per-request model should fall back to the configured default"
+    );
 }
