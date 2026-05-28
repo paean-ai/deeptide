@@ -406,6 +406,27 @@ fn agent_loop_auto_compacts_when_transcript_exceeds_threshold() {
     );
 }
 
+#[test]
+fn agent_loop_context_window_limit_is_model_aware() {
+    // Unknown model falls back to the default budget.
+    let loop_ = AgentLoop::new(Box::new(StaticBackend::new("ok"))).with_model("mystery-model-9000");
+    assert_eq!(loop_.context_window_limit(), 128_000);
+
+    // Known cloud models resolve to their documented context windows, matching
+    // Swift's ModelContextWindow.forModel table.
+    let loop_ = AgentLoop::new(Box::new(StaticBackend::new("ok"))).with_model("claude-3-5-sonnet");
+    assert_eq!(loop_.context_window_limit(), 200_000);
+
+    let loop_ = AgentLoop::new(Box::new(StaticBackend::new("ok"))).with_model("gemini-1.5-pro");
+    assert_eq!(loop_.context_window_limit(), 1_000_000);
+
+    // A live /model switch re-resizes the window.
+    let mut loop_ = AgentLoop::new(Box::new(StaticBackend::new("ok"))).with_model("claude-3-opus");
+    assert_eq!(loop_.context_window_limit(), 200_000);
+    loop_.set_model("deepseek-v3");
+    assert_eq!(loop_.context_window_limit(), 128_000);
+}
+
 #[cfg(unix)]
 #[test]
 fn agent_loop_pre_compact_hook_fires_on_auto_compaction() {
