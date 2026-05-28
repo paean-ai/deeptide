@@ -41,6 +41,38 @@ fn repl_debug_mode_emits_per_turn_diagnostics() {
 }
 
 #[test]
+fn repl_tps_records_samples_and_resets() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    // No samples before any prompt.
+    assert!(only_output(repl.submit("/tps")).contains("No model TPS samples"));
+
+    // A completed turn (StaticBackend reports usage) records a sample.
+    repl.submit("hello");
+    let listing = only_output(repl.submit("/tps"));
+    assert!(
+        listing.contains("Model TPS samples:"),
+        "expected a TPS listing, got: {listing}"
+    );
+
+    let json = only_output(repl.submit("/tps --json"));
+    assert!(
+        json.contains("\"best_tps\"") && json.contains("\"samples\""),
+        "expected TPS JSON, got: {json}"
+    );
+
+    // Reset clears the recorded samples.
+    assert!(only_output(repl.submit("/tps --reset")).contains("Cleared"));
+    assert!(
+        only_output(repl.submit("/tps")).contains("No model TPS samples"),
+        "samples should be cleared after --reset"
+    );
+
+    // Unknown flags are rejected with usage.
+    assert!(only_output(repl.submit("/tps --bogus")).contains("Usage: /tps"));
+}
+
+#[test]
 fn repl_without_debug_emits_no_diagnostics() {
     let mut repl = ReplSession::new(Box::new(StaticBackend));
 
@@ -304,12 +336,12 @@ fn repl_tps_command_matches_swift_flags_with_empty_rust_store() {
 
     assert_eq!(
         only_output(repl.submit("/tps")),
-        "No model TPS samples recorded yet. Run a streamed model session to collect speed telemetry."
+        "No model TPS samples yet. Run a streamed model prompt, then /tps again."
     );
     assert_eq!(only_output(repl.submit("/speed --json")), "[]");
     assert_eq!(
         only_output(repl.submit("/tps --reset")),
-        "No model TPS samples are recorded by the Rust REPL yet."
+        "Cleared 0 TPS sample(s)."
     );
     assert_eq!(
         repl.submit("/tps --bogus"),

@@ -17,6 +17,7 @@ pub mod streaming;
 pub mod tool_batch_labeler;
 pub mod tool_result_summary;
 pub mod tools;
+pub mod tps;
 pub mod tui;
 
 pub use agent_loop::{
@@ -68,6 +69,7 @@ pub use tools::{
     ToolContext, ToolRegistry, ToolResult, ToolSearchTool, VerifyPlanExecutionTool,
     VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool,
 };
+pub use tps::{TpsRecord, TpsSample};
 pub use tui::{
     InputBar, InputLayout, StatusLine, StatusSegment, TranscriptItem, TranscriptKind, TuiFrame,
 };
