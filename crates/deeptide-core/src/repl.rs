@@ -195,6 +195,15 @@ impl ReplSession {
         &self.agent_loop
     }
 
+    /// Return all registered slash-command sources.
+    ///
+    /// Exposes the list so embedders (e.g. the CLI readline helper) can build
+    /// tab-completion candidates without depending on the private
+    /// `repl_command_sources` function.
+    pub fn command_sources(&self) -> Vec<CommandCompletionSource> {
+        repl_command_sources()
+    }
+
     fn execute_command(&mut self, command_line: &str) -> Vec<ReplEvent> {
         let mut parts = command_line.splitn(2, char::is_whitespace);
         let name = parts.next().unwrap_or_default().to_ascii_lowercase();
