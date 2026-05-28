@@ -4711,6 +4711,7 @@ fn run_mac_log_query(query: &MacLogQuery) -> String {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn render_mac_log_output(
     raw_output: &str,
     query: &MacLogQuery,
