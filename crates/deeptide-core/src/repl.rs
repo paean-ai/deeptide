@@ -1804,6 +1804,11 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
         AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)) => {
             Some(ReplEvent::Output(format!("Model error: {error}")))
         }
+        AgentLoopEvent::Terminal(AgentTerminalEvent::Blocked) => {
+            Some(ReplEvent::Output(String::from(
+                "Context window full: the transcript exceeds the model's limit even after compaction. Start a new session (/new) or trim context.",
+            )))
+        }
         AgentLoopEvent::ToolResult {
             tool_call,
             content,

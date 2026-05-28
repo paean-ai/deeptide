@@ -32,6 +32,11 @@ const SOFT_RATIO: f32 = 0.85;
 /// reply and any immediate follow-up.
 const DEFAULT_WINDOW_SIZE: usize = 6;
 
+/// Fraction of `max_tokens` at which the transcript is considered too large to
+/// proceed even after compaction. Matches the Swift implementation's
+/// `CompactionManager.blockingThreshold`.
+const BLOCKING_RATIO: f32 = 0.98;
+
 /// Heuristic token estimate: ~4 characters per token, rounded up.
 ///
 /// This is intentionally crude — it avoids pulling in a tokenizer dependency
@@ -175,6 +180,14 @@ impl<S: Summarizer> ContextWindowManager<S> {
     pub fn should_compress(&self, messages: &[ConversationMessage]) -> bool {
         self.estimate_total(messages) > self.config.soft_tokens
             && messages.len() > self.config.window_size
+    }
+
+    /// Returns `true` when the transcript exceeds the hard blocking threshold —
+    /// i.e. it is too large to safely send even after compaction. Callers
+    /// should stop the turn rather than issue a request the model will reject.
+    pub fn is_blocked(&self, messages: &[ConversationMessage]) -> bool {
+        let limit = (self.config.max_tokens as f32 * BLOCKING_RATIO) as usize;
+        self.estimate_total(messages) > limit
     }
 
     /// Compress `messages` in-place, returning a report describing what
@@ -441,5 +454,24 @@ mod tests {
         // Nothing to do when the whole transcript fits in the window.
         let mut tiny = vec![msg(MessageRole::User, "hi")];
         assert!(!mgr.force_compress(&mut tiny).did_compress);
+    }
+
+    #[test]
+    fn is_blocked_trips_above_the_blocking_ratio() {
+        let cfg = ContextWindowConfig {
+            max_tokens: 100,
+            soft_tokens: 80,
+            window_size: 2,
+            summary_prefix: "[s]".into(),
+        };
+        let mgr = ContextWindowManager::new(cfg);
+
+        // ~98 token budget (100 * 0.98). 40 chars ≈ 10 tokens: comfortably under.
+        let small = vec![msg(MessageRole::User, &"a".repeat(40))];
+        assert!(!mgr.is_blocked(&small));
+
+        // ~500 chars ≈ 125 tokens: over the blocking limit.
+        let huge = vec![msg(MessageRole::User, &"a".repeat(500))];
+        assert!(mgr.is_blocked(&huge));
     }
 }

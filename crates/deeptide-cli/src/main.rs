@@ -734,6 +734,11 @@ fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resul
             AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => {
                 return Err(String::from("maximum turns reached"));
             }
+            AgentLoopEvent::Terminal(AgentTerminalEvent::Blocked) => {
+                return Err(String::from(
+                    "context window full: transcript exceeds the model's limit even after compaction",
+                ));
+            }
             AgentLoopEvent::User(_)
             | AgentLoopEvent::ToolBatchSummary { .. }
             | AgentLoopEvent::ToolResult { .. }

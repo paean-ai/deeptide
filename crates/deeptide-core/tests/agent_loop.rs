@@ -378,8 +378,10 @@ fn agent_loop_user_prompt_submit_hook_fires_on_run() {
 }
 
 fn tiny_context_window() -> ContextWindowConfig {
+    // Soft threshold of 1 token forces compaction almost immediately, while the
+    // generous 200-token hard limit keeps these runs off the blocking path.
     ContextWindowConfig {
-        max_tokens: 10,
+        max_tokens: 200,
         soft_tokens: 1,
         window_size: 1,
         summary_prefix: String::from("[ctx]"),
@@ -425,6 +427,68 @@ fn agent_loop_context_window_limit_is_model_aware() {
     assert_eq!(loop_.context_window_limit(), 200_000);
     loop_.set_model("deepseek-v3");
     assert_eq!(loop_.context_window_limit(), 128_000);
+}
+
+#[test]
+fn agent_loop_blocks_when_transcript_exceeds_hard_limit() {
+    // window_size is large enough that a single oversized message cannot be
+    // compacted away, so the transcript stays over the 98% blocking threshold.
+    let config = ContextWindowConfig {
+        max_tokens: 10,
+        soft_tokens: 1,
+        window_size: 8,
+        summary_prefix: String::from("[ctx]"),
+    };
+    let mut loop_ = AgentLoop::new(Box::new(StaticBackend::new("ok")))
+        .with_context_window_config(config)
+        .with_max_turns(3);
+
+    let huge = "x".repeat(400); // ~100 tokens, far over the 10-token budget
+    let events = loop_.run(huge);
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentLoopEvent::Terminal(AgentTerminalEvent::Blocked))),
+        "an over-limit transcript should terminate with Blocked"
+    );
+    // The run must stop before reaching a normal completion.
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentLoopEvent::Terminal(AgentTerminalEvent::Complete)
+    )));
+}
+
+#[test]
+fn agent_loop_compacts_on_high_message_count() {
+    // A huge token budget means the token threshold never fires; only the
+    // message-count trigger can cause compaction.
+    let config = ContextWindowConfig {
+        max_tokens: 10_000_000,
+        soft_tokens: 9_000_000,
+        window_size: 4,
+        summary_prefix: String::from("[ctx]"),
+    };
+    let mut loop_ = AgentLoop::new(Box::new(StaticBackend::new("ok")))
+        .with_context_window_config(config)
+        .with_max_turns(2);
+
+    // Each run appends a user + assistant message; ~120 runs clears 200.
+    let mut compacted = false;
+    for _ in 0..130 {
+        let events = loop_.run("ping");
+        if events
+            .iter()
+            .any(|event| matches!(event, AgentLoopEvent::Compaction(report) if report.did_compress))
+        {
+            compacted = true;
+            break;
+        }
+    }
+    assert!(
+        compacted,
+        "exceeding the message-count limit should trigger compaction"
+    );
 }
 
 #[cfg(unix)]
