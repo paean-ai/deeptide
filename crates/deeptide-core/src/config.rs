@@ -170,6 +170,10 @@ pub struct ConfigData {
     #[serde(rename = "prompt_cache", skip_serializing_if = "Option::is_none")]
     pub prompt_cache: Option<bool>,
 
+    /// Model retried once when the primary model is transiently overloaded.
+    #[serde(rename = "fallback_model", skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
+
     /// Static permission rules applied before the runtime allow/deny lists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permissions: Option<SettingsPermissions>,
@@ -207,6 +211,7 @@ impl ConfigData {
             max_tokens: other.max_tokens.or(self.max_tokens),
             permission_mode: other.permission_mode.or(self.permission_mode),
             prompt_cache: other.prompt_cache.or(self.prompt_cache),
+            fallback_model: other.fallback_model.or(self.fallback_model),
             permissions: other.permissions.or(self.permissions),
             hooks: other.hooks.or(self.hooks),
             env: merge_maps(self.env, other.env),
@@ -405,6 +410,13 @@ impl ConfigStore {
         lines.push(kv(
             "base_url",
             merged.base_url.as_deref().unwrap_or("(unset — default)"),
+        ));
+        lines.push(kv(
+            "fallback_model",
+            merged
+                .fallback_model
+                .as_deref()
+                .unwrap_or("(unset — no fallback)"),
         ));
         lines.push(kv(
             "max_turns",
@@ -715,6 +727,30 @@ mod tests {
             Some("deepseek")
         );
         assert!(data.active_provider(Some("ghost")).is_none());
+    }
+
+    #[test]
+    fn config_data_parses_and_merges_fallback_model() {
+        let data: ConfigData =
+            serde_json::from_str(r#"{"fallback_model": "deepseek-v4-flash"}"#).expect("parse");
+        assert_eq!(data.fallback_model.as_deref(), Some("deepseek-v4-flash"));
+
+        let base = ConfigData {
+            fallback_model: Some(String::from("base-fallback")),
+            ..Default::default()
+        };
+        let overlay = ConfigData {
+            fallback_model: Some(String::from("overlay-fallback")),
+            ..Default::default()
+        };
+        assert_eq!(
+            base.clone().merge(overlay).fallback_model.as_deref(),
+            Some("overlay-fallback")
+        );
+        assert_eq!(
+            base.merge(ConfigData::default()).fallback_model.as_deref(),
+            Some("base-fallback")
+        );
     }
 
     #[test]

@@ -32,6 +32,10 @@ pub struct AnthropicConfig {
     /// wire shape changes. Required for proxies (openrouter, custom relays)
     /// that mandate streaming.
     pub enable_streaming: bool,
+    /// Model to retry with once when the primary model returns a transient
+    /// server-overload error (HTTP 529 or 503). `None` disables the fallback.
+    /// Mirrors the Swift implementation's `fallback_model` behavior.
+    pub fallback_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +75,7 @@ impl AnthropicConfig {
             tool_choice: ToolChoice::Auto,
             enable_prompt_caching: true,
             enable_streaming: false,
+            fallback_model: None,
         }
     }
 
@@ -89,6 +94,7 @@ impl AnthropicConfig {
             tool_choice: ToolChoice::Auto,
             enable_prompt_caching: true,
             enable_streaming: false,
+            fallback_model: None,
         }
     }
 
@@ -114,6 +120,18 @@ impl AnthropicConfig {
 
     pub fn with_streaming(mut self, enabled: bool) -> Self {
         self.enable_streaming = enabled;
+        self
+    }
+
+    /// Set the model retried once on a transient server overload. An
+    /// empty/whitespace-only value clears the fallback.
+    pub fn with_fallback_model(mut self, model: impl Into<String>) -> Self {
+        let model = model.into();
+        self.fallback_model = if model.trim().is_empty() {
+            None
+        } else {
+            Some(model)
+        };
         self
     }
 }
@@ -155,7 +173,6 @@ impl AnthropicBackend {
 
 impl AgentBackend for AnthropicBackend {
     fn respond(&mut self, request: AgentRequest) -> Result<AgentResponse, String> {
-        let started = Instant::now();
         // AgentRequest::system overrides AnthropicConfig::system_prompt when set,
         // allowing per-session prompts (built from CWD) to take precedence over
         // the static prompt injected via CLI flags.
@@ -163,9 +180,56 @@ impl AgentBackend for AnthropicBackend {
             .system
             .as_deref()
             .filter(|s| !s.trim().is_empty())
-            .or(self.config.system_prompt.as_deref());
+            .or(self.config.system_prompt.as_deref())
+            .map(ToOwned::to_owned);
+
+        let primary = self.config.model.clone();
+        match self.try_model(&primary, &request, effective_system.as_deref()) {
+            Ok(response) => Ok(response),
+            Err(failure) => {
+                // On a transient server overload, retry once with the
+                // configured fallback model before surfacing the error.
+                let fallback = self.config.fallback_model.clone();
+                if let Some(fallback) = fallback
+                    && fallback != primary
+                    && is_retryable_overload(failure.status)
+                {
+                    return self
+                        .try_model(&fallback, &request, effective_system.as_deref())
+                        .map_err(|failure| failure.message);
+                }
+                Err(failure.message)
+            }
+        }
+    }
+}
+
+/// A failed `/v1/messages` attempt, tagging the formatted error with the HTTP
+/// status so the caller can decide whether to retry with a fallback model.
+struct ApiFailure {
+    /// HTTP status code, or `0` for transport-level errors (no response).
+    status: u16,
+    message: String,
+}
+
+/// Server-side overload statuses worth retrying with a different model.
+/// `529` is Anthropic's "overloaded"; `503` is a generic upstream outage.
+fn is_retryable_overload(status: u16) -> bool {
+    matches!(status, 503 | 529)
+}
+
+impl AnthropicBackend {
+    /// Issue a single `/v1/messages` request with the given model, returning
+    /// the assembled response or a status-tagged failure.
+    fn try_model(
+        &self,
+        model: &str,
+        request: &AgentRequest,
+        effective_system: Option<&str>,
+    ) -> Result<AgentResponse, ApiFailure> {
+        let started = Instant::now();
         let mut body = build_messages_request(
-            &self.config.model,
+            model,
             &request.messages,
             self.config.max_tokens,
             effective_system,
@@ -192,16 +256,21 @@ impl AgentBackend for AnthropicBackend {
             AnthropicAuthMode::ApiKey => req.header("x-api-key", &self.config.api_key),
             AnthropicAuthMode::BearerToken => req.bearer_auth(&self.config.api_key),
         };
-        let response = req
-            .send()
-            .map_err(|error| format!("connection error: {error}"))?;
+        let response = req.send().map_err(|error| ApiFailure {
+            status: 0,
+            message: format!("connection error: {error}"),
+        })?;
         let status = response.status();
 
         if !status.is_success() {
-            let text = response
-                .text()
-                .map_err(|error| format!("failed to read response body: {error}"))?;
-            return Err(classify_error(status.as_u16(), &text));
+            let text = response.text().map_err(|error| ApiFailure {
+                status: status.as_u16(),
+                message: format!("failed to read response body: {error}"),
+            })?;
+            return Err(ApiFailure {
+                status: status.as_u16(),
+                message: classify_error(status.as_u16(), &text),
+            });
         }
 
         if self.config.enable_streaming {
@@ -210,11 +279,19 @@ impl AgentBackend for AnthropicBackend {
             // payload up front, so live deltas flow to the handler as the
             // model produces them.
             parse_streaming_response(response, self.streaming_handler.as_ref(), started.elapsed())
+                .map_err(|message| ApiFailure {
+                    status: status.as_u16(),
+                    message,
+                })
         } else {
-            let text = response
-                .text()
-                .map_err(|error| format!("failed to read response body: {error}"))?;
-            parse_messages_response(&text, started.elapsed())
+            let text = response.text().map_err(|error| ApiFailure {
+                status: status.as_u16(),
+                message: format!("failed to read response body: {error}"),
+            })?;
+            parse_messages_response(&text, started.elapsed()).map_err(|message| ApiFailure {
+                status: status.as_u16(),
+                message,
+            })
         }
     }
 }
