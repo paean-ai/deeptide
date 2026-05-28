@@ -40,8 +40,8 @@ pub fn estimate_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
-    // Round up. `+ 3` guarantees a non-zero estimate for short strings.
-    (text.chars().count() + 3) / 4
+    // Round up so any non-empty string yields at least one token.
+    text.chars().count().div_ceil(4)
 }
 
 /// Configuration for [`ContextWindowManager`].
