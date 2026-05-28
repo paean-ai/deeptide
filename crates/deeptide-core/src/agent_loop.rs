@@ -713,12 +713,16 @@ impl AgentLoop {
             .iter()
             .map(|tool| (*tool).to_owned())
             .collect();
+        let system_prompt = invocation
+            .definition
+            .full_system_prompt(&self.tool_context.cwd, &subagent_model);
         let mut subagent = AgentLoop::new(factory(&subagent_model))
             .with_model(subagent_model.clone())
             .with_max_turns(invocation.definition.max_turns)
             .with_cwd(self.tool_context.cwd.clone())
             .with_permission_mode(permission_mode)
-            .with_tool_restrictions(allowed_tools, disallowed_tools);
+            .with_tool_restrictions(allowed_tools, disallowed_tools)
+            .with_system_prompt(system_prompt);
         let events = subagent.run(format!(
             "Sub-agent task: {}\n\n{}",
             invocation.description, invocation.prompt
