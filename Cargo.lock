@@ -214,6 +214,7 @@ dependencies = [
  "clap",
  "deeptide-core",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

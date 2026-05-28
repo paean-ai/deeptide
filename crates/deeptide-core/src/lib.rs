@@ -20,7 +20,7 @@ pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
     AgentUsage, ConversationMessage, LocalEchoBackend, MessageRole, ToolCall, ToolResultBlock,
 };
-pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig};
+pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ToolChoice};
 pub use commands::{
     ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, HelpCommand,
     MemoryCommand, NewCommand, RememberCommand, SlashCommand,

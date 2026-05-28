@@ -13,6 +13,9 @@ clap.workspace = true
 deeptide-core = { path = "../deeptide-core" }
 serde_json.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
 
