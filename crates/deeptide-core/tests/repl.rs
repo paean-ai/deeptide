@@ -73,6 +73,34 @@ fn repl_tps_records_samples_and_resets() {
 }
 
 #[test]
+fn repl_tps_persists_across_sessions_with_store_dir() {
+    let store = tempfile::tempdir().expect("tempdir");
+
+    // First session: record a turn, then end the session.
+    {
+        let mut repl = ReplSession::new(Box::new(StaticBackend)).with_tps_store_dir(store.path());
+        repl.submit("hello");
+    }
+
+    // A new session pointed at the same store sees the persisted sample before
+    // submitting anything.
+    let mut next = ReplSession::new(Box::new(StaticBackend)).with_tps_store_dir(store.path());
+    let listing = only_output(next.submit("/tps"));
+    assert!(
+        listing.contains("Model TPS samples:"),
+        "persisted TPS should survive across sessions, got: {listing}"
+    );
+
+    // Reset clears the persisted store too.
+    assert!(only_output(next.submit("/tps --reset")).contains("Cleared"));
+    let mut fresh = ReplSession::new(Box::new(StaticBackend)).with_tps_store_dir(store.path());
+    assert!(
+        only_output(fresh.submit("/tps")).contains("No model TPS samples"),
+        "reset should clear the persisted store"
+    );
+}
+
+#[test]
 fn repl_without_debug_emits_no_diagnostics() {
     let mut repl = ReplSession::new(Box::new(StaticBackend));
 

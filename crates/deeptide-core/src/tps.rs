@@ -7,7 +7,9 @@
 //! in memory for the session; cross-session persistence is intentionally left
 //! as a follow-up.
 
-use serde::Serialize;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 /// One completed turn's throughput measurement.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,7 +30,7 @@ impl TpsSample {
 }
 
 /// Aggregated throughput for a single model across the session's samples.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TpsRecord {
     pub model: String,
     pub best_tps: f64,
@@ -47,36 +49,92 @@ pub struct TpsRecord {
 pub fn aggregate(samples: &[TpsSample]) -> Vec<TpsRecord> {
     let mut records: Vec<TpsRecord> = Vec::new();
     for sample in samples {
-        let tps = sample.tps();
-        if let Some(record) = records.iter_mut().find(|r| r.model == sample.model) {
-            record.samples += 1;
-            record.last_tps = tps;
-            record.last_output_tokens = sample.output_tokens;
-            record.last_duration_ms = sample.duration_ms;
-            if tps > record.best_tps {
-                record.best_tps = tps;
-                record.best_output_tokens = sample.output_tokens;
-                record.best_duration_ms = sample.duration_ms;
-            }
-        } else {
-            records.push(TpsRecord {
-                model: sample.model.clone(),
-                best_tps: tps,
-                best_output_tokens: sample.output_tokens,
-                best_duration_ms: sample.duration_ms,
-                last_tps: tps,
-                last_output_tokens: sample.output_tokens,
-                last_duration_ms: sample.duration_ms,
-                samples: 1,
-            });
-        }
+        merge_sample(&mut records, sample);
     }
+    sort_by_best_desc(&mut records);
+    records
+}
+
+/// Fold a single sample into a record set: bump the matching model's sample
+/// count and "last" throughput, track its "best", or insert a new record.
+fn merge_sample(records: &mut Vec<TpsRecord>, sample: &TpsSample) {
+    let tps = sample.tps();
+    if let Some(record) = records.iter_mut().find(|r| r.model == sample.model) {
+        record.samples += 1;
+        record.last_tps = tps;
+        record.last_output_tokens = sample.output_tokens;
+        record.last_duration_ms = sample.duration_ms;
+        if tps > record.best_tps {
+            record.best_tps = tps;
+            record.best_output_tokens = sample.output_tokens;
+            record.best_duration_ms = sample.duration_ms;
+        }
+    } else {
+        records.push(TpsRecord {
+            model: sample.model.clone(),
+            best_tps: tps,
+            best_output_tokens: sample.output_tokens,
+            best_duration_ms: sample.duration_ms,
+            last_tps: tps,
+            last_output_tokens: sample.output_tokens,
+            last_duration_ms: sample.duration_ms,
+            samples: 1,
+        });
+    }
+}
+
+fn sort_by_best_desc(records: &mut [TpsRecord]) {
     records.sort_by(|a, b| {
         b.best_tps
             .partial_cmp(&a.best_tps)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    records
+}
+
+/// Default on-disk location for the persistent TPS store, under the shared
+/// tide config directory (honors `TIDE_CONFIG_DIR`).
+pub fn default_store_dir() -> PathBuf {
+    crate::memory::MemorySystem::tide_config_dir()
+}
+
+/// Cross-session persistence for TPS records, mirroring the Swift
+/// `ModelPerformanceStore`. Records are kept in `model-tps.json` under the
+/// supplied directory; every function takes the directory explicitly so it can
+/// be pointed at a temp path in tests.
+pub struct TpsStore;
+
+impl TpsStore {
+    fn file(dir: &Path) -> PathBuf {
+        dir.join("model-tps.json")
+    }
+
+    /// Load persisted records, or an empty set when the file is absent or
+    /// unreadable.
+    pub fn load(dir: &Path) -> Vec<TpsRecord> {
+        std::fs::read_to_string(Self::file(dir))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    /// Merge one sample into the persisted records and write them back.
+    pub fn record(dir: &Path, sample: &TpsSample) {
+        let mut records = Self::load(dir);
+        merge_sample(&mut records, sample);
+        sort_by_best_desc(&mut records);
+        let _ = Self::save(dir, &records);
+    }
+
+    /// Remove the persisted store. No-op when the file is absent.
+    pub fn reset(dir: &Path) {
+        let _ = std::fs::remove_file(Self::file(dir));
+    }
+
+    fn save(dir: &Path, records: &[TpsRecord]) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let json = serde_json::to_string_pretty(records).unwrap_or_else(|_| String::from("[]"));
+        std::fs::write(Self::file(dir), json)
+    }
 }
 
 /// Render aggregated records as a human-readable table for `/tps`.
@@ -193,5 +251,39 @@ mod tests {
         assert!(json.contains("\"model\": \"deepseek-v4-pro\""));
         assert!(json.contains("\"best_tps\": 40.0"));
         assert!(json.contains("\"samples\": 1"));
+    }
+
+    #[test]
+    fn tps_store_persists_records_across_loads_and_resets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert!(TpsStore::load(dir.path()).is_empty());
+
+        TpsStore::record(
+            dir.path(),
+            &TpsSample {
+                model: String::from("m"),
+                output_tokens: 100,
+                duration_ms: 1000,
+            },
+        );
+        TpsStore::record(
+            dir.path(),
+            &TpsSample {
+                model: String::from("m"),
+                output_tokens: 60,
+                duration_ms: 1000,
+            },
+        );
+
+        // A fresh load (simulating a new session) sees the aggregated record.
+        let records = TpsStore::load(dir.path());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].samples, 2);
+        assert!((records[0].best_tps - 100.0).abs() < f64::EPSILON);
+        assert!((records[0].last_tps - 60.0).abs() < f64::EPSILON);
+
+        TpsStore::reset(dir.path());
+        assert!(TpsStore::load(dir.path()).is_empty());
     }
 }
