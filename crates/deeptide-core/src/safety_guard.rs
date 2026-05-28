@@ -209,7 +209,7 @@ impl ShellAuditor {
         ("SH004", "rm -rf *"),
         ("SH005", "mkfs"),
         ("SH006", "dd if="),
-        ("SH007", ":(){ :|:& };:"),   // fork bomb
+        ("SH007", ":(){ :|:& };:"), // fork bomb
         ("SH008", "shutdown"),
         ("SH009", "reboot"),
         ("SH010", "init 0"),
@@ -240,8 +240,20 @@ impl ShellAuditor {
     /// Dangerous substrings that appear inside command substitutions or
     /// chained segments.
     const DANGEROUS_IN_INJECTION: &[&str] = &[
-        "rm ", "rmdir ", "del ", "format ", "mkfs", "dd ", "shutdown", "reboot",
-        "drop ", "DROP ", "truncate", "> /dev/", "chmod 777", "chown root",
+        "rm ",
+        "rmdir ",
+        "del ",
+        "format ",
+        "mkfs",
+        "dd ",
+        "shutdown",
+        "reboot",
+        "drop ",
+        "DROP ",
+        "truncate",
+        "> /dev/",
+        "chmod 777",
+        "chown root",
     ];
 }
 
@@ -408,12 +420,18 @@ impl Auditor for CodeAuditor {
             }
             // Heuristic: if the same line or a nearby line contains string
             // concatenation (`+`) or format!-style interpolation, flag it.
-            let has_concat = code.contains("+ \"") || code.contains("+ '")
-                || code.contains("format!(") || code.contains("f\"")
-                || code.contains("f'") || code.contains(".format(")
-                || code.contains(".join(") || code.contains("%s")
-                || code.contains("${") || code.contains("#{")
-                || code.contains("$.ajax") || code.contains("` + ");
+            let has_concat = code.contains("+ \"")
+                || code.contains("+ '")
+                || code.contains("format!(")
+                || code.contains("f\"")
+                || code.contains("f'")
+                || code.contains(".format(")
+                || code.contains(".join(")
+                || code.contains("%s")
+                || code.contains("${")
+                || code.contains("#{")
+                || code.contains("$.ajax")
+                || code.contains("` + ");
             if has_concat {
                 findings.push(Finding::warn(
                     rule_id,
@@ -450,7 +468,9 @@ impl Auditor for CodeAuditor {
         for &(rule_id, pattern) in Self::INSECURE_DESER {
             if code.contains(pattern) {
                 // yaml.load with SafeLoader is okay, special-case it.
-                if pattern == "yaml.load(" && code.contains("Loader=safe") || code.contains("SafeLoader") {
+                if pattern == "yaml.load(" && code.contains("Loader=safe")
+                    || code.contains("SafeLoader")
+                {
                     continue;
                 }
                 findings.push(Finding::block(
@@ -721,7 +741,9 @@ mod tests {
     fn guard_custom_auditor() {
         struct NoGitPush;
         impl Auditor for NoGitPush {
-            fn name(&self) -> &str { "no-git-push" }
+            fn name(&self) -> &str {
+                "no-git-push"
+            }
             fn audit_command(&self, command: &str) -> AuditReport {
                 if command.contains("git push --force") || command.contains("git push -f") {
                     AuditReport {
