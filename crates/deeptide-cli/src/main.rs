@@ -489,6 +489,7 @@ fn run_interactive(
         .with_max_turns(cli.max_turns)
         .with_pricing_overrides(pricing_overrides)
         .with_debug(cli.debug)
+        .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
     let rl_config = rustyline::config::Config::builder()

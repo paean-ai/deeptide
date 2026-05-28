@@ -59,6 +59,7 @@ pub struct ReplSession {
     provider_profile: ProviderProfile,
     debug_enabled: bool,
     tps_samples: Vec<crate::tps::TpsSample>,
+    tps_store_dir: Option<std::path::PathBuf>,
     active_goal: Option<String>,
     session_id: String,
     session_started_at: String,
@@ -78,6 +79,7 @@ impl ReplSession {
             provider_profile: ProviderProfile::Legacy,
             debug_enabled: false,
             tps_samples: Vec::new(),
+            tps_store_dir: None,
             active_goal: None,
             session_id: new_session_id(),
             session_started_at: time::OffsetDateTime::now_utc()
@@ -132,6 +134,14 @@ impl ReplSession {
         self
     }
 
+    /// Persist TPS samples to `dir` so `/tps` reports throughput across
+    /// sessions. When unset (the default), `/tps` reflects only the current
+    /// session's in-memory samples.
+    pub fn with_tps_store_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.tps_store_dir = Some(dir.into());
+        self
+    }
+
     pub fn with_subagent_backend_factory<F>(mut self, factory: F) -> Self
     where
         F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,
@@ -172,11 +182,15 @@ impl ReplSession {
         let new_turns = summary.turns.get(turns_before..).unwrap_or(&[]);
         for turn in new_turns {
             if turn.output_tokens > 0 && turn.duration_ms > 0 {
-                self.tps_samples.push(crate::tps::TpsSample {
+                let sample = crate::tps::TpsSample {
                     model: turn.model.clone(),
                     output_tokens: turn.output_tokens,
                     duration_ms: turn.duration_ms,
-                });
+                };
+                if let Some(dir) = &self.tps_store_dir {
+                    crate::tps::TpsStore::record(dir, &sample);
+                }
+                self.tps_samples.push(sample);
             }
         }
         if self.debug_enabled
@@ -421,10 +435,18 @@ impl ReplSession {
         if flags.contains(&"--reset") {
             let cleared = self.tps_samples.len();
             self.tps_samples.clear();
+            if let Some(dir) = &self.tps_store_dir {
+                crate::tps::TpsStore::reset(dir);
+            }
             return CommandResult::Text(format!("Cleared {cleared} TPS sample(s)."));
         }
 
-        let records = crate::tps::aggregate(&self.tps_samples);
+        // Prefer the persisted (cross-session) store when configured, otherwise
+        // fall back to this session's in-memory samples.
+        let records = match &self.tps_store_dir {
+            Some(dir) => crate::tps::TpsStore::load(dir),
+            None => crate::tps::aggregate(&self.tps_samples),
+        };
         if flags.contains(&"--json") {
             CommandResult::Text(crate::tps::to_json(&records))
         } else {
