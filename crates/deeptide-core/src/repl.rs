@@ -114,6 +114,14 @@ impl ReplSession {
         self
     }
 
+    pub fn with_pricing_overrides(
+        mut self,
+        overrides: std::collections::HashMap<String, crate::ModelPricing>,
+    ) -> Self {
+        self.agent_loop = self.agent_loop.with_pricing_overrides(overrides);
+        self
+    }
+
     pub fn with_subagent_backend_factory<F>(mut self, factory: F) -> Self
     where
         F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,

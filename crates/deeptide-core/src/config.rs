@@ -130,6 +130,25 @@ pub struct ProviderProfile {
     pub label: Option<String>,
 }
 
+// ── Model pricing ──────────────────────────────────────────────────────────────
+
+/// Per-model pricing override, in **USD per 1M tokens** (matching Swift's
+/// `ModelPricing` and the `pricing` block in `settings.json`).
+///
+/// Unset fields fall back to the built-in pricing for that model, so an entry
+/// can override just the rates it cares about.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelPricingConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<f64>,
+    #[serde(rename = "cache_create", skip_serializing_if = "Option::is_none")]
+    pub cache_create: Option<f64>,
+    #[serde(rename = "cache_read", skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+}
+
 // ── ConfigData ────────────────────────────────────────────────────────────────
 
 /// Parsed content of a `settings.json` file.
@@ -207,6 +226,10 @@ pub struct ConfigData {
     /// Named API provider profiles.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub providers: Option<HashMap<String, ProviderProfile>>,
+
+    /// Per-model pricing overrides (USD per 1M tokens), keyed by model id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<HashMap<String, ModelPricingConfig>>,
 }
 
 impl ConfigData {
@@ -230,7 +253,34 @@ impl ConfigData {
             mcp_servers: merge_maps(self.mcp_servers, other.mcp_servers),
             active_profile: other.active_profile.or(self.active_profile),
             providers: merge_maps(self.providers, other.providers),
+            pricing: merge_maps(self.pricing, other.pricing),
         }
+    }
+
+    /// Convert the configured per-1M pricing overrides into the per-token
+    /// [`ModelPricing`](crate::ModelPricing) map the cost tracker consumes.
+    /// Unset rates fall back to the built-in pricing for each model.
+    pub fn pricing_overrides(&self) -> HashMap<String, crate::ModelPricing> {
+        let mut overrides = HashMap::new();
+        let Some(ref pricing) = self.pricing else {
+            return overrides;
+        };
+        for (model, entry) in pricing {
+            let base = crate::CostTracker::base_pricing(model);
+            let per_token = |value: Option<f64>, fallback: f64| {
+                value.map(|usd| usd / 1_000_000.0).unwrap_or(fallback)
+            };
+            overrides.insert(
+                model.clone(),
+                crate::ModelPricing::new(
+                    per_token(entry.input, base.input),
+                    per_token(entry.output, base.output),
+                    per_token(entry.cache_create, base.cache_create),
+                    per_token(entry.cache_read, base.cache_read),
+                ),
+            );
+        }
+        overrides
     }
 
     /// Look up a provider profile by name.
@@ -518,6 +568,13 @@ impl ConfigStore {
             }
         }
 
+        if let Some(ref pricing) = merged.pricing {
+            lines.push(kv(
+                "pricing",
+                &format!("{} model overrides (USD per 1M tokens)", pricing.len()),
+            ));
+        }
+
         lines.push(String::new());
         lines.push(String::from("Usage:"));
         lines.push(String::from(
@@ -793,6 +850,40 @@ mod tests {
         assert_eq!(merged.thinking.as_deref(), Some("high"));
         // effort is preserved from base when the overlay omits it.
         assert_eq!(merged.effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn pricing_overrides_convert_per_million_to_per_token_with_fallback() {
+        let data: ConfigData = serde_json::from_str(
+            r#"{"pricing": {"custom-model": {"input": 1.0, "output": 2.0, "cache_create": 3.0, "cache_read": 4.0}}}"#,
+        )
+        .expect("parse pricing");
+
+        let overrides = data.pricing_overrides();
+        let pricing = overrides.get("custom-model").expect("override present");
+        // Per-1M values are converted to per-token (divided by 1_000_000).
+        assert!((pricing.input - 1.0 / 1_000_000.0).abs() < f64::EPSILON);
+        assert!((pricing.output - 2.0 / 1_000_000.0).abs() < f64::EPSILON);
+        assert!((pricing.cache_create - 3.0 / 1_000_000.0).abs() < f64::EPSILON);
+        assert!((pricing.cache_read - 4.0 / 1_000_000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pricing_overrides_partial_entry_falls_back_to_built_in_rates() {
+        // Only override the input rate for a known model; the rest should keep
+        // the built-in pricing.
+        let data: ConfigData =
+            serde_json::from_str(r#"{"pricing": {"deepseek-v4-pro": {"input": 9.0}}}"#)
+                .expect("parse pricing");
+
+        let overrides = data.pricing_overrides();
+        let pricing = overrides.get("deepseek-v4-pro").expect("override present");
+        let base = crate::CostTracker::base_pricing("deepseek-v4-pro");
+        assert!((pricing.input - 9.0 / 1_000_000.0).abs() < f64::EPSILON);
+        // Unset rates retain the built-in values.
+        assert!((pricing.output - base.output).abs() < f64::EPSILON);
+        assert!((pricing.cache_create - base.cache_create).abs() < f64::EPSILON);
+        assert!((pricing.cache_read - base.cache_read).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -248,6 +248,17 @@ impl AgentLoop {
         self
     }
 
+    /// Replace the cost tracker with one that applies per-model pricing
+    /// overrides (e.g. from `settings.json`). Keys are model identifiers; rates
+    /// are per-token USD.
+    pub fn with_pricing_overrides(
+        mut self,
+        overrides: std::collections::HashMap<String, crate::ModelPricing>,
+    ) -> Self {
+        self.cost_tracker = CostTracker::with_pricing_overrides(overrides);
+        self
+    }
+
     pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
         self.tool_context = ToolContext::new(cwd);
         self
