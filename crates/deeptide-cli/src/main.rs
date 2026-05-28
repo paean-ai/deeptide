@@ -6,8 +6,14 @@ use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
-    LocalEchoBackend, ReplEvent, ReplSession, tui,
+    CommandCompletionSource, CompletionEngine, LocalEchoBackend, ReplEvent, ReplSession, tui,
 };
+use rustyline::completion::{Completer, Pair};
+use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::Validator;
+use rustyline::{Context, Editor, Helper};
 
 const DEFAULT_MODEL: &str = "deepseek-v4-pro";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -215,8 +221,76 @@ fn collect_prompt(cli: &Cli, stdin: Option<&str>) -> Result<String, String> {
     }
 }
 
+/// Rustyline helper that provides tab-completion for `/command` prefixes
+/// using `CompletionEngine` and the REPL's registered command list.
+struct ReplHelper {
+    commands: Vec<CommandCompletionSource>,
+    use_color: bool,
+}
+
+impl ReplHelper {
+    fn new(commands: Vec<CommandCompletionSource>, use_color: bool) -> Self {
+        Self {
+            commands,
+            use_color,
+        }
+    }
+}
+
+impl Helper for ReplHelper {}
+impl Highlighter for ReplHelper {}
+impl Validator for ReplHelper {}
+impl Hinter for ReplHelper {
+    type Hint = String;
+    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        None
+    }
+}
+
+impl Completer for ReplHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let Some(result) = CompletionEngine::command_completions(line, pos, &self.commands, 8)
+        else {
+            return Ok((pos, vec![]));
+        };
+
+        let pairs = result
+            .candidates
+            .iter()
+            .map(|c| {
+                let repl = c.replacement();
+                let display = if self.use_color {
+                    format!("{repl:<26}\x1b[90m {}\x1b[0m", c.description)
+                } else {
+                    format!("{repl:<26} {}", c.description)
+                };
+                Pair {
+                    display,
+                    replacement: repl,
+                }
+            })
+            .collect();
+
+        Ok((result.token_start, pairs))
+    }
+}
+
+/// Path to the persistent readline history file.
+fn history_file_path() -> Option<PathBuf> {
+    let base = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
+    Some(base.join(".deeptide").join("history"))
+}
+
 fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), String> {
-    let stdin = io::stdin();
     let mut stdout = io::stdout();
     let configured = configured_backend(cli)?;
     let is_configured = configured.is_configured;
@@ -226,10 +300,26 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
         .with_max_turns(cli.max_turns)
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
+    let use_color = std::env::var_os("NO_COLOR").is_none();
+    let rl_config = rustyline::config::Config::builder()
+        .history_ignore_space(true)
+        .completion_type(rustyline::config::CompletionType::List)
+        .build();
+    let helper = ReplHelper::new(repl.command_sources(), use_color);
+    let mut rl: Editor<ReplHelper, rustyline::history::DefaultHistory> =
+        Editor::with_config(rl_config).map_err(|error| error.to_string())?;
+    rl.set_helper(Some(helper));
+
+    let history_path = history_file_path();
+    if let Some(ref path) = history_path {
+        // Non-fatal if the file doesn't exist yet
+        let _ = rl.load_history(path);
+    }
+
     writeln!(stdout, "{}", repl.banner()).map_err(|error| error.to_string())?;
     writeln!(
         stdout,
-        "Permission mode: {}. Type /help for commands, /exit to quit.",
+        "Permission mode: {}. Type /help for commands, Ctrl+D to exit.",
         permission_mode.label()
     )
     .map_err(|error| error.to_string())?;
@@ -242,42 +332,75 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
     }
 
     loop {
+        // Print the status bar above the prompt line.
         writeln!(
             stdout,
             "{}",
             repl.status_line().render(terminal_width().unwrap_or(100))
         )
         .map_err(|error| error.to_string())?;
-        write!(stdout, "{}", repl.prompt()).map_err(|error| error.to_string())?;
         stdout.flush().map_err(|error| error.to_string())?;
 
-        let mut line = String::new();
-        let bytes = stdin
-            .read_line(&mut line)
-            .map_err(|error| error.to_string())?;
-        if bytes == 0 {
-            writeln!(stdout).map_err(|error| error.to_string())?;
-            return Ok(());
-        }
-
-        for event in repl.submit(&line) {
-            match event {
-                ReplEvent::Output(text) => {
-                    writeln!(
-                        stdout,
-                        "{}",
-                        tui::render_output_panel(
-                            &text,
-                            terminal_width().unwrap_or(100),
-                            std::env::var_os("NO_COLOR").is_none(),
-                        )
-                    )
-                    .map_err(|error| error.to_string())?;
+        let readline = rl.readline(&repl.prompt());
+        match readline {
+            Ok(line) => {
+                let trimmed = line.trim().to_owned();
+                if trimmed.is_empty() {
+                    continue;
                 }
-                ReplEvent::Exit => return Ok(()),
+                if let Err(err) = rl.add_history_entry(trimmed.as_str()) {
+                    // History errors are non-fatal
+                    let _ = err;
+                }
+
+                for event in repl.submit(&trimmed) {
+                    match event {
+                        ReplEvent::Output(text) => {
+                            writeln!(
+                                stdout,
+                                "{}",
+                                tui::render_output_panel(
+                                    &text,
+                                    terminal_width().unwrap_or(100),
+                                    use_color
+                                )
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
+                        ReplEvent::Exit => {
+                            if let Some(ref path) = history_path {
+                                save_history(&mut rl, path);
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
             }
+            Err(ReadlineError::Interrupted) => {
+                // Ctrl+C — echo ^C and continue (matches Swift/zero-cli behaviour)
+                writeln!(stdout, "^C").map_err(|error| error.to_string())?;
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                // Ctrl+D on empty line — exit gracefully
+                writeln!(stdout).map_err(|error| error.to_string())?;
+                break;
+            }
+            Err(error) => return Err(error.to_string()),
         }
     }
+
+    if let Some(ref path) = history_path {
+        save_history(&mut rl, path);
+    }
+    Ok(())
+}
+
+fn save_history(rl: &mut Editor<ReplHelper, rustyline::history::DefaultHistory>, path: &PathBuf) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = rl.save_history(path);
 }
 
 fn terminal_width() -> Option<usize> {
