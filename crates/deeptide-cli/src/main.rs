@@ -472,6 +472,19 @@ fn history_file_path() -> Option<PathBuf> {
     Some(base.join(".deeptide").join("history"))
 }
 
+/// Fires `SessionEnd` hooks when dropped, so they run on every way the
+/// interactive loop can exit (return, break, or error) without duplicating the
+/// call at each site.
+struct SessionEndGuard(deeptide_core::HookEngine);
+
+impl Drop for SessionEndGuard {
+    fn drop(&mut self) {
+        if self.0.has_hooks(deeptide_core::HookEvent::SessionEnd) {
+            let _ = self.0.run(deeptide_core::HookEvent::SessionEnd, None, None);
+        }
+    }
+}
+
 fn run_interactive(
     cli: &Cli,
     permission_mode: PermissionMode,
@@ -479,6 +492,15 @@ fn run_interactive(
     hooks: deeptide_core::HookEngine,
 ) -> Result<(), String> {
     let mut stdout = io::stdout();
+
+    // SessionStart fires once when the interactive session begins; SessionEnd
+    // fires on every exit path via the RAII guard below (normal exit, /exit,
+    // Ctrl+D, or an error return). The Swift implementation models these events
+    // but does not yet fire them; Rust completes the configured hook lifecycle.
+    if hooks.has_hooks(deeptide_core::HookEvent::SessionStart) {
+        let _ = hooks.run(deeptide_core::HookEvent::SessionStart, None, None);
+    }
+    let _session_end = SessionEndGuard(hooks.clone());
 
     // In interactive mode, always enable streaming so text appears live rather
     // than appearing all-at-once after the full response is assembled.  Track

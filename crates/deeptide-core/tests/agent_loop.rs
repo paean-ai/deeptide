@@ -350,6 +350,32 @@ fn agent_loop_pre_tool_use_hook_blocks_tool() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn agent_loop_user_prompt_submit_hook_fires_on_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("prompt-submitted.txt");
+    let hooks = SettingsHooks {
+        user_prompt_submit: Some(vec![HookEntry {
+            matcher: String::from("*"),
+            command: format!("printf '%s' \"$TIDE_EVENT\" > {}", marker.display()),
+            timeout_ms: Some(5_000),
+            disabled: None,
+            name: Some(String::from("record-prompt")),
+        }]),
+        ..Default::default()
+    };
+    let engine = HookEngine::new(hooks, dir.path());
+    let mut loop_ = AgentLoop::new(Box::new(StaticBackend::new("ok")))
+        .with_hooks(engine)
+        .with_max_turns(2);
+
+    let _ = loop_.run("hello there");
+
+    let recorded = std::fs::read_to_string(&marker).expect("UserPromptSubmit hook should run");
+    assert_eq!(recorded, "UserPromptSubmit");
+}
+
 #[test]
 fn agent_loop_snip_tool_trims_active_message_history() {
     let mut loop_ = AgentLoop::new(Box::new(SnipCallingBackend::default())).with_max_turns(3);
