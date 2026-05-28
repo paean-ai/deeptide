@@ -95,6 +95,14 @@ struct Cli {
     )]
     profile: Option<String>,
 
+    #[arg(
+        long = "fallback-model",
+        env = "DEEPTIDE_FALLBACK_MODEL",
+        value_name = "MODEL",
+        help = "Model to retry with once when the primary model is transiently overloaded (HTTP 529/503)."
+    )]
+    fallback_model: Option<String>,
+
     #[arg(long, default_value_t = 4096)]
     max_output_tokens: usize,
 
@@ -231,6 +239,11 @@ fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
         && let Some(key) = cfg_api_key
     {
         cli.api_key = Some(key.clone());
+    }
+    if cli.fallback_model.is_none()
+        && let Some(fallback) = cfg.fallback_model.as_ref()
+    {
+        cli.fallback_model = Some(fallback.clone());
     }
     if let Some(false) = cfg.prompt_cache {
         cli.no_prompt_cache = true;
@@ -661,6 +674,7 @@ fn configured_backend_with_handler(
     config.max_tokens = cli.max_output_tokens;
     config.enable_prompt_caching = !cli.no_prompt_cache;
     config.enable_streaming = cli.stream || streaming_handler.is_some();
+    config.fallback_model = cli.fallback_model.clone();
     if let Some(system_prompt) = resolve_system_prompt(cli)? {
         config = config.with_system_prompt(system_prompt);
     }
@@ -826,6 +840,7 @@ mod tests {
             base_url: "https://api.anthropic.com".to_owned(),
             api_key: None,
             profile: None,
+            fallback_model: None,
             max_output_tokens: 4096,
             max_turns: 25,
             system_prompt: None,
