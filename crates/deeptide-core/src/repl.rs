@@ -219,6 +219,13 @@ impl ReplSession {
             "memory" | "mem" => MemoryCommand.execute(args, &context),
             "remember" => RememberCommand.execute(args, &context),
             "permission" | "perm" | "permissions" => self.execute_permission_command(args),
+            "commit" => return self.execute_commit_command(args),
+            "review" => return self.execute_review_command(args),
+            "simplify" => return self.execute_simplify_command(args),
+            "skills" | "skill" => self.execute_skills_command(args),
+            "reminder" | "anchor" | "reorient" => return self.execute_reminder_command(args),
+            "dream" => return self.execute_dream_command(args),
+            "cron" => self.execute_cron_command(args),
             _ => CommandResult::Text(format!(
                 "Unknown command: /{name}\nType /help for the full list."
             )),
@@ -773,10 +780,249 @@ impl ReplSession {
         ))
     }
 
+    fn execute_commit_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let result = self.tool_registry.call(
+            "Skill",
+            serde_json::json!({"skill": "commit", "args": args}),
+            &self.tool_context,
+        );
+        if result.is_error {
+            return vec![ReplEvent::Output(format!("/commit: {}", result.content))];
+        }
+        let mut events = vec![ReplEvent::Output(String::from(
+            "Dispatching commit skill to the model.",
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&result.content)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    fn execute_review_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        if args.trim().is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "Usage: /review <pr-number-or-url>",
+            ))];
+        }
+        let result = self.tool_registry.call(
+            "Skill",
+            serde_json::json!({"skill": "review-pr", "args": args}),
+            &self.tool_context,
+        );
+        if result.is_error {
+            return vec![ReplEvent::Output(format!("/review: {}", result.content))];
+        }
+        let mut events = vec![ReplEvent::Output(String::from(
+            "Dispatching review-pr skill to the model.",
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&result.content)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    fn execute_simplify_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let result = self.tool_registry.call(
+            "Skill",
+            serde_json::json!({"skill": "simplify", "args": args}),
+            &self.tool_context,
+        );
+        if result.is_error {
+            return vec![ReplEvent::Output(format!("/simplify: {}", result.content))];
+        }
+        let mut events = vec![ReplEvent::Output(String::from(
+            "Dispatching simplify skill to the model.",
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&result.content)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    fn execute_skills_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /skills"));
+        }
+        let direct: &[(&str, &str, &str)] = &[
+            (
+                "commit",
+                "/commit",
+                "Stage changes, draft message, and commit",
+            ),
+            ("review-pr", "/review", "Review a GitHub pull request"),
+            (
+                "simplify",
+                "/simplify",
+                "Review changed code for quality and efficiency",
+            ),
+        ];
+        let model_only: &[(&str, &str)] = &[
+            ("init", "Bootstrap project memory and write TIDE.md"),
+            ("batch", "Plan and execute large parallelizable changes"),
+            ("publish", "Publish a static frontend on clide.app"),
+            ("update-config", "Configure Deeptide CLI settings"),
+        ];
+        let total = direct.len() + model_only.len();
+        let mut lines = vec![
+            String::new(),
+            format!("Built-in skills ({total}):"),
+            String::new(),
+        ];
+        for (name, cmd, desc) in direct {
+            lines.push(format!("  {name:<20} {desc}"));
+            lines.push(format!("  {:<20} trigger: {cmd}", ""));
+        }
+        for (name, desc) in model_only {
+            lines.push(format!("  {name:<20} {desc}"));
+            lines.push(format!("  {:<20} ask in prose, or use the Skill tool", ""));
+        }
+        lines.push(String::new());
+        lines.push(String::from(
+            "Skills expand to a structured prompt the model executes. $ARGUMENTS is replaced with the command tail.",
+        ));
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    fn execute_reminder_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let sub = args.trim().to_ascii_lowercase();
+        let text = self.build_reminder_text();
+        match sub.as_str() {
+            "" | "send" | "now" => {
+                let mut events = vec![ReplEvent::Output(String::from(
+                    "Queued a short state reminder for the next model turn.",
+                ))];
+                events.extend(
+                    self.agent_loop
+                        .run(&text)
+                        .into_iter()
+                        .filter_map(agent_event_to_repl_event),
+                );
+                events
+            }
+            "show" | "print" => vec![ReplEvent::Output(text)],
+            _ => vec![ReplEvent::Output(String::from(
+                "Usage: /reminder [show|send]",
+            ))],
+        }
+    }
+
+    fn build_reminder_text(&self) -> String {
+        let cwd = self.tool_context.cwd.display().to_string();
+        let model = self.agent_loop.model().to_owned();
+        let tool_names = self.tool_registry.names();
+        let preferred = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite"];
+        let available: std::collections::HashSet<&str> = tool_names.iter().copied().collect();
+        let listed: Vec<&str> = preferred
+            .iter()
+            .copied()
+            .filter(|t| available.contains(t))
+            .collect();
+        let tools = if listed.is_empty() {
+            preferred.join(", ")
+        } else {
+            listed.join(", ")
+        };
+        format!(
+            "<system-reminder>\n\
+            You are Deeptide, a coding agent.\n\
+            cwd: {cwd}\n\
+            model: {model}\n\
+            You can inspect and modify this workspace through tool calls. Do not claim you cannot access local files.\n\
+            Core tools available: {tools}.\n\
+            For file questions, call Read/Glob/Grep/Bash as needed. For requested file edits, call Write/Edit instead of printing large code blocks.\n\
+            Continue the user's active coding task from the transcript; do not invent unrelated goals or identities.\n\
+            </system-reminder>\n\
+            Reply briefly that you are re-oriented, then proceed with the user's next instruction."
+        )
+    }
+
+    fn execute_dream_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let sub = args.trim().to_ascii_lowercase();
+        match sub.as_str() {
+            "run" | "now" | "" => {
+                let cwd = self.tool_context.cwd.display().to_string();
+                let prompt = format!(
+                    "[dream manual run — execute once, do NOT create cron jobs or loops]\n\n\
+                    You are running Deeptide's local dream consolidation pass for workspace:\n\
+                    {cwd}\n\n\
+                    Goal:\n\
+                    - Review recent useful session history.\n\
+                    - Extract durable project facts, decisions, preferences, recurring constraints, and unresolved follow-ups.\n\
+                    - Save or update concise long-term memory in `.deeptide/MEMORY.md` or project memory files.\n\
+                    - Merge duplicate or stale entries instead of appending noise.\n\n\
+                    Rules:\n\
+                    - Execute exactly once.\n\
+                    - Do not edit system prompts, settings, cron jobs, or provider configuration.\n\
+                    - Do not add memories that are generic, obvious, temporary, secret, or unsupported by session history.\n\
+                    - Keep memory files compact and human-readable."
+                );
+                let mut events = vec![ReplEvent::Output(String::from(
+                    "Queued one dream consolidation run.",
+                ))];
+                events.extend(
+                    self.agent_loop
+                        .run(&prompt)
+                        .into_iter()
+                        .filter_map(agent_event_to_repl_event),
+                );
+                events
+            }
+            "status" | "list" => vec![ReplEvent::Output(String::from(
+                "No dream loop is active. Use `/dream run` to consolidate session history once.",
+            ))],
+            "start" | "on" | "enable" => vec![ReplEvent::Output(String::from(
+                "Persistent dream loop is not available in the Rust REPL yet. Use `/dream run` to consolidate once.",
+            ))],
+            "stop" | "off" | "disable" | "cancel" => {
+                vec![ReplEvent::Output(String::from("No dream loop is active."))]
+            }
+            _ => vec![ReplEvent::Output(String::from(
+                "Usage: /dream [run | status]",
+            ))],
+        }
+    }
+
+    fn execute_cron_command(&self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+        let sub = parts.first().copied().unwrap_or("").to_ascii_lowercase();
+        match sub.as_str() {
+            "" | "list" | "ls" => {
+                let result =
+                    self.tool_registry
+                        .call("CronList", serde_json::json!({}), &self.tool_context);
+                CommandResult::Text(result.content)
+            }
+            "delete" | "rm" | "remove" => {
+                let id = parts.get(1).copied().unwrap_or("");
+                if id.is_empty() {
+                    return CommandResult::Text(String::from("Usage: /cron delete <id>"));
+                }
+                let result = self.tool_registry.call(
+                    "CronDelete",
+                    serde_json::json!({"id": id}),
+                    &self.tool_context,
+                );
+                CommandResult::Text(result.content)
+            }
+            _ => CommandResult::Text(String::from("Usage: /cron [list | delete <id>]")),
+        }
+    }
+
     fn command_context(&self) -> CommandContext {
         let cost_display_enabled = Arc::clone(&self.cost_display_enabled);
         let set_cost_display_enabled = Arc::clone(&self.cost_display_enabled);
         let summary = self.agent_loop.cost_tracker().summary();
+        let cwd = self.tool_context.cwd.clone();
 
         CommandContext::builder()
             .clear_conversation(|| Some(String::new()))
@@ -787,6 +1033,7 @@ impl ReplSession {
             .set_cost_display_enabled(move |enabled| {
                 set_cost_display_enabled.store(enabled, Ordering::SeqCst);
             })
+            .cwd(move || cwd.clone())
             .build()
     }
 }
@@ -1027,6 +1274,48 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             ["perm", "permissions"],
             "List or modify permission rules",
             "/permission [--allow Pattern | --deny Pattern | --remove pattern]",
+        ),
+        CommandCompletionSource::new(
+            "commit",
+            Vec::<&str>::new(),
+            "Run the commit skill (stage changes, draft message, commit)",
+            "/commit [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "review",
+            Vec::<&str>::new(),
+            "Run the review-pr skill on a GitHub PR",
+            "/review <pr-number-or-url>",
+        ),
+        CommandCompletionSource::new(
+            "simplify",
+            Vec::<&str>::new(),
+            "Review changed code for reuse, quality, and efficiency",
+            "/simplify [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "skills",
+            ["skill"],
+            "List available built-in skills",
+            "/skills",
+        ),
+        CommandCompletionSource::new(
+            "reminder",
+            ["anchor", "reorient"],
+            "Re-anchor the agent's cwd/model/tool state",
+            "/reminder [show|send]",
+        ),
+        CommandCompletionSource::new(
+            "dream",
+            Vec::<&str>::new(),
+            "Consolidate session history into local long-term memory",
+            "/dream [run | status]",
+        ),
+        CommandCompletionSource::new(
+            "cron",
+            Vec::<&str>::new(),
+            "Manage scheduled cron jobs",
+            "/cron [list | delete <id>]",
         ),
     ]
 }

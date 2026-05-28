@@ -549,14 +549,7 @@ fn is_plan_safe_executable(executable: &str, args: &[&str]) -> bool {
             // common bypasses of the previous `" -exec "`/`" -delete"` substring
             // checks.
             const FIND_DESTRUCTIVE: &[&str] = &[
-                "-delete",
-                "-exec",
-                "-execdir",
-                "-ok",
-                "-okdir",
-                "-fprint",
-                "-fprintf",
-                "-fprint0",
+                "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fprint0",
                 "-fls",
             ];
             for arg in args {
