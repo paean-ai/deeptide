@@ -333,8 +333,10 @@ impl Tool for GlobTool {
 
         let matcher = GlobMatcher::new(pattern);
         let mut matches = Vec::new();
-        collect_files(&base, &base, &mut |relative, _full_path| {
-            if matcher.matches(relative) {
+        collect_files(&base, &base, &mut |relative, full_path| {
+            // Don't reveal the existence/paths of sensitive files (e.g. `.env`,
+            // `id_rsa`) unless they have been explicitly opened this session.
+            if matcher.matches(relative) && crate::sensitive_file::is_allowed(full_path) {
                 matches.push(relative.to_string_lossy().replace('\\', "/"));
             }
             matches.len() < 100
@@ -9511,6 +9513,9 @@ impl Tool for WriteTool {
         };
 
         let path = context.resolve_path(file_path);
+        if !crate::sensitive_file::is_allowed(&path) {
+            return ToolResult::error(crate::sensitive_file::denial_message(&path));
+        }
         let existed = path.exists();
         if let Some(parent) = path.parent()
             && let Err(error) = fs::create_dir_all(parent)
@@ -9573,6 +9578,9 @@ impl Tool for EditTool {
         }
 
         let path = context.resolve_path(file_path);
+        if !crate::sensitive_file::is_allowed(&path) {
+            return ToolResult::error(crate::sensitive_file::denial_message(&path));
+        }
         let replace_all = input
             .get("replace_all")
             .and_then(serde_json::Value::as_bool)
