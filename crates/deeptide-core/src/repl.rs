@@ -20,6 +20,32 @@ pub enum ReplEvent {
 
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderProfile {
+    Legacy,
+    DeepSeek,
+    Paean,
+}
+
+impl ProviderProfile {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "legacy" | "env" => Some(Self::Legacy),
+            "deepseek" | "official" | "direct" | "default" => Some(Self::DeepSeek),
+            "paean" | "paean-ai" | "multimodal" => Some(Self::Paean),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::DeepSeek => "deepseek",
+            Self::Paean => "paean",
+        }
+    }
+}
+
 pub struct ReplSession {
     agent_loop: AgentLoop,
     cost_display_enabled: Arc<AtomicBool>,
@@ -27,6 +53,7 @@ pub struct ReplSession {
     tool_context: ToolContext,
     clipboard_writer: ClipboardWriter,
     additional_dirs: Vec<std::path::PathBuf>,
+    provider_profile: ProviderProfile,
 }
 
 impl ReplSession {
@@ -40,6 +67,7 @@ impl ReplSession {
             ),
             clipboard_writer: Arc::new(write_to_system_clipboard),
             additional_dirs: Vec::new(),
+            provider_profile: ProviderProfile::Legacy,
         }
     }
 
@@ -137,6 +165,7 @@ impl ReplSession {
             "compact" | "compress" => CompactCommand.execute(args, &context),
             "cost" => CostCommand.execute(args, &context),
             "model" | "m" => self.execute_model_command(args),
+            "provider" | "profiles" => self.execute_provider_command(args),
             "status" => self.execute_status_command(args),
             "context" | "ctx" => self.execute_context_command(args),
             "retry" | "r" | "again" => return self.execute_retry_command(args),
@@ -207,6 +236,41 @@ impl ReplSession {
             &self.agent_loop,
             &self.tool_context.cwd,
             &self.additional_dirs,
+            self.provider_profile,
+        ))
+    }
+
+    fn execute_provider_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() || trimmed == "status" {
+            return CommandResult::Text(render_provider_status(self.provider_profile));
+        }
+
+        if trimmed == "list" {
+            return CommandResult::Text(render_provider_list(self.provider_profile));
+        }
+
+        if let Some(raw) = trimmed.strip_prefix("use ") {
+            let raw = raw.trim();
+            if raw.is_empty() || raw.split_whitespace().count() > 1 {
+                return CommandResult::Text(String::from(
+                    "Usage: /provider use <name|deepseek|paean>",
+                ));
+            }
+            let Some(profile) = ProviderProfile::parse(raw) else {
+                return CommandResult::Text(format!(
+                    "Unknown provider profile `{raw}`. Use `/provider list`."
+                ));
+            };
+            self.provider_profile = profile;
+            return CommandResult::Text(format!(
+                "Active provider profile: {} (recorded for this REPL session; launch configuration controls the current model client)",
+                profile.name()
+            ));
+        }
+
+        CommandResult::Text(String::from(
+            "Usage: /provider [list | use <name|deepseek|paean> | status]",
         ))
     }
 
@@ -528,6 +592,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
         CommandCompletionSource::from_command(&CompactCommand),
         CommandCompletionSource::from_command(&CostCommand),
         CommandCompletionSource::new(
+            "provider",
+            ["profiles"],
+            "Show or switch named provider profiles",
+            "/provider [list | use <name|deepseek|paean> | status]",
+        ),
+        CommandCompletionSource::new(
             "model",
             ["m"],
             "Switch the AI model at runtime",
@@ -608,6 +678,7 @@ fn render_status(
     agent_loop: &AgentLoop,
     cwd: &std::path::Path,
     additional_dirs: &[std::path::PathBuf],
+    provider_profile: ProviderProfile,
 ) -> String {
     let summary = agent_loop.cost_tracker().summary();
     let cache = summary.cache_health();
@@ -621,6 +692,7 @@ fn render_status(
         format!("  CWD:      {}", cwd.display()),
         format!("  + dirs:   {}", render_additional_dirs(additional_dirs)),
         format!("  Branch:   {branch}"),
+        format!("  Provider: {}", provider_profile.name()),
         String::from("  Session:  (not persisted)"),
         format!(
             "  Turns:    {} / {}",
@@ -839,6 +911,51 @@ fn render_model_status(current_model: &str) -> String {
     lines.push(String::from(
         "Usage: /model <name-or-alias>  (e.g. /model flash, /model pro)",
     ));
+    lines.join("\n")
+}
+
+fn render_provider_status(active: ProviderProfile) -> String {
+    let mut lines = vec![
+        format!("Current session provider profile: {}", active.name()),
+        String::from("Provider selection is recorded in this REPL session."),
+    ];
+    if active == ProviderProfile::Legacy {
+        lines.push(String::from(
+            "Effective cloud settings still follow launch-time DEEPTIDE_*, ZERO_CLI_*, and ANTHROPIC_* environment resolution.",
+        ));
+    } else {
+        lines.push(String::from(
+            "The existing model client was created at launch; restart or relaunch with matching provider settings to change HTTP connection details.",
+        ));
+    }
+    lines.push(String::from(
+        "Use /provider list to inspect built-in profiles.",
+    ));
+    lines.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+fn render_provider_list(active: ProviderProfile) -> String {
+    let mut lines = vec![String::from("Provider profiles:")];
+    for (profile, base_url, note) in [
+        (
+            ProviderProfile::DeepSeek,
+            "https://api.deepseek.com",
+            "built-in DeepSeek official endpoint",
+        ),
+        (
+            ProviderProfile::Paean,
+            "https://api.paean.ai",
+            "built-in Paean AI gateway",
+        ),
+        (
+            ProviderProfile::Legacy,
+            "(launch environment)",
+            "DEEPTIDE_*, ZERO_CLI_*, and ANTHROPIC_* resolution",
+        ),
+    ] {
+        let mark = if profile == active { "*" } else { " " };
+        lines.push(format!(" {mark} {}  {base_url} - {note}", profile.name()));
+    }
     lines.join("\n")
 }
 

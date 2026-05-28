@@ -161,6 +161,63 @@ fn repl_model_command_rejects_extra_arguments() {
 }
 
 #[test]
+fn repl_provider_command_reports_status_and_profiles() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    let status = only_output(repl.submit("/provider"));
+    assert!(status.contains("Current session provider profile: legacy"));
+    assert!(status.contains("ZERO_CLI_*"));
+
+    let listed = only_output(repl.submit("/profiles list"));
+    assert!(listed.contains("* legacy"));
+    assert!(listed.contains("deepseek  https://api.deepseek.com"));
+    assert!(listed.contains("paean  https://api.paean.ai"));
+}
+
+#[test]
+fn repl_provider_command_switches_builtin_profiles() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        only_output(repl.submit("/provider use paean-ai")),
+        "Active provider profile: paean (recorded for this REPL session; launch configuration controls the current model client)"
+    );
+    let status = only_output(repl.submit("/status"));
+    assert!(status.contains("Provider: paean"));
+
+    assert_eq!(
+        only_output(repl.submit("/provider use official")),
+        "Active provider profile: deepseek (recorded for this REPL session; launch configuration controls the current model client)"
+    );
+    let listed = only_output(repl.submit("/provider list"));
+    assert!(listed.contains("* deepseek"));
+}
+
+#[test]
+fn repl_provider_command_rejects_unknown_and_invalid_arguments() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/provider use"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /provider [list | use <name|deepseek|paean> | status]"
+        ))]
+    );
+    assert_eq!(
+        repl.submit("/provider use one two"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /provider use <name|deepseek|paean>"
+        ))]
+    );
+    assert_eq!(
+        repl.submit("/provider use unknown"),
+        vec![ReplEvent::Output(String::from(
+            "Unknown provider profile `unknown`. Use `/provider list`."
+        ))]
+    );
+}
+
+#[test]
 fn repl_status_command_reports_session_shape() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut repl = ReplSession::new(Box::new(StaticBackend))
@@ -176,6 +233,7 @@ fn repl_status_command_reports_session_shape() {
     assert!(output.contains("Model:    deepseek-v4-flash"));
     assert!(output.contains("+ dirs:   (none)"));
     assert!(output.contains("Branch:   (no git)"));
+    assert!(output.contains("Provider: legacy"));
     assert!(output.contains("Session:  (not persisted)"));
     assert!(output.contains("Turns:    1 / 7"));
     assert!(output.contains("Messages: 2"));
