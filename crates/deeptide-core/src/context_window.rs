@@ -23,8 +23,9 @@ use crate::agent_loop::{ConversationMessage, MessageRole};
 /// Default ratio used to derive the soft threshold from `max_tokens`.
 ///
 /// When the live transcript exceeds `max_tokens * SOFT_RATIO` the manager will
-/// start compressing the oldest non-pinned messages.
-const SOFT_RATIO: f32 = 0.8;
+/// start compressing the oldest non-pinned messages. Matches the Swift
+/// implementation's `CompactionManager.autoCompactThreshold`.
+const SOFT_RATIO: f32 = 0.85;
 
 /// Default number of recent messages preserved verbatim regardless of token
 /// pressure. Picked to comfortably cover the last user turn plus the agent's
@@ -51,7 +52,7 @@ pub struct ContextWindowConfig {
     /// this value when possible.
     pub max_tokens: usize,
     /// Soft threshold at which compression starts. Defaults to
-    /// `max_tokens * 0.8`.
+    /// `max_tokens * 0.85`.
     pub soft_tokens: usize,
     /// Number of most recent messages preserved verbatim.
     pub window_size: usize,

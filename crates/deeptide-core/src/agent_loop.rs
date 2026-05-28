@@ -203,6 +203,10 @@ pub trait AgentBackend: Send {
 
 pub type SubAgentBackendFactory = Arc<dyn Fn(&str) -> Box<dyn AgentBackend> + Send + Sync>;
 
+/// Fallback context-window budget when the model is unknown. Matches
+/// [`ContextWindowConfig::default`] and Swift's `forModel` default.
+const DEFAULT_CONTEXT_WINDOW: usize = 128_000;
+
 pub struct AgentLoop {
     backend: Box<dyn AgentBackend>,
     messages: Vec<ConversationMessage>,
@@ -258,11 +262,29 @@ impl AgentLoop {
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self.refresh_context_window();
         self
     }
 
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = model.into();
+        self.refresh_context_window();
+    }
+
+    /// Resize the context window to the current model's token budget, mirroring
+    /// Swift's `resolvedContextWindow = ModelContextWindow.forModel(model)`.
+    /// Auto-compaction then triggers at the model-appropriate threshold rather
+    /// than a fixed default.
+    fn refresh_context_window(&mut self) {
+        let limit = usize::try_from(crate::tools::model_context_window(&self.model))
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        self.context_window =
+            ContextWindowManager::new(ContextWindowConfig::with_max_tokens(limit));
+    }
+
+    /// The model's context-window token budget currently driving auto-compaction.
+    pub fn context_window_limit(&self) -> usize {
+        self.context_window.config().max_tokens
     }
 
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
