@@ -2200,6 +2200,65 @@ fn glob_tool_finds_matching_files() {
 }
 
 #[test]
+fn glob_tool_excludes_sensitive_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "").expect("write notes");
+    std::fs::write(temp.path().join(".env"), "API_KEY=secret\n").expect("write .env");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Glob",
+        serde_json::json!({"pattern": "**/*"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("notes.txt"));
+    assert!(
+        !result.content.contains(".env"),
+        "Glob must not reveal sensitive file paths: {}",
+        result.content
+    );
+}
+
+#[test]
+fn write_tool_blocks_sensitive_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Write",
+        serde_json::json!({"file_path": ".env", "content": "API_KEY=leaked\n"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error, "writing a sensitive file should be denied");
+    assert!(result.content.contains("sensitive"));
+    assert!(result.content.contains("/open"));
+    assert!(
+        !temp.path().join(".env").exists(),
+        "the sensitive file must not be created"
+    );
+}
+
+#[test]
+fn edit_tool_blocks_sensitive_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join(".env"), "API_KEY=old\n").expect("write .env");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Edit",
+        serde_json::json!({"file_path": ".env", "old_string": "old", "new_string": "new"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error, "editing a sensitive file should be denied");
+    assert!(result.content.contains("sensitive"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(".env")).expect("read"),
+        "API_KEY=old\n",
+        "the sensitive file must be left unmodified"
+    );
+}
+
+#[test]
 fn grep_tool_finds_files_with_matches() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(temp.path().join("src")).expect("mkdir");
