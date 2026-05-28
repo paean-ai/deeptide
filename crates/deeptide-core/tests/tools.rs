@@ -924,6 +924,35 @@ fn plan_mode_tools_return_approval_flow_text() {
 }
 
 #[test]
+fn exit_plan_mode_echoes_zero_cli_plan_metadata() {
+    let exit = ExitPlanModeTool.call(
+        serde_json::json!({
+            "plan": "1. Inspect code\n2. Run tests",
+            "planFilePath": "/tmp/plan.md",
+            "planWasEdited": true,
+            "allowedPrompts": [
+                {"tool": "Bash", "prompt": "Run cargo test"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!exit.is_error);
+    assert!(exit.content.contains("Plan file: /tmp/plan.md"));
+    assert!(exit.content.contains("Plan was edited before approval."));
+    assert!(
+        exit.content
+            .contains("Plan:\n1. Inspect code\n2. Run tests")
+    );
+    assert!(exit.content.contains("- Bash: Run cargo test"));
+    assert!(
+        !exit
+            .content
+            .contains("The plan has been written to the plan file")
+    );
+}
+
+#[test]
 fn clipboard_tool_validates_operation_and_write_content() {
     let missing_operation = ClipboardTool.call(serde_json::json!({}), &ToolContext::new("."));
     assert!(missing_operation.is_error);

@@ -1320,9 +1320,36 @@ impl Tool for ExitPlanModeTool {
                 .join("\n")
         };
 
-        ToolResult::text(format!(
-            "Plan is ready for review. Implementation will require:\n{prompt_list}\n\nThe plan has been written to the plan file. Please review and approve to begin implementation."
-        ))
+        let plan = optional_trimmed_string(&input, "plan");
+        let plan_file_path = optional_trimmed_string(&input, "planFilePath")
+            .or_else(|| optional_trimmed_string(&input, "plan_file_path"));
+        let plan_was_edited = input
+            .get("planWasEdited")
+            .or_else(|| input.get("plan_was_edited"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        let mut output =
+            format!("Plan is ready for review. Implementation will require:\n{prompt_list}");
+
+        if let Some(path) = plan_file_path {
+            output.push_str("\n\nPlan file: ");
+            output.push_str(&path);
+        }
+        if plan_was_edited {
+            output.push_str("\nPlan was edited before approval.");
+        }
+        if let Some(plan) = plan {
+            output.push_str("\n\nPlan:\n");
+            output.push_str(&plan);
+            output.push_str("\n\nPlease review and approve to begin implementation.");
+        } else {
+            output.push_str(
+                "\n\nThe plan has been written to the plan file. Please review and approve to begin implementation.",
+            );
+        }
+
+        ToolResult::text(output)
     }
 }
 
@@ -3366,6 +3393,11 @@ fn extract_allowed_prompts(input: &serde_json::Value) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn optional_trimmed_string(input: &serde_json::Value, key: &str) -> Option<String> {
+    let value = input.get(key)?.as_str()?.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn json_usize(input: &serde_json::Value, key: &str) -> Option<usize> {

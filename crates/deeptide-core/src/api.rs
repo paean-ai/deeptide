@@ -463,6 +463,18 @@ fn tool_schemas() -> Vec<WireTool> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "plan": {
+                        "type": "string",
+                        "description": "Optional plan content to present for review. Hosts may inject this when the plan was edited or stored outside the active transcript."
+                    },
+                    "planFilePath": {
+                        "type": "string",
+                        "description": "Optional path to the plan file presented to the user."
+                    },
+                    "planWasEdited": {
+                        "type": "boolean",
+                        "description": "Whether the plan was edited before approval."
+                    },
                     "allowedPrompts": {
                         "type": "array",
                         "description": "Categories of actions needed to implement the plan.",
@@ -1345,6 +1357,24 @@ mod tests {
         assert_eq!(
             memory_write.input_schema["required"],
             serde_json::json!(["title", "body", "reason"])
+        );
+
+        let exit_plan_mode = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "ExitPlanMode")
+            .expect("ExitPlanMode tool schema should be declared");
+        assert_eq!(
+            exit_plan_mode.input_schema["properties"]["plan"]["type"],
+            serde_json::json!("string")
+        );
+        assert_eq!(
+            exit_plan_mode.input_schema["properties"]["planFilePath"]["type"],
+            serde_json::json!("string")
+        );
+        assert_eq!(
+            exit_plan_mode.input_schema["properties"]["planWasEdited"]["type"],
+            serde_json::json!("boolean")
         );
 
         for name in [
