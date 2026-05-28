@@ -218,6 +218,72 @@ fn repl_provider_command_rejects_unknown_and_invalid_arguments() {
 }
 
 #[test]
+fn repl_swift_parity_convenience_commands_are_available() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    let help = only_output(repl.submit("/help"));
+    for command in [
+        "/fast",
+        "/tps",
+        "/debug",
+        "/keybindings",
+        "/sessions",
+        "/resume",
+    ] {
+        assert!(help.contains(command), "help should list {command}");
+    }
+
+    assert_eq!(
+        only_output(repl.submit("/fast")),
+        "Fast mode: use the --fast CLI flag at launch. Runtime toggle coming in a future update."
+    );
+    assert_eq!(
+        only_output(repl.submit("/faster")),
+        "Fast mode: use the --fast CLI flag at launch. Runtime toggle coming in a future update."
+    );
+    assert_eq!(only_output(repl.submit("/debug")), "Debug mode: on");
+    assert_eq!(only_output(repl.submit("/dbg")), "Debug mode: off");
+
+    let keys = only_output(repl.submit("/keys"));
+    assert!(keys.contains("Key bindings:"));
+    assert!(keys.contains("Ctrl+C"));
+
+    assert_eq!(
+        only_output(repl.submit("/sessions")),
+        "No persisted sessions are available in the Rust REPL yet. Use /export [path] to save the current transcript."
+    );
+    assert_eq!(
+        only_output(repl.submit("/resume")),
+        "No sessions to resume in this project."
+    );
+    assert_eq!(
+        only_output(repl.submit("/load missing-session")),
+        "Session not found: missing-session. Persisted session restore is not available in the Rust REPL yet."
+    );
+}
+
+#[test]
+fn repl_tps_command_matches_swift_flags_with_empty_rust_store() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        only_output(repl.submit("/tps")),
+        "No model TPS samples recorded yet. Run a streamed model session to collect speed telemetry."
+    );
+    assert_eq!(only_output(repl.submit("/speed --json")), "[]");
+    assert_eq!(
+        only_output(repl.submit("/tps --reset")),
+        "No model TPS samples are recorded by the Rust REPL yet."
+    );
+    assert_eq!(
+        repl.submit("/tps --bogus"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /tps [--json | --reset]"
+        ))]
+    );
+}
+
+#[test]
 fn repl_status_command_reports_session_shape() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut repl = ReplSession::new(Box::new(StaticBackend))

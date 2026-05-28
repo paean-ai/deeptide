@@ -54,6 +54,7 @@ pub struct ReplSession {
     clipboard_writer: ClipboardWriter,
     additional_dirs: Vec<std::path::PathBuf>,
     provider_profile: ProviderProfile,
+    debug_enabled: bool,
 }
 
 impl ReplSession {
@@ -68,6 +69,7 @@ impl ReplSession {
             clipboard_writer: Arc::new(write_to_system_clipboard),
             additional_dirs: Vec::new(),
             provider_profile: ProviderProfile::Legacy,
+            debug_enabled: false,
         }
     }
 
@@ -174,6 +176,12 @@ impl ReplSession {
             "diff" => self.execute_diff_command(args),
             "branch" => self.execute_branch_command(args),
             "add-dir" | "add_dir" | "adddir" => self.execute_add_dir_command(args),
+            "fast" | "faster" => self.execute_fast_command(args),
+            "tps" | "speed" => self.execute_tps_command(args),
+            "debug" | "dbg" => self.execute_debug_command(args),
+            "keybindings" | "keys" => self.execute_keybindings_command(args),
+            "sessions" | "session" => self.execute_sessions_command(args),
+            "resume" | "load" | "restore" => self.execute_resume_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
@@ -272,6 +280,96 @@ impl ReplSession {
         CommandResult::Text(String::from(
             "Usage: /provider [list | use <name|deepseek|paean> | status]",
         ))
+    }
+
+    fn execute_fast_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /fast"));
+        }
+
+        CommandResult::Text(String::from(
+            "Fast mode: use the --fast CLI flag at launch. Runtime toggle coming in a future update.",
+        ))
+    }
+
+    fn execute_tps_command(&self, args: &str) -> CommandResult {
+        let flags = args.split_whitespace().collect::<Vec<_>>();
+        if flags.contains(&"--reset") {
+            return CommandResult::Text(String::from(
+                "No model TPS samples are recorded by the Rust REPL yet.",
+            ));
+        }
+
+        if flags.iter().any(|flag| *flag != "--json") {
+            return CommandResult::Text(String::from("Usage: /tps [--json | --reset]"));
+        }
+
+        if flags.contains(&"--json") {
+            CommandResult::Text(String::from("[]"))
+        } else {
+            CommandResult::Text(String::from(
+                "No model TPS samples recorded yet. Run a streamed model session to collect speed telemetry.",
+            ))
+        }
+    }
+
+    fn execute_debug_command(&mut self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /debug"));
+        }
+
+        self.debug_enabled = !self.debug_enabled;
+        let status = if self.debug_enabled { "on" } else { "off" };
+        CommandResult::Text(format!("Debug mode: {status}"))
+    }
+
+    fn execute_keybindings_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /keybindings"));
+        }
+
+        CommandResult::Text(
+            [
+                "Key bindings:",
+                "  Enter           Submit prompt",
+                "  Backslash + Enter Continue on next line",
+                "  Tab             Autocomplete /command or @path",
+                "  Ctrl+C          Interrupt running tool / exit when idle",
+                "  Ctrl+D          Exit on empty line",
+                "  Ctrl+L          Clear screen",
+                "  Ctrl+A / Ctrl+E Move to start / end of line",
+                "  Ctrl+K          Kill to end of line",
+                "  Ctrl+U          Kill to start of line",
+                "  Ctrl+W          Delete previous word",
+                "  Up / Down       Browse history",
+            ]
+            .join("\n"),
+        )
+    }
+
+    fn execute_sessions_command(&self, args: &str) -> CommandResult {
+        if args.split_whitespace().count() > 1 {
+            return CommandResult::Text(String::from("Usage: /sessions [filter]"));
+        }
+
+        CommandResult::Text(String::from(
+            "No persisted sessions are available in the Rust REPL yet. Use /export [path] to save the current transcript.",
+        ))
+    }
+
+    fn execute_resume_command(&self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.split_whitespace().count() > 1 {
+            return CommandResult::Text(String::from("Usage: /resume [session-id]"));
+        }
+
+        if trimmed.is_empty() {
+            CommandResult::Text(String::from("No sessions to resume in this project."))
+        } else {
+            CommandResult::Text(format!(
+                "Session not found: {trimmed}. Persisted session restore is not available in the Rust REPL yet."
+            ))
+        }
     }
 
     fn execute_model_command(&mut self, args: &str) -> CommandResult {
@@ -650,6 +748,37 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             ["add_dir", "adddir"],
             "Add an additional directory to the session context",
             "/add-dir <path>",
+        ),
+        CommandCompletionSource::new(
+            "fast",
+            ["faster"],
+            "Toggle fast mode (same model, faster output)",
+            "/fast",
+        ),
+        CommandCompletionSource::new(
+            "tps",
+            ["speed"],
+            "Show recorded per-model TPS",
+            "/tps [--json | --reset]",
+        ),
+        CommandCompletionSource::new("debug", ["dbg"], "Toggle debug output", "/debug"),
+        CommandCompletionSource::new(
+            "keybindings",
+            ["keys"],
+            "Show current key bindings",
+            "/keybindings",
+        ),
+        CommandCompletionSource::new(
+            "sessions",
+            ["session"],
+            "List saved sessions",
+            "/sessions [filter]",
+        ),
+        CommandCompletionSource::new(
+            "resume",
+            ["load", "restore"],
+            "Resume a previous session",
+            "/resume [session-id]",
         ),
         CommandCompletionSource::new(
             "read",
