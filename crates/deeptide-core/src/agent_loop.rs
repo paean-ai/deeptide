@@ -213,6 +213,7 @@ pub struct AgentLoop {
     subagent_backend_factory: Option<SubAgentBackendFactory>,
     system_prompt: Option<String>,
     context_window: ContextWindowManager,
+    hooks: crate::hooks::HookEngine,
 }
 
 impl AgentLoop {
@@ -233,7 +234,15 @@ impl AgentLoop {
             subagent_backend_factory: None,
             system_prompt: None,
             context_window: ContextWindowManager::new(ContextWindowConfig::default()),
+            hooks: crate::hooks::HookEngine::empty(),
         }
+    }
+
+    /// Install the lifecycle hook engine (built from `settings.json` hooks).
+    /// `PreToolUse` hooks can block a tool call; `PostToolUse` hooks observe it.
+    pub fn with_hooks(mut self, hooks: crate::hooks::HookEngine) -> Self {
+        self.hooks = hooks;
+        self
     }
 
     /// Compact the in-memory transcript on demand (the `/compact` command),
@@ -500,25 +509,46 @@ impl AgentLoop {
 
         match permission {
             PermissionDecision::Allow => {
-                if tool_call.name == "Agent"
+                // PreToolUse hooks may veto the call (non-zero exit blocks it).
+                if self.hooks.has_hooks(crate::hooks::HookEvent::PreToolUse) {
+                    let input_json = serde_json::to_string(&tool_call.input).ok();
+                    if let Some(reason) = self
+                        .hooks
+                        .pre_tool_block_reason(&tool_call.name, input_json.as_deref())
+                    {
+                        return crate::ToolResult::error(reason);
+                    }
+                }
+
+                let result = if tool_call.name == "Agent"
                     && let Some(result) = self.execute_subagent_tool_call(tool_call)
                 {
-                    return result;
+                    result
+                } else if tool_call.name == "CtxInspect" {
+                    self.execute_ctx_inspect_tool_call(tool_call)
+                } else if tool_call.name == "Snip" {
+                    self.execute_snip_tool_call(tool_call)
+                } else if tool_call.name == "Brief" {
+                    self.execute_brief_tool_call(tool_call)
+                } else {
+                    self.tool_registry.call(
+                        &tool_call.name,
+                        tool_call.input.clone(),
+                        &self.tool_context,
+                    )
+                };
+
+                // PostToolUse hooks observe the completed call (non-blocking).
+                if self.hooks.has_hooks(crate::hooks::HookEvent::PostToolUse) {
+                    let input_json = serde_json::to_string(&tool_call.input).ok();
+                    let _ = self.hooks.run(
+                        crate::hooks::HookEvent::PostToolUse,
+                        Some(&tool_call.name),
+                        input_json.as_deref(),
+                    );
                 }
-                if tool_call.name == "CtxInspect" {
-                    return self.execute_ctx_inspect_tool_call(tool_call);
-                }
-                if tool_call.name == "Snip" {
-                    return self.execute_snip_tool_call(tool_call);
-                }
-                if tool_call.name == "Brief" {
-                    return self.execute_brief_tool_call(tool_call);
-                }
-                self.tool_registry.call(
-                    &tool_call.name,
-                    tool_call.input.clone(),
-                    &self.tool_context,
-                )
+
+                result
             }
             PermissionDecision::Deny { reason } => crate::ToolResult::error(format!(
                 "Permission denied for {}: {reason}",

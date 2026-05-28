@@ -200,6 +200,13 @@ impl ReplSession {
         self
     }
 
+    /// Install the lifecycle hook engine (built from `settings.json` hooks) so
+    /// PreToolUse/PostToolUse hooks fire around tool calls.
+    pub fn with_hooks(mut self, hooks: crate::hooks::HookEngine) -> Self {
+        self.agent_loop = self.agent_loop.with_hooks(hooks);
+        self
+    }
+
     pub fn with_subagent_backend_factory<F>(mut self, factory: F) -> Self
     where
         F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,
