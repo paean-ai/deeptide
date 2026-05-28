@@ -11,6 +11,7 @@ pub mod repl;
 pub mod tool_batch_labeler;
 pub mod tool_result_summary;
 pub mod tools;
+pub mod tui;
 
 pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
@@ -47,3 +48,4 @@ pub use tools::{
     ToolContext, ToolRegistry, ToolResult, ToolSearchTool, VerifyPlanExecutionTool,
     VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool,
 };
+pub use tui::{InputBar, StatusLine, StatusSegment, TranscriptItem, TranscriptKind, TuiFrame};

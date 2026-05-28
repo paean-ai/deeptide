@@ -10,6 +10,7 @@ use crate::{
     agent_loop::{ConversationMessage, MessageRole},
     memory::MemorySystem,
     tools::{ClipboardTool, model_context_window},
+    tui::{StatusLine, StatusSegment},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +139,29 @@ impl ReplSession {
 
     pub fn prompt(&self) -> String {
         String::from("deeptide> ")
+    }
+
+    pub fn status_line(&self) -> StatusLine {
+        let summary = self.agent_loop.cost_tracker().summary();
+        let context_tokens = estimate_repl_context_tokens(self.agent_loop.messages());
+        let window = model_context_window(self.agent_loop.model()) as usize;
+        let context_pct = context_tokens
+            .saturating_mul(100)
+            .checked_div(window)
+            .unwrap_or(0);
+        let branch = git_branch(&self.tool_context.cwd).unwrap_or_else(|| String::from("no-git"));
+
+        StatusLine::new([
+            StatusSegment::new("model", self.agent_loop.model()),
+            StatusSegment::new("mode", self.agent_loop.permission_mode().label()),
+            StatusSegment::new("ctx", format!("{context_pct}%")),
+            StatusSegment::new(
+                "turns",
+                format!("{}/{}", summary.turns.len(), self.agent_loop.max_turns()),
+            ),
+            StatusSegment::new("git", branch),
+            StatusSegment::new("cost", CostTracker::format_usd(summary.total_cost_usd)),
+        ])
     }
 
     pub fn agent_loop(&self) -> &AgentLoop {

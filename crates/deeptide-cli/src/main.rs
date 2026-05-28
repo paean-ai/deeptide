@@ -6,7 +6,7 @@ use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
-    LocalEchoBackend, MarkdownRenderer, ReplEvent, ReplSession,
+    LocalEchoBackend, ReplEvent, ReplSession, tui,
 };
 
 const DEFAULT_MODEL: &str = "deepseek-v4-pro";
@@ -209,6 +209,12 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
     }
 
     loop {
+        writeln!(
+            stdout,
+            "{}",
+            repl.status_line().render(terminal_width().unwrap_or(100))
+        )
+        .map_err(|error| error.to_string())?;
         write!(stdout, "{}", repl.prompt()).map_err(|error| error.to_string())?;
         stdout.flush().map_err(|error| error.to_string())?;
 
@@ -224,8 +230,16 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
         for event in repl.submit(&line) {
             match event {
                 ReplEvent::Output(text) => {
-                    writeln!(stdout, "{}", MarkdownRenderer::render(&text))
-                        .map_err(|error| error.to_string())?;
+                    writeln!(
+                        stdout,
+                        "{}",
+                        tui::render_output_panel(
+                            &text,
+                            terminal_width().unwrap_or(100),
+                            std::env::var_os("NO_COLOR").is_none(),
+                        )
+                    )
+                    .map_err(|error| error.to_string())?;
                 }
                 ReplEvent::Exit => return Ok(()),
             }
@@ -233,12 +247,26 @@ fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), Str
     }
 }
 
+fn terminal_width() -> Option<usize> {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|width| *width >= 20)
+}
+
 fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Result<(), String> {
     let response = run_prompt(cli, prompt, permission_mode)?;
 
     match cli.output_format {
         OutputFormat::Text => {
-            println!("{}", MarkdownRenderer::render(&response));
+            println!(
+                "{}",
+                tui::render_output_panel(
+                    &response,
+                    terminal_width().unwrap_or(100),
+                    std::env::var_os("NO_COLOR").is_none(),
+                )
+            );
         }
         OutputFormat::Json => {
             let body = serde_json::json!({
