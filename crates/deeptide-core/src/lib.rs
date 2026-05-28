@@ -7,6 +7,7 @@ pub mod config;
 pub mod context_window;
 pub mod cost;
 pub mod embedded_protocol;
+pub mod hooks;
 pub mod markdown;
 pub mod memory;
 pub mod permissions;
@@ -44,6 +45,7 @@ pub use context_window::{
     estimate_tokens,
 };
 pub use cost::{CacheHealth, CostSummary, CostTracker, ModelPricing, TurnRecord, TurnUsage};
+pub use hooks::{HookEngine, HookEvent, HookOutcome};
 pub use markdown::{MarkdownRenderOptions, MarkdownRenderer};
 pub use permissions::{
     PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,

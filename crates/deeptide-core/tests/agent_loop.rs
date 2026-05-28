@@ -1,6 +1,6 @@
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
-    AgentUsage, MessageRole, PermissionMode, ToolCall,
+    AgentUsage, HookEngine, HookEntry, MessageRole, PermissionMode, SettingsHooks, ToolCall,
 };
 use std::sync::{Arc, Mutex};
 
@@ -318,6 +318,36 @@ fn agent_loop_brief_tool_compacts_active_message_history() {
         loop_.messages().len() < before + 3,
         "Brief should reduce the transcript rather than only grow it"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn agent_loop_pre_tool_use_hook_blocks_tool() {
+    let hooks = SettingsHooks {
+        pre_tool_use: Some(vec![HookEntry {
+            matcher: String::from("*"),
+            command: String::from("exit 1"),
+            timeout_ms: Some(5_000),
+            disabled: None,
+            name: Some(String::from("deny-all")),
+        }]),
+        ..Default::default()
+    };
+    let engine = HookEngine::new(hooks, std::env::temp_dir());
+    let mut loop_ = AgentLoop::new(Box::new(ToolCallingBackend::default()))
+        .with_hooks(engine)
+        .with_max_turns(2);
+
+    let events = loop_.run("read the file");
+
+    // The Read tool call is vetoed by the PreToolUse hook.
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult { tool_call, content, is_error: true }
+                if tool_call.name == "Read" && content.contains("Blocked by PreToolUse hook 'deny-all'")
+        )
+    }));
 }
 
 #[test]

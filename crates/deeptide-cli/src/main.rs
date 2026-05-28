@@ -221,7 +221,10 @@ fn run(mut cli: Cli) -> Result<(), String> {
         // per-token rates the cost tracker consumes. Only the interactive REPL
         // surfaces cost (`/cost`, status line), so print mode skips this.
         let pricing_overrides = cfg.pricing_overrides();
-        return run_interactive(&cli, permission_mode, pricing_overrides);
+        // Lifecycle hooks (settings.json `hooks`) fire around tool calls in the
+        // REPL; PreToolUse hooks can block a tool.
+        let hooks = deeptide_core::HookEngine::new(cfg.hooks.clone().unwrap_or_default(), &cwd);
+        return run_interactive(&cli, permission_mode, pricing_overrides, hooks);
     }
 
     let stdin = read_stdin_if_needed(&cli)?;
@@ -473,6 +476,7 @@ fn run_interactive(
     cli: &Cli,
     permission_mode: PermissionMode,
     pricing_overrides: HashMap<String, ModelPricing>,
+    hooks: deeptide_core::HookEngine,
 ) -> Result<(), String> {
     let mut stdout = io::stdout();
 
@@ -501,6 +505,7 @@ fn run_interactive(
         .with_pricing_overrides(pricing_overrides)
         .with_debug(cli.debug)
         .with_fast_mode(cli.fast)
+        .with_hooks(hooks)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
