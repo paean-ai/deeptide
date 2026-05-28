@@ -13,6 +13,7 @@ pub mod permissions;
 pub mod prompt;
 pub mod repl;
 pub mod safety_guard;
+pub mod sensitive_file;
 pub mod session;
 pub mod streaming;
 pub mod tool_batch_labeler;

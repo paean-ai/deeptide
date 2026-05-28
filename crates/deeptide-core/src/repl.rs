@@ -688,10 +688,18 @@ impl ReplSession {
             return CommandResult::Text(format!("File does not exist: {}", path.display()));
         }
 
-        CommandResult::Text(format!(
-            "{} is not classified as sensitive in the Rust build; normal tools can already read it.",
-            path.display()
-        ))
+        if crate::sensitive_file::is_sensitive(&path) {
+            crate::sensitive_file::mark_open(&path);
+            CommandResult::Text(format!(
+                "Opened {} for this session; file-read tools may now read it.",
+                path.display()
+            ))
+        } else {
+            CommandResult::Text(format!(
+                "{} is not classified as sensitive in the Rust build; normal tools can already read it.",
+                path.display()
+            ))
+        }
     }
 
     fn execute_paste_command(&self, args: &str) -> CommandResult {
