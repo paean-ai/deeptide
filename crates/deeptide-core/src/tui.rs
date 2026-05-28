@@ -61,28 +61,53 @@ impl StatusLine {
 pub struct InputBar {
     pub prompt: String,
     pub value: String,
+    /// Cursor position measured in Unicode scalar values within `value`.
     pub cursor: usize,
     pub hint: Option<String>,
 }
 
 impl InputBar {
     pub fn render(&self, width: usize) -> Vec<String> {
+        self.layout(width).lines
+    }
+
+    pub fn layout(&self, width: usize) -> InputLayout {
         let width = width.max(12);
-        let mut content = if self.value.is_empty() {
-            self.hint
-                .as_ref()
-                .map(|hint| format!("{}{}", self.prompt, hint))
-                .unwrap_or_else(|| self.prompt.clone())
+        let cursor = self.cursor.min(self.value.chars().count());
+        let mut content = self.prompt.clone();
+        let cursor_cell = if self.value.is_empty() {
+            display_width(&content)
         } else {
-            format!("{}{}", self.prompt, self.value)
+            content.push_str(&take_chars(&self.value, cursor));
+            let cell = display_width(&content);
+            content.push_str(&skip_chars(&self.value, cursor));
+            cell
         };
+
+        if self.value.is_empty()
+            && let Some(hint) = self.hint.as_ref()
+        {
+            content.push_str(hint);
+        }
 
         if content.is_empty() {
             content = self.prompt.clone();
         }
 
-        wrap_line(&content, width)
+        let wrapped = wrap_line_with_cursor(&content, width, cursor_cell);
+        InputLayout {
+            lines: wrapped.lines,
+            cursor_row: wrapped.cursor_row,
+            cursor_col: wrapped.cursor_col,
+        }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputLayout {
+    pub lines: Vec<String>,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,28 +217,59 @@ fn wrap_preserving_newlines(text: &str, width: usize) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WrappedLine {
+    lines: Vec<String>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
 fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    wrap_line_with_cursor(line, width, usize::MAX).lines
+}
+
+fn wrap_line_with_cursor(line: &str, width: usize, cursor_cell: usize) -> WrappedLine {
     if display_width(line) <= width {
-        return vec![line.to_owned()];
+        let cursor_col = cursor_cell.min(display_width(line));
+        return WrappedLine {
+            lines: vec![line.to_owned()],
+            cursor_row: 0,
+            cursor_col,
+        };
     }
 
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_width = 0;
+    let mut consumed_width = 0;
+    let mut cursor_position = None;
 
     for word in line.split_inclusive(' ') {
         let word_width = display_width(word);
-        if current_width > 0 && current_width + word_width > width {
+        let flow_by_char = word_width > width
+            || current_width > 0
+                && current_width + word_width > width
+                && is_unspaced_wide_text(word);
+        if current_width > 0 && current_width + word_width > width && !flow_by_char {
+            if cursor_position.is_none() && cursor_cell <= consumed_width + current_width {
+                cursor_position = Some((lines.len(), cursor_cell.saturating_sub(consumed_width)));
+            }
             lines.push(current.trim_end().to_owned());
+            consumed_width += current_width;
             current.clear();
             current_width = 0;
         }
 
-        if word_width > width {
+        if flow_by_char {
             for ch in word.chars() {
                 let ch_width = char_width(ch);
                 if current_width > 0 && current_width + ch_width > width {
+                    if cursor_position.is_none() && cursor_cell <= consumed_width + current_width {
+                        cursor_position =
+                            Some((lines.len(), cursor_cell.saturating_sub(consumed_width)));
+                    }
                     lines.push(current.trim_end().to_owned());
+                    consumed_width += current_width;
                     current.clear();
                     current_width = 0;
                 }
@@ -227,9 +283,20 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
     }
 
     if !current.is_empty() {
+        if cursor_position.is_none() && cursor_cell <= consumed_width + current_width {
+            cursor_position = Some((lines.len(), cursor_cell.saturating_sub(consumed_width)));
+        }
         lines.push(current.trim_end().to_owned());
     }
-    lines
+
+    let last_row = lines.len().saturating_sub(1);
+    let fallback_col = lines.last().map(|line| display_width(line)).unwrap_or(0);
+    let (cursor_row, cursor_col) = cursor_position.unwrap_or((last_row, fallback_col));
+    WrappedLine {
+        lines,
+        cursor_row,
+        cursor_col,
+    }
 }
 
 fn pad_to_width(mut value: String, width: usize) -> String {
@@ -265,6 +332,19 @@ fn display_width(text: &str) -> usize {
 
 fn char_width(ch: char) -> usize {
     if is_wide(ch) { 2 } else { 1 }
+}
+
+fn is_unspaced_wide_text(value: &str) -> bool {
+    let trimmed = value.trim_end_matches(' ');
+    !trimmed.is_empty() && !trimmed.chars().any(char::is_whitespace) && trimmed.chars().any(is_wide)
+}
+
+fn take_chars(value: &str, count: usize) -> String {
+    value.chars().take(count).collect()
+}
+
+fn skip_chars(value: &str, count: usize) -> String {
+    value.chars().skip(count).collect()
 }
 
 fn is_wide(ch: char) -> bool {
@@ -323,13 +403,65 @@ mod tests {
         let input = InputBar {
             prompt: "deeptide> ".to_owned(),
             value: "please inspect this very long prompt".to_owned(),
-            cursor: 0,
+            cursor: 14,
             hint: None,
         };
 
-        let rendered = input.render(20);
-        assert!(rendered.len() > 1);
-        assert!(rendered[0].starts_with("deeptide>"));
+        let layout = input.layout(20);
+        assert!(layout.lines.len() > 1);
+        assert!(layout.lines[0].starts_with("deeptide>"));
+        assert_eq!(layout.cursor_row, 1);
+        assert_eq!(layout.cursor_col, 7);
+    }
+
+    #[test]
+    fn input_bar_places_cursor_after_wrapped_cjk_text() {
+        let input = InputBar {
+            prompt: "deeptide> ".to_owned(),
+            value: "你好世界，继续推进".to_owned(),
+            cursor: 6,
+            hint: None,
+        };
+
+        let layout = input.layout(18);
+
+        assert_eq!(
+            layout.lines,
+            vec!["deeptide> 你好世界".to_owned(), "，继续推进".to_owned()]
+        );
+        assert_eq!(layout.cursor_row, 1);
+        assert_eq!(layout.cursor_col, 4);
+    }
+
+    #[test]
+    fn input_bar_cursor_clamps_to_end_of_text() {
+        let input = InputBar {
+            prompt: "deeptide> ".to_owned(),
+            value: "abc".to_owned(),
+            cursor: 99,
+            hint: None,
+        };
+
+        let layout = input.layout(80);
+
+        assert_eq!(layout.cursor_row, 0);
+        assert_eq!(layout.cursor_col, "deeptide> abc".len());
+    }
+
+    #[test]
+    fn input_bar_hint_does_not_move_empty_value_cursor() {
+        let input = InputBar {
+            prompt: "deeptide> ".to_owned(),
+            value: String::new(),
+            cursor: 0,
+            hint: Some("输入任务".to_owned()),
+        };
+
+        let layout = input.layout(80);
+
+        assert_eq!(layout.lines, vec!["deeptide> 输入任务".to_owned()]);
+        assert_eq!(layout.cursor_row, 0);
+        assert_eq!(layout.cursor_col, "deeptide> ".len());
     }
 
     #[test]
