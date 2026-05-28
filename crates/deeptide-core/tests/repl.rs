@@ -317,11 +317,16 @@ fn repl_swift_parity_support_commands_are_available() {
 
     let config = only_output(repl.submit("/config"));
     assert!(config.contains("Settings files:"));
-    assert!(config.contains("zero-cli launch environment variables"));
+    assert!(config.contains("Merged values:"));
+    assert!(config.contains("Usage:"));
 
-    assert_eq!(
-        only_output(repl.submit("/hooks")),
-        "No hooks configured. Add a `hooks` block to settings.json when Rust config persistence lands."
+    // `/hooks` reads the merged settings; assert it reports hook state in either
+    // shape ("No hooks configured…" or "Configured hooks:") without depending on
+    // the developer's real global settings content.
+    let hooks = only_output(repl.submit("/hooks"));
+    assert!(
+        hooks.contains("hooks"),
+        "/hooks should report hook state, got: {hooks}"
     );
     assert!(only_output(repl.submit("/init")).contains("Project bootstrap is model-driven"));
     assert!(
@@ -375,10 +380,12 @@ fn repl_support_commands_validate_usage() {
         repl.submit("/paste now"),
         vec![ReplEvent::Output(String::from("Usage: /paste"))]
     );
+    // `set` with no `key=value` pair is a usage error and must not write any
+    // file, so this case stays hermetic without touching the global config.
     assert_eq!(
-        repl.submit("/config set model=foo"),
+        repl.submit("/config set model"),
         vec![ReplEvent::Output(String::from(
-            "Usage: /config [show]\nSetting values from the Rust REPL is not available yet; edit the displayed settings files directly."
+            "Usage: /config set key=value [--project | --local]"
         ))]
     );
     assert_eq!(

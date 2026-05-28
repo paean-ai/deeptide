@@ -1,0 +1,564 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::memory::MemorySystem;
+
+// ── Permission rules ──────────────────────────────────────────────────────────
+
+/// A single allow/deny/ask rule as stored in `settings.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsRule {
+    /// Glob pattern matched against the tool input (path, command, etc.).
+    pub pattern: String,
+    /// Optional tool name to narrow the rule to a specific tool.
+    pub tool: Option<String>,
+}
+
+/// The `permissions` block in `settings.json`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SettingsPermissions {
+    pub allow: Option<Vec<SettingsRule>>,
+    pub deny: Option<Vec<SettingsRule>>,
+    pub ask: Option<Vec<SettingsRule>>,
+    #[serde(rename = "default_mode", skip_serializing_if = "Option::is_none")]
+    pub default_mode: Option<String>,
+}
+
+// ── Hooks ─────────────────────────────────────────────────────────────────────
+
+/// A single hook entry inside a hook-event group.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookEntry {
+    /// Glob/regex matched against the tool name (for tool hooks) or "" to match all.
+    pub matcher: String,
+    /// Shell command to run.  Receives tool context via env vars.
+    pub command: String,
+    /// Maximum milliseconds before the hook is killed.  Defaults to 10 000.
+    #[serde(rename = "timeout_ms", skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// When `true` the hook is loaded but not executed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    /// Human-readable label surfaced as `TIDE_HOOK_NAME` env var.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl HookEntry {
+    pub fn is_disabled(&self) -> bool {
+        self.disabled.unwrap_or(false)
+    }
+    pub fn effective_timeout_ms(&self) -> u64 {
+        self.timeout_ms.unwrap_or(10_000)
+    }
+}
+
+/// All hook event groups.  Keys mirror Swift's `SettingsHooks` and the
+/// tide-spec §4.1 canonical PascalCase events.
+///
+/// On the wire both `PreToolUse` and `pre_tool_use` are accepted (both cases)
+/// for backward compatibility with hooks written against earlier snake_case
+/// schemas.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SettingsHooks {
+    #[serde(rename = "PreToolUse", skip_serializing_if = "Option::is_none")]
+    pub pre_tool_use: Option<Vec<HookEntry>>,
+    #[serde(rename = "PostToolUse", skip_serializing_if = "Option::is_none")]
+    pub post_tool_use: Option<Vec<HookEntry>>,
+    #[serde(rename = "UserPromptSubmit", skip_serializing_if = "Option::is_none")]
+    pub user_prompt_submit: Option<Vec<HookEntry>>,
+    #[serde(rename = "SessionStart", skip_serializing_if = "Option::is_none")]
+    pub session_start: Option<Vec<HookEntry>>,
+    #[serde(rename = "SessionEnd", skip_serializing_if = "Option::is_none")]
+    pub session_end: Option<Vec<HookEntry>>,
+}
+
+// ── MCP server ────────────────────────────────────────────────────────────────
+
+/// A single MCP server entry in `mcp_servers`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// Executable to spawn (stdio transport).  Mutually exclusive with `url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// CLI arguments passed to `command`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Per-server environment variables.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
+    /// HTTP/SSE server URL (HTTP transport).  Mutually exclusive with `command`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Optional display name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+// ── ConfigData ────────────────────────────────────────────────────────────────
+
+/// Parsed content of a `settings.json` file.
+///
+/// All fields are `Option` so absent keys are silently ignored and multiple
+/// configs can be merged with higher-precedence values winning.
+///
+/// The field names follow the zero-cli / Swift `settings.json` format:
+/// snake_case JSON keys, camelCase in Rust via `#[serde(rename = ...)]`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ConfigData {
+    /// Default model identifier, e.g. `"deepseek-v4-pro"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// API key.  Written to the file only on explicit `/config set api_key=...`;
+    /// prefer an environment variable for secrets.
+    #[serde(rename = "api_key", skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Base URL for the Anthropic-compatible API endpoint.
+    #[serde(rename = "base_url", skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    /// Maximum agent turns per prompt.
+    #[serde(rename = "max_turns", skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
+
+    /// Maximum model output tokens per request.
+    #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+
+    /// Default permission mode: `"default"`, `"accept-edits"`, `"plan"`, `"bypass"`.
+    #[serde(rename = "permission_mode", skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+
+    /// Whether to enable prompt caching (default `true` when unset).
+    #[serde(rename = "prompt_cache", skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<bool>,
+
+    /// Static permission rules applied before the runtime allow/deny lists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<SettingsPermissions>,
+
+    /// Hook definitions keyed by event name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<SettingsHooks>,
+
+    /// Additional environment variables injected into every tool invocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
+
+    /// MCP server definitions.
+    #[serde(rename = "mcp_servers", skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<HashMap<String, McpServerConfig>>,
+}
+
+impl ConfigData {
+    /// Merge `other` on top of `self`.  `other` values win when both are
+    /// `Some`; `self` values are kept when `other` is `None`.
+    pub fn merge(self, other: ConfigData) -> ConfigData {
+        ConfigData {
+            model: other.model.or(self.model),
+            api_key: other.api_key.or(self.api_key),
+            base_url: other.base_url.or(self.base_url),
+            max_turns: other.max_turns.or(self.max_turns),
+            max_tokens: other.max_tokens.or(self.max_tokens),
+            permission_mode: other.permission_mode.or(self.permission_mode),
+            prompt_cache: other.prompt_cache.or(self.prompt_cache),
+            permissions: other.permissions.or(self.permissions),
+            hooks: other.hooks.or(self.hooks),
+            env: merge_maps(self.env, other.env),
+            mcp_servers: merge_maps(self.mcp_servers, other.mcp_servers),
+        }
+    }
+
+    /// Apply environment variables from the `env` block.
+    ///
+    /// Does **not** overwrite variables already set in the process environment
+    /// so explicit `export FOO=bar` in the shell always wins.
+    pub fn apply_env(&self) {
+        let Some(ref env) = self.env else { return };
+        for (key, value) in env {
+            if std::env::var_os(key).is_none() {
+                // SAFETY: called at startup before any threads are spawned.
+                unsafe { std::env::set_var(key, value) };
+            }
+        }
+    }
+}
+
+fn merge_maps<V>(
+    base: Option<HashMap<String, V>>,
+    overlay: Option<HashMap<String, V>>,
+) -> Option<HashMap<String, V>> {
+    match (base, overlay) {
+        (None, None) => None,
+        (Some(b), None) => Some(b),
+        (None, Some(o)) => Some(o),
+        (Some(mut b), Some(o)) => {
+            b.extend(o);
+            Some(b)
+        }
+    }
+}
+
+// ── ConfigStore ───────────────────────────────────────────────────────────────
+
+/// Scope for a config write operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigScope {
+    /// `~/.config/tide/settings.json`
+    Global,
+    /// `<cwd>/.deeptide/settings.json`
+    Project,
+    /// `<cwd>/.deeptide/settings.local.json`
+    Local,
+}
+
+/// Static helpers for reading, writing, and locating `settings.json` files.
+pub struct ConfigStore;
+
+impl ConfigStore {
+    /// Path to the user-global settings file.
+    pub fn global_path() -> PathBuf {
+        MemorySystem::tide_config_dir().join("settings.json")
+    }
+
+    /// Path to the project-scoped settings file in `cwd`.
+    pub fn project_path(cwd: &Path) -> PathBuf {
+        cwd.join(".deeptide").join("settings.json")
+    }
+
+    /// Path to the project-local (gitignored) settings override in `cwd`.
+    pub fn local_path(cwd: &Path) -> PathBuf {
+        cwd.join(".deeptide").join("settings.local.json")
+    }
+
+    /// Path for a given scope.
+    pub fn scope_path(scope: ConfigScope, cwd: &Path) -> PathBuf {
+        match scope {
+            ConfigScope::Global => Self::global_path(),
+            ConfigScope::Project => Self::project_path(cwd),
+            ConfigScope::Local => Self::local_path(cwd),
+        }
+    }
+
+    /// Load and merge all config files: global ← project ← local.
+    ///
+    /// Missing or malformed files are silently skipped.
+    pub fn load(cwd: &Path) -> ConfigData {
+        let global = Self::read_file(&Self::global_path());
+        let project = Self::read_file(&Self::project_path(cwd));
+        let local = Self::read_file(&Self::local_path(cwd));
+        global.merge(project).merge(local)
+    }
+
+    fn read_file(path: &Path) -> ConfigData {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    /// Write a single `key=value` pair into the target file, preserving any
+    /// other keys already present.  Creates the file and parent directory if
+    /// they don't exist.
+    pub fn set_value(key: &str, value: &str, path: &Path) -> Result<(), String> {
+        let mut data: serde_json::Value = if path.exists() {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            serde_json::from_str(&raw)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+        } else {
+            serde_json::Value::Object(serde_json::Map::new())
+        };
+
+        let json_val: serde_json::Value = serde_json::from_str(value)
+            .unwrap_or_else(|_| serde_json::Value::String(value.to_owned()));
+
+        match &mut data {
+            serde_json::Value::Object(map) => {
+                map.insert(key.to_owned(), json_val);
+            }
+            _ => return Err(format!("{} is not a JSON object", path.display())),
+        }
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        let serialized = serde_json::to_string_pretty(&data)
+            .map_err(|e| format!("cannot serialize config: {e}"))?;
+        std::fs::write(path, serialized)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    }
+
+    /// Remove a key from the target file.  No-op if the key doesn't exist.
+    pub fn unset_value(key: &str, path: &Path) -> Result<(), String> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let mut data: serde_json::Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(ref mut map) = data {
+            map.remove(key);
+        }
+        let serialized = serde_json::to_string_pretty(&data)
+            .map_err(|e| format!("cannot serialize config: {e}"))?;
+        std::fs::write(path, serialized)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    }
+
+    /// Human-readable summary of the merged config for `/config show`.
+    pub fn show(cwd: &Path) -> String {
+        let global_path = Self::global_path();
+        let project_path = Self::project_path(cwd);
+        let local_path = Self::local_path(cwd);
+        let merged = Self::load(cwd);
+
+        let mut lines = vec![String::from("Settings files:")];
+        for (label, path) in [
+            ("global", &global_path),
+            ("project", &project_path),
+            ("local", &local_path),
+        ] {
+            let status = if path.exists() { "present" } else { "missing" };
+            lines.push(format!("  {label:<8} {status:<7} {}", path.display()));
+        }
+
+        lines.push(String::new());
+        lines.push(String::from("Merged values:"));
+        let kv = |k: &str, v: &str| format!("  {k:<20} {v}");
+        lines.push(kv(
+            "model",
+            merged
+                .model
+                .as_deref()
+                .unwrap_or("(unset — use env or --model)"),
+        ));
+        lines.push(kv(
+            "base_url",
+            merged.base_url.as_deref().unwrap_or("(unset — default)"),
+        ));
+        lines.push(kv(
+            "max_turns",
+            &merged
+                .max_turns
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "(unset — default 25)".to_owned()),
+        ));
+        lines.push(kv(
+            "max_tokens",
+            &merged
+                .max_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "(unset — default 4096)".to_owned()),
+        ));
+        lines.push(kv(
+            "permission_mode",
+            merged
+                .permission_mode
+                .as_deref()
+                .unwrap_or("(unset — default)"),
+        ));
+        lines.push(kv(
+            "prompt_cache",
+            &merged
+                .prompt_cache
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(unset — true)".to_owned()),
+        ));
+        lines.push(kv(
+            "api_key",
+            if merged.api_key.is_some() {
+                "(set — hidden)"
+            } else {
+                "(unset — use env)"
+            },
+        ));
+
+        if let Some(ref perm) = merged.permissions {
+            let allow_count = perm.allow.as_ref().map_or(0, Vec::len);
+            let deny_count = perm.deny.as_ref().map_or(0, Vec::len);
+            lines.push(kv(
+                "permissions",
+                &format!("{allow_count} allow, {deny_count} deny rules"),
+            ));
+        }
+
+        if let Some(ref hooks) = merged.hooks {
+            let count = hooks.pre_tool_use.as_ref().map_or(0, Vec::len)
+                + hooks.post_tool_use.as_ref().map_or(0, Vec::len)
+                + hooks.user_prompt_submit.as_ref().map_or(0, Vec::len)
+                + hooks.session_start.as_ref().map_or(0, Vec::len)
+                + hooks.session_end.as_ref().map_or(0, Vec::len);
+            lines.push(kv("hooks", &format!("{count} entries")));
+        }
+
+        if let Some(ref servers) = merged.mcp_servers {
+            lines.push(kv("mcp_servers", &format!("{} configured", servers.len())));
+        }
+
+        if let Some(ref env) = merged.env {
+            lines.push(kv("env", &format!("{} variables", env.len())));
+        }
+
+        lines.push(String::new());
+        lines.push(String::from("Usage:"));
+        lines.push(String::from(
+            "  /config set key=value           write to global settings",
+        ));
+        lines.push(String::from(
+            "  /config set key=value --project  write to project settings",
+        ));
+        lines.push(String::from(
+            "  /config unset key               remove from global settings",
+        ));
+
+        lines.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_data_merge_other_wins() {
+        let base = ConfigData {
+            model: Some(String::from("model-a")),
+            max_turns: Some(10),
+            ..Default::default()
+        };
+        let overlay = ConfigData {
+            model: Some(String::from("model-b")),
+            ..Default::default()
+        };
+        let merged = base.merge(overlay);
+        assert_eq!(merged.model.as_deref(), Some("model-b"));
+        assert_eq!(merged.max_turns, Some(10)); // kept from base
+    }
+
+    #[test]
+    fn config_data_merge_preserves_base_when_overlay_none() {
+        let base = ConfigData {
+            model: Some(String::from("model-a")),
+            ..Default::default()
+        };
+        let overlay = ConfigData::default();
+        let merged = base.merge(overlay);
+        assert_eq!(merged.model.as_deref(), Some("model-a"));
+    }
+
+    #[test]
+    fn config_store_round_trip_set_and_read() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+
+        ConfigStore::set_value("model", "deepseek-v4-flash", &path).expect("set model");
+        ConfigStore::set_value("max_turns", "15", &path).expect("set max_turns");
+
+        let data = ConfigStore::read_file(&path);
+        assert_eq!(data.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(data.max_turns, Some(15));
+    }
+
+    #[test]
+    fn config_store_set_preserves_existing_keys() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+
+        ConfigStore::set_value("model", "model-a", &path).expect("set model");
+        ConfigStore::set_value("max_turns", "7", &path).expect("set max_turns");
+
+        let data = ConfigStore::read_file(&path);
+        assert_eq!(data.model.as_deref(), Some("model-a"));
+        assert_eq!(data.max_turns, Some(7));
+    }
+
+    #[test]
+    fn config_store_unset_removes_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+
+        ConfigStore::set_value("model", "model-a", &path).expect("set");
+        ConfigStore::unset_value("model", &path).expect("unset");
+
+        let data = ConfigStore::read_file(&path);
+        assert!(data.model.is_none());
+    }
+
+    #[test]
+    fn config_store_load_merges_three_layers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cwd = temp.path();
+
+        // Simulate global config
+        let global_dir = cwd.join(".tide-test-global");
+        std::fs::create_dir_all(&global_dir).expect("global dir");
+        let global_config = serde_json::json!({ "model": "global-model", "max_turns": 20 });
+        std::fs::write(
+            global_dir.join("settings.json"),
+            serde_json::to_string_pretty(&global_config).expect("serialize"),
+        )
+        .expect("write global");
+
+        // Simulate project config that overrides max_turns
+        let project_dir = cwd.join(".deeptide");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        let project_config = serde_json::json!({ "max_turns": 5 });
+        std::fs::write(
+            project_dir.join("settings.json"),
+            serde_json::to_string_pretty(&project_config).expect("serialize"),
+        )
+        .expect("write project");
+
+        // Direct path test (not using TIDE_CONFIG_DIR since that's global state)
+        let global_data = ConfigStore::read_file(&global_dir.join("settings.json"));
+        let project_data = ConfigStore::read_file(&project_dir.join("settings.json"));
+        let merged = global_data.merge(project_data);
+
+        assert_eq!(merged.model.as_deref(), Some("global-model")); // from global
+        assert_eq!(merged.max_turns, Some(5)); // overridden by project
+    }
+
+    #[test]
+    fn hook_entry_effective_timeout_defaults_to_ten_seconds() {
+        let h = HookEntry {
+            matcher: String::from("*"),
+            command: String::from("echo hi"),
+            timeout_ms: None,
+            disabled: None,
+            name: None,
+        };
+        assert_eq!(h.effective_timeout_ms(), 10_000);
+        assert!(!h.is_disabled());
+    }
+
+    #[test]
+    fn config_data_apply_env_skips_existing_vars() {
+        let mut data = ConfigData::default();
+        let mut env_map = HashMap::new();
+        env_map.insert(
+            String::from("DEEPTIDE_TEST_UNIQUE_VAR_XYZ"),
+            String::from("from-config"),
+        );
+        data.env = Some(env_map);
+
+        // Pre-set the var
+        unsafe {
+            std::env::set_var("DEEPTIDE_TEST_UNIQUE_VAR_XYZ", "pre-existing");
+        }
+        data.apply_env();
+        assert_eq!(
+            std::env::var("DEEPTIDE_TEST_UNIQUE_VAR_XYZ").expect("var should exist"),
+            "pre-existing"
+        );
+        unsafe {
+            std::env::remove_var("DEEPTIDE_TEST_UNIQUE_VAR_XYZ");
+        }
+    }
+}

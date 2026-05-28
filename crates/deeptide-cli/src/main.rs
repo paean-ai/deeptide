@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{ArgAction, Parser, ValueEnum};
+use deeptide_core::config::ConfigStore;
 use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
@@ -141,14 +142,21 @@ fn main() {
 fn run(mut cli: Cli) -> Result<(), String> {
     normalize_embedded_mode(&mut cli);
 
-    let Some(permission_mode) = PermissionMode::parse(&cli.permission_mode) else {
-        return Err(format!("invalid permission mode: {}", cli.permission_mode));
-    };
-
     if let Some(cwd) = cli.cwd.as_ref() {
         std::env::set_current_dir(cwd)
             .map_err(|error| format!("invalid --cwd {}: {error}", cwd.display()))?;
     }
+
+    // Load settings.json (global ← project ← local) and apply as fallbacks.
+    // Explicit CLI flags and environment variables always take precedence.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cfg = ConfigStore::load(&cwd);
+    cfg.apply_env();
+    apply_config_fallbacks(&mut cli, &cfg);
+
+    let Some(permission_mode) = PermissionMode::parse(&cli.permission_mode) else {
+        return Err(format!("invalid permission mode: {}", cli.permission_mode));
+    };
 
     validate_formats(&cli)?;
     if !cli.print_mode && cli.input_format == InputFormat::Text {
@@ -158,6 +166,46 @@ fn run(mut cli: Cli) -> Result<(), String> {
     let stdin = read_stdin_if_needed(&cli)?;
     let prompt = collect_prompt(&cli, stdin.as_deref())?;
     emit_output(&cli, &prompt, permission_mode)
+}
+
+/// Apply `settings.json` values as fallbacks for CLI fields that were not
+/// explicitly set by the user.  CLI flags and env vars always win.
+fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
+    // model: CLI default is DEFAULT_MODEL; treat that as "not set" and let
+    // config override it.
+    if cli.model == DEFAULT_MODEL
+        && let Some(ref m) = cfg.model
+    {
+        cli.model = m.clone();
+    }
+    if cli.base_url == DEFAULT_BASE_URL
+        && let Some(ref u) = cfg.base_url
+    {
+        cli.base_url = u.clone();
+    }
+    if cli.max_turns == 25
+        && let Some(t) = cfg.max_turns
+    {
+        cli.max_turns = t;
+    }
+    if cli.max_output_tokens == 4096
+        && let Some(t) = cfg.max_tokens
+    {
+        cli.max_output_tokens = t;
+    }
+    if cli.permission_mode == "default"
+        && let Some(ref m) = cfg.permission_mode
+    {
+        cli.permission_mode = m.clone();
+    }
+    if cli.api_key.is_none()
+        && let Some(ref key) = cfg.api_key
+    {
+        cli.api_key = Some(key.clone());
+    }
+    if let Some(false) = cfg.prompt_cache {
+        cli.no_prompt_cache = true;
+    }
 }
 
 fn normalize_embedded_mode(cli: &mut Cli) {
