@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentBackend, AgentRequest, AgentResponse, AgentUsage, ConversationMessage, MessageRole,
-    ToolCall, ToolResultBlock,
+    StreamingHandler, ToolCall, ToolResultBlock,
+    streaming::parse_streaming_response,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,14 @@ pub struct AnthropicConfig {
     /// The bulk of every request is the ~50K-token tool schema; caching it
     /// turns a $0.50 request into a $0.05 cache-hit on follow-ups.
     pub enable_prompt_caching: bool,
+    /// When true, the backend requests `stream: true` from `/v1/messages` and
+    /// parses the SSE response, optionally invoking
+    /// [`AnthropicBackend::with_streaming_handler`] for each delta. The
+    /// assembled response is identical to the non-streaming path so callers
+    /// of [`AgentBackend::respond`] don't see a behaviour change — only the
+    /// wire shape changes. Required for proxies (openrouter, custom relays)
+    /// that mandate streaming.
+    pub enable_streaming: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +71,7 @@ impl AnthropicConfig {
             system_prompt: None,
             tool_choice: ToolChoice::Auto,
             enable_prompt_caching: true,
+            enable_streaming: false,
         }
     }
 
@@ -79,6 +89,7 @@ impl AnthropicConfig {
             system_prompt: None,
             tool_choice: ToolChoice::Auto,
             enable_prompt_caching: true,
+            enable_streaming: false,
         }
     }
 
@@ -101,11 +112,21 @@ impl AnthropicConfig {
         self.enable_prompt_caching = enabled;
         self
     }
+
+    pub fn with_streaming(mut self, enabled: bool) -> Self {
+        self.enable_streaming = enabled;
+        self
+    }
 }
 
 pub struct AnthropicBackend {
     config: AnthropicConfig,
     client: Client,
+    /// Caller-supplied sink for live streaming deltas. Only invoked when
+    /// `config.enable_streaming == true`. Wrapped in `Arc<dyn Fn>` so the
+    /// backend can be cheaply cloned into sub-agent factories while keeping
+    /// every sub-agent pointed at the same output stream.
+    streaming_handler: Option<StreamingHandler>,
 }
 
 impl AnthropicBackend {
@@ -114,11 +135,22 @@ impl AnthropicBackend {
             .timeout(Duration::from_secs(300))
             .build()
             .map_err(|error| error.to_string())?;
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            client,
+            streaming_handler: None,
+        })
     }
 
     pub fn config(&self) -> &AnthropicConfig {
         &self.config
+    }
+
+    /// Attach a sink for live streaming deltas. Only invoked when the
+    /// underlying config has `enable_streaming = true`.
+    pub fn with_streaming_handler(mut self, handler: StreamingHandler) -> Self {
+        self.streaming_handler = Some(handler);
+        self
     }
 }
 
@@ -128,15 +160,12 @@ impl AgentBackend for AnthropicBackend {
         // AgentRequest::system overrides AnthropicConfig::system_prompt when set,
         // allowing per-session prompts (built from CWD) to take precedence over
         // the static prompt injected via CLI flags.
-        // AgentRequest::system overrides AnthropicConfig::system_prompt when set,
-        // allowing per-session prompts (built from CWD) to take precedence over
-        // the static prompt injected via CLI flags.
         let effective_system = request
             .system
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .or(self.config.system_prompt.as_deref());
-        let body = build_messages_request(
+        let mut body = build_messages_request(
             &self.config.model,
             &request.messages,
             self.config.max_tokens,
@@ -144,30 +173,50 @@ impl AgentBackend for AnthropicBackend {
             &self.config.tool_choice,
             self.config.enable_prompt_caching,
         );
+        body.stream = self.config.enable_streaming;
         let url = messages_url(&self.config.base_url);
 
-        let request = self
+        let req = self
             .client
             .post(url)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body);
-        let request = match self.config.auth_mode {
-            AnthropicAuthMode::ApiKey => request.header("x-api-key", &self.config.api_key),
-            AnthropicAuthMode::BearerToken => request.bearer_auth(&self.config.api_key),
+            .header("anthropic-version", "2023-06-01");
+        let req = if self.config.enable_streaming {
+            // Some proxies require the explicit Accept header to switch from
+            // buffered JSON responses to SSE. Anthropic itself doesn't require
+            // it, but setting it costs nothing and improves portability.
+            req.header("accept", "text/event-stream")
+        } else {
+            req
         };
-        let response = request
+        let req = req.json(&body);
+        let req = match self.config.auth_mode {
+            AnthropicAuthMode::ApiKey => req.header("x-api-key", &self.config.api_key),
+            AnthropicAuthMode::BearerToken => req.bearer_auth(&self.config.api_key),
+        };
+        let response = req
             .send()
             .map_err(|error| format!("connection error: {error}"))?;
         let status = response.status();
-        let text = response
-            .text()
-            .map_err(|error| format!("failed to read response body: {error}"))?;
 
         if !status.is_success() {
+            let text = response
+                .text()
+                .map_err(|error| format!("failed to read response body: {error}"))?;
             return Err(classify_error(status.as_u16(), &text));
         }
 
-        parse_messages_response(&text, started.elapsed())
+        if self.config.enable_streaming {
+            // The reqwest blocking Response impls `Read`, which the SSE
+            // parser consumes chunk-by-chunk — no need to buffer the whole
+            // payload up front, so live deltas flow to the handler as the
+            // model produces them.
+            parse_streaming_response(response, self.streaming_handler.as_ref(), started.elapsed())
+        } else {
+            let text = response
+                .text()
+                .map_err(|error| format!("failed to read response body: {error}"))?;
+            parse_messages_response(&text, started.elapsed())
+        }
     }
 }
 

@@ -112,6 +112,14 @@ struct Cli {
         help = "Disable Anthropic prompt caching of system prompt and tool schemas."
     )]
     no_prompt_cache: bool,
+
+    #[arg(
+        long = "stream",
+        env = "DEEPTIDE_STREAM",
+        action = ArgAction::SetTrue,
+        help = "Request streamed SSE responses from the Anthropic Messages API. Required by some proxy providers (openrouter, custom relays)."
+    )]
+    stream: bool,
 }
 
 fn main() {
@@ -384,6 +392,7 @@ fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
     };
     config.max_tokens = cli.max_output_tokens;
     config.enable_prompt_caching = !cli.no_prompt_cache;
+    config.enable_streaming = cli.stream;
     if let Some(system_prompt) = resolve_system_prompt(cli)? {
         config = config.with_system_prompt(system_prompt);
     }
@@ -549,6 +558,7 @@ mod tests {
             system_prompt: None,
             system_prompt_file: None,
             no_prompt_cache: false,
+            stream: false,
         }
     }
 
@@ -780,6 +790,23 @@ mod tests {
         let configured = configured_backend(&cli).expect("configured backend");
         let cfg = configured.subagent_config.expect("subagent config");
         assert!(!cfg.enable_prompt_caching);
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn stream_flag_flips_anthropic_config_enable_streaming() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "test-key");
+        }
+        let mut cli = sample_cli();
+        cli.stream = true;
+
+        let configured = configured_backend(&cli).expect("configured backend");
+        let cfg = configured.subagent_config.expect("subagent config");
+        assert!(cfg.enable_streaming, "--stream must enable streaming");
 
         clear_api_env();
     }

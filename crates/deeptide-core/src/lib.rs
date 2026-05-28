@@ -12,6 +12,7 @@ pub mod prompt;
 pub mod repl;
 pub mod safety_guard;
 pub mod session;
+pub mod streaming;
 pub mod tool_batch_labeler;
 pub mod tool_result_summary;
 pub mod tools;
@@ -46,6 +47,7 @@ pub use safety_guard::{
     AuditInput, AuditReport, Auditor, CodeAuditor, Finding, SafetyGuard, ShellAuditor, Verdict,
 };
 pub use session::{SessionEntry, SessionStore, new_session_id};
+pub use streaming::{StreamingEvent, StreamingHandler, parse_streaming_response};
 pub use tool_batch_labeler::{ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
