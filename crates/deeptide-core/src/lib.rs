@@ -33,8 +33,8 @@ pub use completion::{
     Replacement,
 };
 pub use config::{
-    ConfigData, ConfigScope, ConfigStore, HookEntry, McpServerConfig, SettingsHooks,
-    SettingsPermissions, SettingsRule,
+    ConfigData, ConfigScope, ConfigStore, HookEntry, McpServerConfig, ProviderProfile,
+    SettingsHooks, SettingsPermissions, SettingsRule,
 };
 pub use context_window::{
     CompressionReport, ContextWindowConfig, ContextWindowManager, HeuristicSummarizer, Summarizer,

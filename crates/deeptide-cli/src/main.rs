@@ -87,6 +87,14 @@ struct Cli {
     #[arg(long, env = "DEEPTIDE_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
+    #[arg(
+        long,
+        env = "DEEPTIDE_PROFILE",
+        value_name = "NAME",
+        help = "Active provider profile from settings.json `providers`. Falls back to TIDE_PROFILE, then the config's active_profile."
+    )]
+    profile: Option<String>,
+
     #[arg(long, default_value_t = 4096)]
     max_output_tokens: usize,
 
@@ -171,15 +179,36 @@ fn run(mut cli: Cli) -> Result<(), String> {
 /// Apply `settings.json` values as fallbacks for CLI fields that were not
 /// explicitly set by the user.  CLI flags and env vars always win.
 fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
+    // Resolve the active provider profile. The profile name comes from
+    // --profile (or DEEPTIDE_PROFILE via clap), then TIDE_PROFILE, then the
+    // config's active_profile. A selected provider supplies model/base_url/
+    // api_key that take precedence over the top-level config fields, matching
+    // the Swift implementation's `provider ?? fileConfig` resolution order.
+    let profile_name = cli
+        .profile
+        .clone()
+        .filter(|name| !name.is_empty())
+        .or_else(|| env_first_non_empty(&["TIDE_PROFILE"]));
+    let provider = cfg.active_provider(profile_name.as_deref()).map(|(_, p)| p);
+    let cfg_model = provider
+        .and_then(|p| p.model.as_ref())
+        .or(cfg.model.as_ref());
+    let cfg_base_url = provider
+        .and_then(|p| p.base_url.as_ref())
+        .or(cfg.base_url.as_ref());
+    let cfg_api_key = provider
+        .and_then(|p| p.api_key.as_ref())
+        .or(cfg.api_key.as_ref());
+
     // model: CLI default is DEFAULT_MODEL; treat that as "not set" and let
     // config override it.
     if cli.model == DEFAULT_MODEL
-        && let Some(ref m) = cfg.model
+        && let Some(m) = cfg_model
     {
         cli.model = m.clone();
     }
     if cli.base_url == DEFAULT_BASE_URL
-        && let Some(ref u) = cfg.base_url
+        && let Some(u) = cfg_base_url
     {
         cli.base_url = u.clone();
     }
@@ -199,7 +228,7 @@ fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
         cli.permission_mode = m.clone();
     }
     if cli.api_key.is_none()
-        && let Some(ref key) = cfg.api_key
+        && let Some(key) = cfg_api_key
     {
         cli.api_key = Some(key.clone());
     }
@@ -774,12 +803,13 @@ impl EnumValue for OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, collect_prompt,
-        configured_backend, effective_base_url, effective_model, normalize_embedded_mode,
-        validate_formats,
+        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
+        collect_prompt, configured_backend, effective_base_url, effective_model,
+        normalize_embedded_mode, validate_formats,
     };
     use clap::Parser;
-    use deeptide_core::AnthropicAuthMode;
+    use deeptide_core::{AnthropicAuthMode, ConfigData, ProviderProfile};
+    use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn sample_cli() -> Cli {
@@ -795,6 +825,7 @@ mod tests {
             model: "deepseek-v4-pro".to_owned(),
             base_url: "https://api.anthropic.com".to_owned(),
             api_key: None,
+            profile: None,
             max_output_tokens: 4096,
             max_turns: 25,
             system_prompt: None,
@@ -829,6 +860,108 @@ mod tests {
                 std::env::remove_var(name);
             }
         }
+    }
+
+    #[test]
+    fn config_fallbacks_apply_active_provider() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::remove_var("TIDE_PROFILE");
+        }
+
+        let mut cli = sample_cli();
+        // Simulate "unset" CLI values so config/provider fallbacks apply.
+        cli.model = DEFAULT_MODEL.to_owned();
+        cli.base_url = DEFAULT_BASE_URL.to_owned();
+
+        let cfg = ConfigData {
+            active_profile: Some(String::from("deepseek")),
+            base_url: Some(String::from("https://top-level.example")),
+            providers: Some(HashMap::from([(
+                String::from("deepseek"),
+                ProviderProfile {
+                    base_url: Some(String::from("https://api.deepseek.com/anthropic")),
+                    api_key: Some(String::from("provider-key")),
+                    model: Some(String::from("provider-model-xyz")),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+
+        apply_config_fallbacks(&mut cli, &cfg);
+
+        // The active provider's values win over the top-level config base_url.
+        assert_eq!(cli.base_url, "https://api.deepseek.com/anthropic");
+        assert_eq!(cli.model, "provider-model-xyz");
+        assert_eq!(cli.api_key.as_deref(), Some("provider-key"));
+    }
+
+    #[test]
+    fn config_fallbacks_explicit_profile_overrides_active_profile() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::remove_var("TIDE_PROFILE");
+        }
+
+        let mut cli = sample_cli();
+        cli.model = DEFAULT_MODEL.to_owned();
+        cli.base_url = DEFAULT_BASE_URL.to_owned();
+        cli.profile = Some(String::from("anthropic"));
+
+        let cfg = ConfigData {
+            active_profile: Some(String::from("deepseek")),
+            providers: Some(HashMap::from([
+                (
+                    String::from("deepseek"),
+                    ProviderProfile {
+                        base_url: Some(String::from("https://api.deepseek.com/anthropic")),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    String::from("anthropic"),
+                    ProviderProfile {
+                        base_url: Some(String::from("https://api.anthropic.com")),
+                        ..Default::default()
+                    },
+                ),
+            ])),
+            ..Default::default()
+        };
+
+        apply_config_fallbacks(&mut cli, &cfg);
+        assert_eq!(cli.base_url, "https://api.anthropic.com");
+    }
+
+    #[test]
+    fn config_fallbacks_explicit_cli_flags_beat_provider() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::remove_var("TIDE_PROFILE");
+        }
+
+        let mut cli = sample_cli();
+        // A user-supplied --base-url (non-default) must not be overridden.
+        cli.base_url = "https://user-supplied.example".to_owned();
+
+        let cfg = ConfigData {
+            active_profile: Some(String::from("deepseek")),
+            providers: Some(HashMap::from([(
+                String::from("deepseek"),
+                ProviderProfile {
+                    base_url: Some(String::from("https://api.deepseek.com/anthropic")),
+                    ..Default::default()
+                },
+            )])),
+            ..Default::default()
+        };
+
+        apply_config_fallbacks(&mut cli, &cfg);
+        assert_eq!(cli.base_url, "https://user-supplied.example");
     }
 
     #[test]
