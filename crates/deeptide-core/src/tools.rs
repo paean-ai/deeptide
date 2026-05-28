@@ -8767,6 +8767,11 @@ impl Tool for BashTool {
         if command.contains('\n') || command.contains('\r') {
             return ToolResult::error("command must be a single line; rewrite it with && or ;");
         }
+        if let Some(reason) = crate::sensitive_file::shell_command_block_reason(command, |token| {
+            context.resolve_path(token)
+        }) {
+            return ToolResult::error(reason);
+        }
 
         let timeout_ms = input
             .get("timeout")
