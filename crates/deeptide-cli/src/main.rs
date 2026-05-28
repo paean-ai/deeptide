@@ -173,6 +173,14 @@ struct Cli {
     debug: bool,
 
     #[arg(
+        long,
+        env = "DEEPTIDE_FAST",
+        action = ArgAction::SetTrue,
+        help = "Fast mode: same model, biased toward faster/terser output (adds a system-prompt hint)."
+    )]
+    fast: bool,
+
+    #[arg(
         long = "stream",
         env = "DEEPTIDE_STREAM",
         action = ArgAction::SetTrue,
@@ -300,6 +308,9 @@ fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
     }
     if let Some(true) = cfg.debug {
         cli.debug = true;
+    }
+    if let Some(true) = cfg.fast_mode {
+        cli.fast = true;
     }
 }
 
@@ -489,6 +500,7 @@ fn run_interactive(
         .with_max_turns(cli.max_turns)
         .with_pricing_overrides(pricing_overrides)
         .with_debug(cli.debug)
+        .with_fast_mode(cli.fast)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
@@ -924,6 +936,7 @@ mod tests {
             no_prompt_cache: false,
             no_color: false,
             debug: false,
+            fast: false,
             stream: false,
         }
     }

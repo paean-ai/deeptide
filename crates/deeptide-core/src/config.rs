@@ -199,6 +199,11 @@ pub struct ConfigData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debug: Option<bool>,
 
+    /// Fast mode — same model, biased toward faster/terser output. Adds a
+    /// hint to the system prompt; surfaced by `/fast`.
+    #[serde(rename = "fast_mode", skip_serializing_if = "Option::is_none")]
+    pub fast_mode: Option<bool>,
+
     /// Model retried once when the primary model is transiently overloaded.
     #[serde(rename = "fallback_model", skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
@@ -256,6 +261,7 @@ impl ConfigData {
             prompt_cache: other.prompt_cache.or(self.prompt_cache),
             no_color: other.no_color.or(self.no_color),
             debug: other.debug.or(self.debug),
+            fast_mode: other.fast_mode.or(self.fast_mode),
             fallback_model: other.fallback_model.or(self.fallback_model),
             thinking: other.thinking.or(self.thinking),
             effort: other.effort.or(self.effort),
@@ -539,6 +545,13 @@ impl ConfigStore {
             "debug",
             &merged
                 .debug
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(unset — false)".to_owned()),
+        ));
+        lines.push(kv(
+            "fast_mode",
+            &merged
+                .fast_mode
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "(unset — false)".to_owned()),
         ));
@@ -893,6 +906,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(base.merge(overlay).debug, Some(false));
+    }
+
+    #[test]
+    fn config_data_parses_and_merges_fast_mode() {
+        let data: ConfigData = serde_json::from_str(r#"{"fast_mode": true}"#).expect("parse");
+        assert_eq!(data.fast_mode, Some(true));
+
+        let base = ConfigData {
+            fast_mode: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            base.clone().merge(ConfigData::default()).fast_mode,
+            Some(true)
+        );
+        let overlay = ConfigData {
+            fast_mode: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(base.merge(overlay).fast_mode, Some(false));
     }
 
     #[test]
