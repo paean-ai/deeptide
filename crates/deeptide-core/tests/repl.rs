@@ -1048,7 +1048,8 @@ fn dream_auto_fires_after_cadence_user_turns() {
         })
         .collect();
     assert!(
-        !r1.iter().any(|text| text.contains("[dream] auto-consolidating")),
+        !r1.iter()
+            .any(|text| text.contains("[dream] auto-consolidating")),
         "no auto-fire expected on turn 1, got: {r1:?}"
     );
 
@@ -1062,7 +1063,8 @@ fn dream_auto_fires_after_cadence_user_turns() {
         })
         .collect();
     assert!(
-        r2.iter().any(|text| text.contains("[dream] auto-consolidating")),
+        r2.iter()
+            .any(|text| text.contains("[dream] auto-consolidating")),
         "expected auto-dream marker on turn 2, got: {r2:?}"
     );
 

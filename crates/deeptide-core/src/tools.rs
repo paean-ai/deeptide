@@ -8855,7 +8855,9 @@ impl Tool for KillBashTool {
     }
 }
 
-fn render_background_snapshot(snapshot: &crate::background_shell::BackgroundOutputSnapshot) -> String {
+fn render_background_snapshot(
+    snapshot: &crate::background_shell::BackgroundOutputSnapshot,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "shell_id={} running={} elapsed={}s",

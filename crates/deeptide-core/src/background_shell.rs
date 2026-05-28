@@ -238,14 +238,8 @@ pub fn spawn(command: &str, cwd: &std::path::Path) -> Result<SpawnedBackground, 
                 let mut child_guard = task.child.lock().unwrap_or_else(|p| p.into_inner());
                 let status = child_guard.wait();
                 let code = status.ok().and_then(|s| s.code());
-                *task
-                    .finished_at
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
-                *task
-                    .exit_code
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) = code;
+                *task.finished_at.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
+                *task.exit_code.lock().unwrap_or_else(|p| p.into_inner()) = code;
             })
             .map_err(|error| format!("failed to spawn reaper thread: {error}"))?;
     }

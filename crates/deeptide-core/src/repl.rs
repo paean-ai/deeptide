@@ -1368,13 +1368,10 @@ impl ReplSession {
             }
             "status" | "list" => {
                 if self.dream_schedule.enabled {
-                    let remaining = self
-                        .dream_schedule
-                        .every_user_turns
-                        .saturating_sub(
-                            self.user_turn_count
-                                .saturating_sub(self.dream_schedule.last_user_turn_count),
-                        );
+                    let remaining = self.dream_schedule.every_user_turns.saturating_sub(
+                        self.user_turn_count
+                            .saturating_sub(self.dream_schedule.last_user_turn_count),
+                    );
                     vec![ReplEvent::Output(format!(
                         "Dream loop ENABLED. Cadence: every {} user turns. \
                          Auto-runs this session: {}. Next auto-run in {} more user turns.",
