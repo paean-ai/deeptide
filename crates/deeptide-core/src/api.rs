@@ -1025,27 +1025,79 @@ struct ResponseUsage {
 }
 
 fn classify_error(status: u16, body: &str) -> String {
-    let message = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/message")
-                .or_else(|| value.pointer("/message"))
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-        })
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let message = parsed
+        .as_ref()
+        .and_then(error_message_from_json)
         .unwrap_or_else(|| body.trim().to_owned());
+    let error_type = parsed.as_ref().and_then(error_type_from_json);
+    let hint = api_error_hint(status, error_type);
 
     if message.is_empty() {
-        format!("API request failed with HTTP {status}")
+        format!("API request failed with HTTP {status}{hint}")
+    } else if let Some(error_type) = error_type {
+        format!("API request failed with HTTP {status} ({error_type}): {message}{hint}")
     } else {
-        format!("API request failed with HTTP {status}: {message}")
+        format!("API request failed with HTTP {status}: {message}{hint}")
+    }
+}
+
+fn error_message_from_json(value: &serde_json::Value) -> Option<String> {
+    value
+        .pointer("/error/message")
+        .or_else(|| value.pointer("/message"))
+        .or_else(|| value.pointer("/detail"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            value
+                .pointer("/errors/0/message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn error_type_from_json(value: &serde_json::Value) -> Option<&str> {
+    value
+        .pointer("/error/type")
+        .or_else(|| value.pointer("/type"))
+        .or_else(|| value.pointer("/errors/0/type"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|error_type| !error_type.is_empty())
+}
+
+fn api_error_hint(status: u16, error_type: Option<&str>) -> &'static str {
+    let Some(error_type) = error_type else {
+        return match status {
+            401 | 403 => " Check provider credentials and authentication mode.",
+            429 => " Retry after quota resets or reduce request rate.",
+            529 => " Retry later or switch to another available provider/model.",
+            _ => "",
+        };
+    };
+
+    match (status, error_type) {
+        (401 | 403, _) | (_, "authentication_error" | "permission_error") => {
+            " Check provider credentials and authentication mode."
+        }
+        (429, _) | (_, "rate_limit_error") => " Retry after quota resets or reduce request rate.",
+        (529, _) | (_, "overloaded_error") => {
+            " Retry later or switch to another available provider/model."
+        }
+        _ => "",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{WireMessage, build_messages_request, messages_url, parse_messages_response};
+    use super::{
+        WireMessage, build_messages_request, classify_error, messages_url, parse_messages_response,
+    };
     use std::time::Duration;
 
     #[test]
@@ -1124,6 +1176,37 @@ mod tests {
         assert_eq!(response.tool_calls[0].name, "Read");
         assert_eq!(response.tool_calls[0].input["file_path"], "README.md");
         assert_eq!(response.tool_calls[0].input["limit"], 5);
+    }
+
+    #[test]
+    fn classifies_api_errors_with_type_and_action_hint() {
+        let error = classify_error(
+            429,
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Quota exceeded"}}"#,
+        );
+
+        assert_eq!(
+            error,
+            "API request failed with HTTP 429 (rate_limit_error): Quota exceeded Retry after quota resets or reduce request rate."
+        );
+    }
+
+    #[test]
+    fn classifies_alternate_api_error_shapes() {
+        let auth = classify_error(
+            401,
+            r#"{"errors":[{"type":"authentication_error","message":"bad token"}]}"#,
+        );
+        assert_eq!(
+            auth,
+            "API request failed with HTTP 401 (authentication_error): bad token Check provider credentials and authentication mode."
+        );
+
+        let plain = classify_error(529, "upstream unavailable");
+        assert_eq!(
+            plain,
+            "API request failed with HTTP 529: upstream unavailable Retry later or switch to another available provider/model."
+        );
     }
 
     #[test]
