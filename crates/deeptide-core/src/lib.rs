@@ -8,9 +8,11 @@ pub mod embedded_protocol;
 pub mod markdown;
 pub mod memory;
 pub mod permissions;
+pub mod prompt;
 pub mod repl;
 pub mod safety_guard;
 pub mod session;
+pub mod streaming;
 pub mod tool_batch_labeler;
 pub mod tool_result_summary;
 pub mod tools;
@@ -20,7 +22,7 @@ pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
     AgentUsage, ConversationMessage, LocalEchoBackend, MessageRole, ToolCall, ToolResultBlock,
 };
-pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig};
+pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ToolChoice};
 pub use commands::{
     ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, HelpCommand,
     MemoryCommand, NewCommand, RememberCommand, SlashCommand,
@@ -39,11 +41,13 @@ pub use permissions::{
     PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
     ToolInput,
 };
+pub use prompt::build_system_prompt;
 pub use repl::{ReplEvent, ReplSession};
 pub use safety_guard::{
     AuditInput, AuditReport, Auditor, CodeAuditor, Finding, SafetyGuard, ShellAuditor, Verdict,
 };
 pub use session::{SessionEntry, SessionStore, new_session_id};
+pub use streaming::{StreamingEvent, StreamingHandler, parse_streaming_response};
 pub use tool_batch_labeler::{ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{

@@ -327,7 +327,40 @@ fn repl_swift_parity_support_commands_are_available() {
     assert!(
         only_output(repl.submit("/update --check")).contains("Update checks are not available")
     );
-    assert!(only_output(repl.submit("/vim")).contains("Editor composition is not available"));
+    // `/vim` synchronously spawns `$EDITOR` (or `vim`) and waits for it. On
+    // a developer machine with an interactive `vim` installed, the previous
+    // version of this test deadlocked the whole `cargo test` run because vim
+    // blocked waiting for stdin. Force `$EDITOR=true` so the spawn returns
+    // immediately with success and an empty file — the post-condition is the
+    // same (a non-empty output event is returned to the REPL).
+    //
+    // SAFETY: env mutation is process-global and the rest of this test
+    // doesn't read `$EDITOR` or `$VISUAL`, but other tests in the binary
+    // could; the env mutation is undone before we return.
+    let prev_editor = std::env::var_os("EDITOR");
+    let prev_visual = std::env::var_os("VISUAL");
+    unsafe {
+        std::env::set_var("EDITOR", "true");
+        std::env::remove_var("VISUAL");
+    }
+    let vim_output = repl.submit("/vim");
+    unsafe {
+        match prev_editor {
+            Some(value) => std::env::set_var("EDITOR", value),
+            None => std::env::remove_var("EDITOR"),
+        }
+        if let Some(value) = prev_visual {
+            std::env::set_var("VISUAL", value);
+        }
+    }
+    assert!(
+        !vim_output.is_empty(),
+        "/vim should produce at least one output event"
+    );
+    assert!(
+        vim_output.iter().any(|e| matches!(e, ReplEvent::Output(_))),
+        "/vim should produce a text output event"
+    );
 }
 
 #[test]

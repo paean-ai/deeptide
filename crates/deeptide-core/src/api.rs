@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentBackend, AgentRequest, AgentResponse, AgentUsage, ConversationMessage, MessageRole,
-    ToolCall, ToolResultBlock,
+    StreamingHandler, ToolCall, ToolResultBlock, streaming::parse_streaming_response,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,12 +15,44 @@ pub struct AnthropicConfig {
     pub model: String,
     pub max_tokens: usize,
     pub auth_mode: AnthropicAuthMode,
+    /// Optional system prompt. Empty/whitespace-only is treated as None on the wire.
+    pub system_prompt: Option<String>,
+    /// How the model is allowed to pick tools. Defaults to [`ToolChoice::Auto`].
+    pub tool_choice: ToolChoice,
+    /// Attach `cache_control: ephemeral` to the system block (when present) and
+    /// the last tool schema so Anthropic can reuse cached tokens across turns.
+    /// The bulk of every request is the ~50K-token tool schema; caching it
+    /// turns a $0.50 request into a $0.05 cache-hit on follow-ups.
+    pub enable_prompt_caching: bool,
+    /// When true, the backend requests `stream: true` from `/v1/messages` and
+    /// parses the SSE response, optionally invoking
+    /// [`AnthropicBackend::with_streaming_handler`] for each delta. The
+    /// assembled response is identical to the non-streaming path so callers
+    /// of [`AgentBackend::respond`] don't see a behaviour change — only the
+    /// wire shape changes. Required for proxies (openrouter, custom relays)
+    /// that mandate streaming.
+    pub enable_streaming: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnthropicAuthMode {
     ApiKey,
     BearerToken,
+}
+
+/// Maps onto Anthropic's [tool choice](https://docs.anthropic.com/en/api/messages#tool-choice)
+/// directive. Defaults to [`Auto`](ToolChoice::Auto), matching the API default
+/// when omitted, but we always send it on the wire to keep behaviour explicit
+/// and stable across API revisions.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ToolChoice {
+    /// Model decides whether to call a tool. API default when omitted.
+    #[default]
+    Auto,
+    /// Model MUST call some tool, but may pick which one.
+    Any,
+    /// Model MUST call exactly the named tool.
+    Tool(String),
 }
 
 impl AnthropicConfig {
@@ -35,6 +67,10 @@ impl AnthropicConfig {
             model: model.into(),
             max_tokens: 4096,
             auth_mode: AnthropicAuthMode::ApiKey,
+            system_prompt: None,
+            tool_choice: ToolChoice::Auto,
+            enable_prompt_caching: true,
+            enable_streaming: false,
         }
     }
 
@@ -49,13 +85,47 @@ impl AnthropicConfig {
             model: model.into(),
             max_tokens: 4096,
             auth_mode: AnthropicAuthMode::BearerToken,
+            system_prompt: None,
+            tool_choice: ToolChoice::Auto,
+            enable_prompt_caching: true,
+            enable_streaming: false,
         }
+    }
+
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        let text = system_prompt.into();
+        self.system_prompt = if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        };
+        self
+    }
+
+    pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
+        self.tool_choice = choice;
+        self
+    }
+
+    pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
+        self.enable_prompt_caching = enabled;
+        self
+    }
+
+    pub fn with_streaming(mut self, enabled: bool) -> Self {
+        self.enable_streaming = enabled;
+        self
     }
 }
 
 pub struct AnthropicBackend {
     config: AnthropicConfig,
     client: Client,
+    /// Caller-supplied sink for live streaming deltas. Only invoked when
+    /// `config.enable_streaming == true`. Wrapped in `Arc<dyn Fn>` so the
+    /// backend can be cheaply cloned into sub-agent factories while keeping
+    /// every sub-agent pointed at the same output stream.
+    streaming_handler: Option<StreamingHandler>,
 }
 
 impl AnthropicBackend {
@@ -64,46 +134,88 @@ impl AnthropicBackend {
             .timeout(Duration::from_secs(300))
             .build()
             .map_err(|error| error.to_string())?;
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            client,
+            streaming_handler: None,
+        })
     }
 
     pub fn config(&self) -> &AnthropicConfig {
         &self.config
+    }
+
+    /// Attach a sink for live streaming deltas. Only invoked when the
+    /// underlying config has `enable_streaming = true`.
+    pub fn with_streaming_handler(mut self, handler: StreamingHandler) -> Self {
+        self.streaming_handler = Some(handler);
+        self
     }
 }
 
 impl AgentBackend for AnthropicBackend {
     fn respond(&mut self, request: AgentRequest) -> Result<AgentResponse, String> {
         let started = Instant::now();
-        let body = build_messages_request(
+        // AgentRequest::system overrides AnthropicConfig::system_prompt when set,
+        // allowing per-session prompts (built from CWD) to take precedence over
+        // the static prompt injected via CLI flags.
+        let effective_system = request
+            .system
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or(self.config.system_prompt.as_deref());
+        let mut body = build_messages_request(
             &self.config.model,
             &request.messages,
             self.config.max_tokens,
+            effective_system,
+            &self.config.tool_choice,
+            self.config.enable_prompt_caching,
         );
+        body.stream = self.config.enable_streaming;
         let url = messages_url(&self.config.base_url);
 
-        let request = self
+        let req = self
             .client
             .post(url)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body);
-        let request = match self.config.auth_mode {
-            AnthropicAuthMode::ApiKey => request.header("x-api-key", &self.config.api_key),
-            AnthropicAuthMode::BearerToken => request.bearer_auth(&self.config.api_key),
+            .header("anthropic-version", "2023-06-01");
+        let req = if self.config.enable_streaming {
+            // Some proxies require the explicit Accept header to switch from
+            // buffered JSON responses to SSE. Anthropic itself doesn't require
+            // it, but setting it costs nothing and improves portability.
+            req.header("accept", "text/event-stream")
+        } else {
+            req
         };
-        let response = request
+        let req = req.json(&body);
+        let req = match self.config.auth_mode {
+            AnthropicAuthMode::ApiKey => req.header("x-api-key", &self.config.api_key),
+            AnthropicAuthMode::BearerToken => req.bearer_auth(&self.config.api_key),
+        };
+        let response = req
             .send()
             .map_err(|error| format!("connection error: {error}"))?;
         let status = response.status();
-        let text = response
-            .text()
-            .map_err(|error| format!("failed to read response body: {error}"))?;
 
         if !status.is_success() {
+            let text = response
+                .text()
+                .map_err(|error| format!("failed to read response body: {error}"))?;
             return Err(classify_error(status.as_u16(), &text));
         }
 
-        parse_messages_response(&text, started.elapsed())
+        if self.config.enable_streaming {
+            // The reqwest blocking Response impls `Read`, which the SSE
+            // parser consumes chunk-by-chunk — no need to buffer the whole
+            // payload up front, so live deltas flow to the handler as the
+            // model produces them.
+            parse_streaming_response(response, self.streaming_handler.as_ref(), started.elapsed())
+        } else {
+            let text = response
+                .text()
+                .map_err(|error| format!("failed to read response body: {error}"))?;
+            parse_messages_response(&text, started.elapsed())
+        }
     }
 }
 
@@ -114,12 +226,68 @@ struct MessagesRequest<'a> {
     messages: Vec<WireMessage>,
     tools: Vec<WireTool>,
     stream: bool,
+    /// Anthropic accepts either a plain string OR an array of text blocks for
+    /// `system`. We always emit the array form (when set) so a single
+    /// `cache_control` marker can be attached to the last block — that marker
+    /// caches the entire system prefix server-side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<Vec<WireSystemBlock>>,
+    /// Direct passthrough of [`ToolChoice`]. Always emitted when tools are
+    /// declared so behaviour is explicit and stable across API defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<WireToolChoice>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct WireMessage {
     role: &'static str,
     content: Vec<WireContentBlock>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct WireSystemBlock {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<WireCacheControl>,
+}
+
+/// Marks a content block / tool schema as eligible for Anthropic's ephemeral
+/// prompt cache. The 1h TTL flavour is intentionally not exposed yet — only
+/// allowlisted accounts can use it and it's an easy way to silently bust
+/// caching for everyone else (zero-cli gates 1h behind a GrowthBook flag for
+/// exactly this reason).
+#[derive(Debug, Serialize, PartialEq, Eq, Clone)]
+struct WireCacheControl {
+    #[serde(rename = "type")]
+    cache_type: &'static str,
+}
+
+impl WireCacheControl {
+    fn ephemeral() -> Self {
+        Self {
+            cache_type: "ephemeral",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireToolChoice {
+    Auto,
+    Any,
+    Tool { name: String },
+}
+
+impl WireToolChoice {
+    fn from(choice: &ToolChoice) -> Self {
+        match choice {
+            ToolChoice::Auto => Self::Auto,
+            ToolChoice::Any => Self::Any,
+            ToolChoice::Tool(name) => Self::Tool { name: name.clone() },
+        }
+    }
 }
 
 /// Anthropic content block, serialised with `type` discriminator. Covers every
@@ -153,19 +321,55 @@ struct WireTool {
     name: &'static str,
     description: &'static str,
     input_schema: serde_json::Value,
+    /// Optional ephemeral cache marker. Anthropic uses this on a single tool
+    /// (typically the last one) as a cache breakpoint covering the whole tool
+    /// schema prefix — for us that's ~50K tokens of schema definitions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<WireCacheControl>,
 }
 
 fn build_messages_request<'a>(
     model: &'a str,
     messages: &[ConversationMessage],
     max_tokens: usize,
+    system_prompt: Option<&str>,
+    tool_choice: &ToolChoice,
+    enable_prompt_caching: bool,
 ) -> MessagesRequest<'a> {
+    let mut tools = tool_schemas();
+    // Attach the cache breakpoint to the LAST declared tool. Anthropic uses
+    // that marker as the cache prefix boundary, so everything up through (and
+    // including) the entire tool schema becomes one cached chunk. Doing this
+    // unconditionally when caching is enabled keeps the prefix bytes stable
+    // turn-to-turn — the #1 thing that breaks prompt caching is moving the
+    // marker around between requests.
+    if enable_prompt_caching && let Some(last) = tools.last_mut() {
+        last.cache_control = Some(WireCacheControl::ephemeral());
+    }
+
+    let system = system_prompt
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| {
+            vec![WireSystemBlock {
+                block_type: "text",
+                text: text.to_owned(),
+                cache_control: if enable_prompt_caching {
+                    Some(WireCacheControl::ephemeral())
+                } else {
+                    None
+                },
+            }]
+        });
+
     MessagesRequest {
         model,
         max_tokens,
         messages: messages.iter().map(wire_message_from).collect(),
-        tools: tool_schemas(),
+        tools,
         stream: false,
+        system,
+        tool_choice: Some(WireToolChoice::from(tool_choice)),
     }
 }
 
@@ -241,6 +445,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["file_path"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "FileMetadata",
@@ -254,6 +459,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["file_path"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "ReadFiles",
@@ -269,6 +475,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["paths"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Glob",
@@ -281,6 +488,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["pattern"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Grep",
@@ -298,6 +506,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["pattern"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "WebFetch",
@@ -310,6 +519,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["url", "prompt"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "WebSearch",
@@ -331,6 +541,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["query"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "ToolSearch",
@@ -343,6 +554,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["query"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "AskUserQuestion",
@@ -382,6 +594,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["questions"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "MemorySearch",
@@ -395,6 +608,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["query"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "MemoryWrite",
@@ -410,6 +624,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["title", "body", "reason"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Agent",
@@ -426,6 +641,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["description", "prompt"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "MCP",
@@ -439,6 +655,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["server", "method"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "ListMcpResources",
@@ -449,6 +666,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     "server": {"type": "string", "description": "Optional server name; omit to list across all configured servers."}
                 }
             }),
+            cache_control: None,
         },
         WireTool {
             name: "ReadMcpResource",
@@ -461,6 +679,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["server", "uri"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "ListMcpPrompts",
@@ -471,6 +690,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     "server": {"type": "string", "description": "Optional server name; omit to list across all configured servers."}
                 }
             }),
+            cache_control: None,
         },
         WireTool {
             name: "GetMcpPrompt",
@@ -484,6 +704,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["server", "name"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Brief",
@@ -492,6 +713,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 "type": "object",
                 "properties": {}
             }),
+            cache_control: None,
         },
         WireTool {
             name: "CtxInspect",
@@ -504,6 +726,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     "message_count": {"type": "integer", "description": "Optional active message count supplied by the host."}
                 }
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Snip",
@@ -515,6 +738,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     "explanation": {"type": "string", "description": "Brief explanation of why history is being trimmed."}
                 }
             }),
+            cache_control: None,
         },
         WireTool {
             name: "EnterPlanMode",
@@ -523,6 +747,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 "type": "object",
                 "properties": {}
             }),
+            cache_control: None,
         },
         WireTool {
             name: "ExitPlanMode",
@@ -556,6 +781,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     }
                 }
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Clipboard",
@@ -572,6 +798,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["operation"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "AudioTranscribe",
@@ -584,6 +811,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["file_path"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "VideoTranscribe",
@@ -597,6 +825,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["file_path"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "SpotlightSearch",
@@ -611,6 +840,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["query"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "ScreenCapture",
@@ -628,6 +858,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["operation"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "LSP",
@@ -646,6 +877,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["operation", "file_path", "line"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "ImagePreprocess",
@@ -667,6 +899,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["file_path", "operation"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Vision",
@@ -686,6 +919,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["file_path", "operation"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "CrashLog",
@@ -701,6 +935,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["operation"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "MacLog",
@@ -718,6 +953,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     "timeout_ms": {"type": "integer", "description": "Maximum time to wait for log show. Defaults to 8000 and is clamped to 1000..30000."}
                 }
             }),
+            cache_control: None,
         },
         WireTool {
             name: "MacDiagnose",
@@ -730,6 +966,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     "include_live_signals": {"type": "boolean", "description": "Accepted for Swift parity; Rust currently renders guidance without live native rows."}
                 }
             }),
+            cache_control: None,
         },
         WireTool {
             name: "CronCreate",
@@ -743,6 +980,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["cron", "prompt"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "CronList",
@@ -751,6 +989,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 "type": "object",
                 "properties": {}
             }),
+            cache_control: None,
         },
         WireTool {
             name: "CronDelete",
@@ -762,6 +1001,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["id"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "ReviewArtifact",
@@ -774,6 +1014,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["file_path"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Skill",
@@ -786,6 +1027,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["skill"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Publish",
@@ -801,6 +1043,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     "status": {"type": "boolean", "description": "Show saved .clide/publish.json state without contacting the publish API."}
                 }
             }),
+            cache_control: None,
         },
         WireTool {
             name: "RemoteTrigger",
@@ -813,6 +1056,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["payload"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "PushNotification",
@@ -827,6 +1071,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["message"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "NotebookEdit",
@@ -842,6 +1087,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["notebook_path", "new_source"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "EnterWorktree",
@@ -852,6 +1098,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     "name": {"type": "string", "description": "Optional worktree branch name."}
                 }
             }),
+            cache_control: None,
         },
         WireTool {
             name: "ExitWorktree",
@@ -864,6 +1111,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["action"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "VerifyPlanExecution",
@@ -874,6 +1122,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     "expected_files": {"type": "array", "items": {"type": "string"}, "description": "File paths that should appear in the current git diff or untracked set."}
                 }
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Sleep",
@@ -885,6 +1134,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["duration_ms"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Write",
@@ -897,6 +1147,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["file_path", "content"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Edit",
@@ -911,6 +1162,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["file_path", "old_string", "new_string"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Bash",
@@ -925,6 +1177,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["command"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "Monitor",
@@ -938,6 +1191,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["command"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "TodoWrite",
@@ -961,6 +1215,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["todos"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "TaskCreate",
@@ -975,6 +1230,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["subject", "description"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "TaskList",
@@ -983,6 +1239,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 "type": "object",
                 "properties": {}
             }),
+            cache_control: None,
         },
         WireTool {
             name: "TaskGet",
@@ -994,6 +1251,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["taskId"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "TaskUpdate",
@@ -1008,6 +1266,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["taskId"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "TaskStop",
@@ -1020,6 +1279,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["taskId"]
             }),
+            cache_control: None,
         },
         WireTool {
             name: "TaskOutput",
@@ -1033,6 +1293,7 @@ fn tool_schemas() -> Vec<WireTool> {
                 },
                 "required": ["task_id"]
             }),
+            cache_control: None,
         },
     ]
 }
@@ -1178,7 +1439,7 @@ mod tests {
         WireContentBlock, build_messages_request, classify_error, messages_url,
         parse_messages_response,
     };
-    use crate::{ConversationMessage, ToolCall, ToolResultBlock};
+    use crate::{ConversationMessage, ToolCall, ToolChoice, ToolResultBlock};
     use std::time::Duration;
 
     #[test]
@@ -1296,6 +1557,9 @@ mod tests {
             "test-model",
             &[ConversationMessage::user("write a file")],
             100,
+            None,
+            &ToolChoice::Auto,
+            false,
         );
 
         let write = request
@@ -1563,7 +1827,14 @@ mod tests {
             )],
         );
 
-        let request = build_messages_request("test-model", &[assistant], 100);
+        let request = build_messages_request(
+            "test-model",
+            &[assistant],
+            100,
+            None,
+            &ToolChoice::Auto,
+            false,
+        );
         let wire = request
             .messages
             .first()
@@ -1598,7 +1869,14 @@ mod tests {
             )],
         );
 
-        let request = build_messages_request("test-model", &[assistant], 100);
+        let request = build_messages_request(
+            "test-model",
+            &[assistant],
+            100,
+            None,
+            &ToolChoice::Auto,
+            false,
+        );
         let wire = request.messages.first().expect("assistant message");
 
         assert_eq!(wire.content.len(), 1);
@@ -1612,7 +1890,8 @@ mod tests {
             ToolResultBlock::new("toolu_2", "boom", true),
         ]);
 
-        let request = build_messages_request("test-model", &[user], 100);
+        let request =
+            build_messages_request("test-model", &[user], 100, None, &ToolChoice::Auto, false);
         let wire = request.messages.first().expect("user message");
         assert_eq!(wire.role, "user");
         assert_eq!(wire.content.len(), 2);
@@ -1654,7 +1933,8 @@ mod tests {
     #[test]
     fn empty_message_payload_falls_back_to_single_space_text_block() {
         let blank = ConversationMessage::assistant("");
-        let request = build_messages_request("test-model", &[blank], 100);
+        let request =
+            build_messages_request("test-model", &[blank], 100, None, &ToolChoice::Auto, false);
         let wire = request.messages.first().expect("assistant message");
         assert_eq!(wire.content.len(), 1);
         match &wire.content[0] {
@@ -1683,7 +1963,8 @@ mod tests {
             ConversationMessage::assistant("done"),
         ];
 
-        let request = build_messages_request("test-model", &messages, 100);
+        let request =
+            build_messages_request("test-model", &messages, 100, None, &ToolChoice::Auto, false);
         let roles: Vec<&str> = request.messages.iter().map(|msg| msg.role).collect();
         assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
 
@@ -1699,5 +1980,142 @@ mod tests {
             other => panic!("expected tool_result in user turn, got {other:?}"),
         };
         assert_eq!(assistant_call_id, tool_result_id);
+    }
+
+    /// Anthropic only counts the LAST cache_control marker as the prefix
+    /// boundary. We attach it to the final tool schema because tool schemas
+    /// dwarf every other static block (~50K tokens). A wrong placement here
+    /// would silently halve the cache hit rate, so guard it explicitly.
+    #[test]
+    fn prompt_caching_marks_only_last_tool_schema() {
+        let request = build_messages_request(
+            "test-model",
+            &[ConversationMessage::user("hi")],
+            100,
+            None,
+            &ToolChoice::Auto,
+            true,
+        );
+        let last = request.tools.last().expect("at least one tool declared");
+        assert!(
+            last.cache_control.is_some(),
+            "last tool should carry cache_control"
+        );
+        let marked = request
+            .tools
+            .iter()
+            .filter(|t| t.cache_control.is_some())
+            .count();
+        assert_eq!(marked, 1, "exactly one cache breakpoint expected on tools");
+    }
+
+    #[test]
+    fn prompt_caching_disabled_means_no_cache_control_markers() {
+        let request = build_messages_request(
+            "test-model",
+            &[ConversationMessage::user("hi")],
+            100,
+            Some("you are a helpful assistant"),
+            &ToolChoice::Auto,
+            false,
+        );
+        assert!(request.tools.iter().all(|t| t.cache_control.is_none()));
+        let system = request.system.as_ref().expect("system block emitted");
+        assert!(system.iter().all(|block| block.cache_control.is_none()));
+    }
+
+    #[test]
+    fn system_prompt_emits_text_block_with_cache_control() {
+        let request = build_messages_request(
+            "test-model",
+            &[ConversationMessage::user("hi")],
+            100,
+            Some("be concise"),
+            &ToolChoice::Auto,
+            true,
+        );
+        let system = request.system.as_ref().expect("system block emitted");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0].block_type, "text");
+        assert_eq!(system[0].text, "be concise");
+        assert!(system[0].cache_control.is_some());
+
+        let serialised = serde_json::to_value(&system[0]).expect("serialise system block");
+        assert_eq!(serialised["type"], "text");
+        assert_eq!(serialised["cache_control"]["type"], "ephemeral");
+        assert!(
+            serialised["cache_control"].get("ttl").is_none(),
+            "1h TTL is intentionally not emitted in P2"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_system_prompt_is_dropped() {
+        let request = build_messages_request(
+            "test-model",
+            &[ConversationMessage::user("hi")],
+            100,
+            Some("   \n\t  "),
+            &ToolChoice::Auto,
+            true,
+        );
+        assert!(
+            request.system.is_none(),
+            "whitespace-only prompts must not produce a stale system block"
+        );
+    }
+
+    #[test]
+    fn missing_system_prompt_omits_system_field_entirely() {
+        let request = build_messages_request(
+            "test-model",
+            &[ConversationMessage::user("hi")],
+            100,
+            None,
+            &ToolChoice::Auto,
+            true,
+        );
+        assert!(request.system.is_none());
+        let payload = serde_json::to_value(&request).expect("serialise request");
+        assert!(
+            payload.get("system").is_none(),
+            "absent system prompt should be omitted from JSON, not sent as null"
+        );
+    }
+
+    #[test]
+    fn tool_choice_round_trips_all_three_variants() {
+        let cases = [
+            (ToolChoice::Auto, serde_json::json!({"type": "auto"})),
+            (ToolChoice::Any, serde_json::json!({"type": "any"})),
+            (
+                ToolChoice::Tool("Bash".to_owned()),
+                serde_json::json!({"type": "tool", "name": "Bash"}),
+            ),
+        ];
+        for (choice, expected) in cases {
+            let request = build_messages_request(
+                "test-model",
+                &[ConversationMessage::user("go")],
+                100,
+                None,
+                &choice,
+                false,
+            );
+            let payload = serde_json::to_value(&request).expect("serialise request");
+            assert_eq!(payload["tool_choice"], expected, "choice {choice:?}");
+        }
+    }
+
+    #[test]
+    fn anthropic_config_with_system_prompt_trims_blank() {
+        use crate::AnthropicConfig;
+        let cfg =
+            AnthropicConfig::new("https://example.test", "key", "model").with_system_prompt("   ");
+        assert!(cfg.system_prompt.is_none());
+
+        let cfg = AnthropicConfig::new("https://example.test", "key", "model")
+            .with_system_prompt("hello");
+        assert_eq!(cfg.system_prompt.as_deref(), Some("hello"));
     }
 }

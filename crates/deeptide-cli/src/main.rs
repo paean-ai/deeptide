@@ -87,6 +87,39 @@ struct Cli {
         help = "Safety cap on agentic turns per prompt."
     )]
     max_turns: usize,
+
+    #[arg(
+        long = "system-prompt",
+        env = "DEEPTIDE_SYSTEM_PROMPT",
+        value_name = "TEXT",
+        help = "Optional system prompt sent on every model request. Cached server-side when prompt caching is enabled."
+    )]
+    system_prompt: Option<String>,
+
+    #[arg(
+        long = "system-prompt-file",
+        env = "DEEPTIDE_SYSTEM_PROMPT_FILE",
+        value_name = "PATH",
+        help = "Read the system prompt from a file. Overrides --system-prompt when both are supplied.",
+        conflicts_with = "system_prompt"
+    )]
+    system_prompt_file: Option<PathBuf>,
+
+    #[arg(
+        long = "no-prompt-cache",
+        env = "DEEPTIDE_NO_PROMPT_CACHE",
+        action = ArgAction::SetTrue,
+        help = "Disable Anthropic prompt caching of system prompt and tool schemas."
+    )]
+    no_prompt_cache: bool,
+
+    #[arg(
+        long = "stream",
+        env = "DEEPTIDE_STREAM",
+        action = ArgAction::SetTrue,
+        help = "Request streamed SSE responses from the Anthropic Messages API. Required by some proxy providers (openrouter, custom relays)."
+    )]
+    stream: bool,
 }
 
 fn main() {
@@ -358,6 +391,11 @@ fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
         }
     };
     config.max_tokens = cli.max_output_tokens;
+    config.enable_prompt_caching = !cli.no_prompt_cache;
+    config.enable_streaming = cli.stream;
+    if let Some(system_prompt) = resolve_system_prompt(cli)? {
+        config = config.with_system_prompt(system_prompt);
+    }
     let backend = AnthropicBackend::new(config.clone())?;
     Ok(ConfiguredBackend {
         backend: Box::new(backend),
@@ -370,6 +408,22 @@ fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
 enum CloudCredential {
     ApiKey(String),
     BearerToken(String),
+}
+
+/// Read the effective system prompt from `--system-prompt-file` (preferred)
+/// or `--system-prompt`. Whitespace-only files/values are treated as "no
+/// prompt" — `AnthropicConfig::with_system_prompt` does the same upstream,
+/// but reporting it here gives clearer error semantics for typo-ed paths.
+fn resolve_system_prompt(cli: &Cli) -> Result<Option<String>, String> {
+    if let Some(path) = cli.system_prompt_file.as_ref() {
+        let content = std::fs::read_to_string(path)
+            .map_err(|error| format!("--system-prompt-file {}: {error}", path.display()))?;
+        if content.trim().is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(content));
+    }
+    Ok(cli.system_prompt.clone())
 }
 
 fn effective_credential(cli: &Cli) -> Option<CloudCredential> {
@@ -501,6 +555,10 @@ mod tests {
             api_key: None,
             max_output_tokens: 4096,
             max_turns: 25,
+            system_prompt: None,
+            system_prompt_file: None,
+            no_prompt_cache: false,
+            stream: false,
         }
     }
 
@@ -699,5 +757,101 @@ mod tests {
         assert_eq!(effective_model(&cli), DEFAULT_MODEL);
 
         clear_api_env();
+    }
+
+    #[test]
+    fn system_prompt_flag_reaches_anthropic_config() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "test-key");
+        }
+        let mut cli = sample_cli();
+        cli.system_prompt = Some("you are deeptide".to_owned());
+
+        let configured = configured_backend(&cli).expect("configured backend");
+        let cfg = configured.subagent_config.expect("subagent config");
+        assert_eq!(cfg.system_prompt.as_deref(), Some("you are deeptide"));
+        assert!(cfg.enable_prompt_caching);
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn no_prompt_cache_flag_disables_caching() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "test-key");
+        }
+        let mut cli = sample_cli();
+        cli.no_prompt_cache = true;
+
+        let configured = configured_backend(&cli).expect("configured backend");
+        let cfg = configured.subagent_config.expect("subagent config");
+        assert!(!cfg.enable_prompt_caching);
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn stream_flag_flips_anthropic_config_enable_streaming() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "test-key");
+        }
+        let mut cli = sample_cli();
+        cli.stream = true;
+
+        let configured = configured_backend(&cli).expect("configured backend");
+        let cfg = configured.subagent_config.expect("subagent config");
+        assert!(cfg.enable_streaming, "--stream must enable streaming");
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn system_prompt_file_takes_priority_over_inline_text() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prompt.txt");
+        let mut file = std::fs::File::create(&path).expect("create prompt file");
+        write!(file, "from-file body").expect("write");
+
+        let mut cli = sample_cli();
+        cli.system_prompt = Some("inline body".to_owned());
+        cli.system_prompt_file = Some(path);
+
+        let resolved = super::resolve_system_prompt(&cli)
+            .expect("resolve should succeed")
+            .expect("file body should resolve to Some");
+        assert_eq!(resolved, "from-file body");
+    }
+
+    #[test]
+    fn system_prompt_file_whitespace_only_resolves_to_none() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("blank.txt");
+        let mut file = std::fs::File::create(&path).expect("create");
+        write!(file, "   \n\t\n").expect("write");
+
+        let mut cli = sample_cli();
+        cli.system_prompt_file = Some(path);
+        assert!(super::resolve_system_prompt(&cli).expect("ok").is_none());
+    }
+
+    #[test]
+    fn system_prompt_file_missing_path_returns_clear_error() {
+        let mut cli = sample_cli();
+        cli.system_prompt_file = Some(std::path::PathBuf::from(
+            "/nonexistent/deeptide-system-prompt.txt",
+        ));
+        let err = super::resolve_system_prompt(&cli).expect_err("missing path should error");
+        assert!(
+            err.contains("--system-prompt-file"),
+            "error should name the flag: {err}"
+        );
     }
 }
