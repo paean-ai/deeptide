@@ -737,6 +737,7 @@ fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resul
             AgentLoopEvent::User(_)
             | AgentLoopEvent::ToolBatchSummary { .. }
             | AgentLoopEvent::ToolResult { .. }
+            | AgentLoopEvent::Compaction(_)
             | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => {}
         }
     }

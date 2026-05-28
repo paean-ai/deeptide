@@ -1,6 +1,7 @@
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
-    AgentUsage, HookEngine, HookEntry, MessageRole, PermissionMode, SettingsHooks, ToolCall,
+    AgentUsage, ContextWindowConfig, HookEngine, HookEntry, MessageRole, PermissionMode,
+    SettingsHooks, ToolCall,
 };
 use std::sync::{Arc, Mutex};
 
@@ -374,6 +375,63 @@ fn agent_loop_user_prompt_submit_hook_fires_on_run() {
 
     let recorded = std::fs::read_to_string(&marker).expect("UserPromptSubmit hook should run");
     assert_eq!(recorded, "UserPromptSubmit");
+}
+
+fn tiny_context_window() -> ContextWindowConfig {
+    ContextWindowConfig {
+        max_tokens: 10,
+        soft_tokens: 1,
+        window_size: 1,
+        summary_prefix: String::from("[ctx]"),
+    }
+}
+
+#[test]
+fn agent_loop_auto_compacts_when_transcript_exceeds_threshold() {
+    let mut loop_ = AgentLoop::new(Box::new(StaticBackend::new("ok")))
+        .with_context_window_config(tiny_context_window())
+        .with_max_turns(2);
+
+    // First run seeds history; the second run's pre-request check exceeds the
+    // tiny threshold and auto-compacts before assembling the request.
+    let _ = loop_.run("first prompt");
+    let events = loop_.run("second prompt");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentLoopEvent::Compaction(report) if report.did_compress
+        )),
+        "second run should auto-compact the transcript"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn agent_loop_pre_compact_hook_fires_on_auto_compaction() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("pre-compact.txt");
+    let hooks = SettingsHooks {
+        pre_compact: Some(vec![HookEntry {
+            matcher: String::from("*"),
+            command: format!("printf '%s' \"$TIDE_EVENT\" > {}", marker.display()),
+            timeout_ms: Some(5_000),
+            disabled: None,
+            name: Some(String::from("on-compact")),
+        }]),
+        ..Default::default()
+    };
+    let engine = HookEngine::new(hooks, dir.path());
+    let mut loop_ = AgentLoop::new(Box::new(StaticBackend::new("ok")))
+        .with_hooks(engine)
+        .with_context_window_config(tiny_context_window())
+        .with_max_turns(2);
+
+    let _ = loop_.run("first prompt");
+    let _ = loop_.run("second prompt");
+
+    let recorded = std::fs::read_to_string(&marker).expect("PreCompact hook should run");
+    assert_eq!(recorded, "PreCompact");
 }
 
 #[test]

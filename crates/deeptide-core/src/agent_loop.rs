@@ -184,6 +184,9 @@ pub enum AgentLoopEvent {
         content: String,
         is_error: bool,
     },
+    /// The transcript was auto-compacted mid-run because it exceeded the
+    /// context-window threshold.
+    Compaction(CompressionReport),
     Terminal(AgentTerminalEvent),
 }
 
@@ -267,6 +270,13 @@ impl AgentLoop {
         self
     }
 
+    /// Replace the context-window manager configuration used for auto-compaction
+    /// (the soft token threshold and preserved-message window).
+    pub fn with_context_window_config(mut self, config: ContextWindowConfig) -> Self {
+        self.context_window = ContextWindowManager::new(config);
+        self
+    }
+
     /// Replace the cost tracker with one that applies per-model pricing
     /// overrides (e.g. from `settings.json`). Keys are model identifiers; rates
     /// are per-token USD.
@@ -339,6 +349,20 @@ impl AgentLoop {
         let mut events = vec![AgentLoopEvent::User(user_message)];
 
         loop {
+            // Auto-compact the transcript before assembling the next request
+            // when it exceeds the context-window threshold, mirroring the Swift
+            // turn loop's checkAndCompact step. A PreCompact hook fires after a
+            // compaction actually happens (observational).
+            let report = self.context_window.compress(&mut self.messages);
+            if report.did_compress {
+                events.push(AgentLoopEvent::Compaction(report));
+                if self.hooks.has_hooks(crate::hooks::HookEvent::PreCompact) {
+                    let _ = self
+                        .hooks
+                        .run(crate::hooks::HookEvent::PreCompact, None, None);
+                }
+            }
+
             if self.current_run_step >= self.max_turns {
                 events.push(AgentLoopEvent::Terminal(
                     AgentTerminalEvent::MaxTurnsReached,
