@@ -63,6 +63,47 @@ pub struct ReplSession {
     active_goal: Option<String>,
     session_id: String,
     session_started_at: String,
+    /// In-session "dream" auto-consolidation schedule. When enabled, a dream
+    /// consolidation pass fires automatically every N user turns. Persisted
+    /// only for the lifetime of this REPL — restarting `deeptide` resets to
+    /// disabled. zero-cli's equivalent (the Dream task) also defaults off.
+    dream_schedule: DreamSchedule,
+    /// Number of user turns submitted in this REPL session. Counted only for
+    /// non-empty, non-slash submissions — slash commands like `/help` should
+    /// not advance the dream cadence counter.
+    user_turn_count: usize,
+}
+
+/// Configuration + bookkeeping for the persistent dream loop. Default state
+/// is disabled; `/dream start [--every N]` enables, `/dream stop` disables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DreamSchedule {
+    enabled: bool,
+    /// Fire after this many user turns since `last_user_turn_count`. Clamped
+    /// to `MIN_DREAM_CADENCE..=MAX_DREAM_CADENCE` on input.
+    every_user_turns: usize,
+    /// Snapshot of `user_turn_count` the last time a dream pass fired (or
+    /// when `start` was called). The next fire happens when the difference
+    /// reaches `every_user_turns`.
+    last_user_turn_count: usize,
+    /// Total number of automatic dream passes that have fired in this
+    /// session. Used by `/dream status` for the operator.
+    total_auto_runs: usize,
+}
+
+const MIN_DREAM_CADENCE: usize = 1;
+const MAX_DREAM_CADENCE: usize = 500;
+const DEFAULT_DREAM_CADENCE: usize = 25;
+
+impl Default for DreamSchedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            every_user_turns: DEFAULT_DREAM_CADENCE,
+            last_user_turn_count: 0,
+            total_auto_runs: 0,
+        }
+    }
 }
 
 impl ReplSession {
@@ -85,6 +126,8 @@ impl ReplSession {
             session_started_at: time::OffsetDateTime::now_utc()
                 .format(&time::format_description::well_known::Rfc3339)
                 .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z")),
+            dream_schedule: DreamSchedule::default(),
+            user_turn_count: 0,
         }
     }
 
@@ -168,6 +211,7 @@ impl ReplSession {
             return self.execute_command(command_line);
         }
 
+        self.user_turn_count += 1;
         let turns_before = self.agent_loop.cost_tracker().summary().turns.len();
         let mut events: Vec<ReplEvent> = self
             .agent_loop
@@ -199,8 +243,67 @@ impl ReplSession {
             events.push(ReplEvent::Output(debug));
         }
 
+        if let Some(dream_events) = self.maybe_run_scheduled_dream() {
+            events.extend(dream_events);
+        }
+
         self.autosave_session();
         events
+    }
+
+    /// If the persistent dream loop is enabled and the user-turn cadence has
+    /// been met since the last fire, run one consolidation pass synchronously
+    /// and return its events. Returns `None` when no fire is due.
+    ///
+    /// Synchronous (rather than threaded) because the agent loop is `!Sync`
+    /// and currently the REPL drives a single backend. The user-visible
+    /// effect is one extra round-trip after every Nth user message — which
+    /// matches what an operator typing `/dream run` themselves would do.
+    fn maybe_run_scheduled_dream(&mut self) -> Option<Vec<ReplEvent>> {
+        if !self.dream_schedule.enabled {
+            return None;
+        }
+        let since = self
+            .user_turn_count
+            .saturating_sub(self.dream_schedule.last_user_turn_count);
+        if since < self.dream_schedule.every_user_turns {
+            return None;
+        }
+        self.dream_schedule.last_user_turn_count = self.user_turn_count;
+        self.dream_schedule.total_auto_runs += 1;
+
+        let mut events = vec![ReplEvent::Output(format!(
+            "[dream] auto-consolidating after {} user turns (run #{})",
+            self.dream_schedule.every_user_turns, self.dream_schedule.total_auto_runs,
+        ))];
+        events.extend(self.run_dream_consolidation_once());
+        Some(events)
+    }
+
+    /// Build the dream-consolidation system prompt and run one agent pass.
+    /// Shared by both manual `/dream run` and the scheduled auto-fire path.
+    fn run_dream_consolidation_once(&mut self) -> Vec<ReplEvent> {
+        let cwd = self.tool_context.cwd.display().to_string();
+        let prompt = format!(
+            "[dream consolidation — execute once, do NOT create cron jobs or loops]\n\n\
+            You are running Deeptide's local dream consolidation pass for workspace:\n\
+            {cwd}\n\n\
+            Goal:\n\
+            - Review recent useful session history.\n\
+            - Extract durable project facts, decisions, preferences, recurring constraints, and unresolved follow-ups.\n\
+            - Save or update concise long-term memory in `.deeptide/MEMORY.md` or project memory files.\n\
+            - Merge duplicate or stale entries instead of appending noise.\n\n\
+            Rules:\n\
+            - Execute exactly once.\n\
+            - Do not edit system prompts, settings, cron jobs, or provider configuration.\n\
+            - Do not add memories that are generic, obvious, temporary, secret, or unsupported by session history.\n\
+            - Keep memory files compact and human-readable."
+        );
+        self.agent_loop
+            .run(&prompt)
+            .into_iter()
+            .filter_map(agent_event_to_repl_event)
+            .collect()
     }
 
     fn autosave_session(&self) {
@@ -277,7 +380,7 @@ impl ReplSession {
                 self.agent_loop.reset();
                 NewCommand.execute(args, &context)
             }
-            "compact" | "compress" => CompactCommand.execute(args, &context),
+            "compact" | "compress" => self.execute_compact_command(args),
             "cost" => CostCommand.execute(args, &context),
             "model" | "m" => self.execute_model_command(args),
             "provider" | "profiles" => self.execute_provider_command(args),
@@ -452,6 +555,22 @@ impl ReplSession {
         } else {
             CommandResult::Text(crate::tps::render(&records))
         }
+    }
+
+    fn execute_compact_command(&mut self, _args: &str) -> CommandResult {
+        let report = self.agent_loop.compact();
+        let text = if report.did_compress {
+            format!(
+                "Context compacted: folded {} message(s) into a summary; ~{} tokens remain.",
+                report.compressed_messages, report.tokens_after
+            )
+        } else {
+            format!(
+                "Nothing to compact yet (~{} tokens; the transcript fits the recent window).",
+                report.tokens_after
+            )
+        };
+        CommandResult::Text(text)
     }
 
     fn execute_debug_command(&mut self, args: &str) -> CommandResult {
@@ -1231,47 +1350,72 @@ impl ReplSession {
     }
 
     fn execute_dream_command(&mut self, args: &str) -> Vec<ReplEvent> {
-        let sub = args.trim().to_ascii_lowercase();
-        match sub.as_str() {
+        let trimmed = args.trim();
+        // Parse "<verb> [--every N | N]" by splitting once on whitespace —
+        // dream verbs themselves are single tokens.
+        let (verb_raw, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((v, r)) => (v, r.trim()),
+            None => (trimmed, ""),
+        };
+        let verb = verb_raw.to_ascii_lowercase();
+        match verb.as_str() {
             "run" | "now" | "" => {
-                let cwd = self.tool_context.cwd.display().to_string();
-                let prompt = format!(
-                    "[dream manual run — execute once, do NOT create cron jobs or loops]\n\n\
-                    You are running Deeptide's local dream consolidation pass for workspace:\n\
-                    {cwd}\n\n\
-                    Goal:\n\
-                    - Review recent useful session history.\n\
-                    - Extract durable project facts, decisions, preferences, recurring constraints, and unresolved follow-ups.\n\
-                    - Save or update concise long-term memory in `.deeptide/MEMORY.md` or project memory files.\n\
-                    - Merge duplicate or stale entries instead of appending noise.\n\n\
-                    Rules:\n\
-                    - Execute exactly once.\n\
-                    - Do not edit system prompts, settings, cron jobs, or provider configuration.\n\
-                    - Do not add memories that are generic, obvious, temporary, secret, or unsupported by session history.\n\
-                    - Keep memory files compact and human-readable."
-                );
                 let mut events = vec![ReplEvent::Output(String::from(
                     "Queued one dream consolidation run.",
                 ))];
-                events.extend(
-                    self.agent_loop
-                        .run(&prompt)
-                        .into_iter()
-                        .filter_map(agent_event_to_repl_event),
-                );
+                events.extend(self.run_dream_consolidation_once());
                 events
             }
-            "status" | "list" => vec![ReplEvent::Output(String::from(
-                "No dream loop is active. Use `/dream run` to consolidate session history once.",
-            ))],
-            "start" | "on" | "enable" => vec![ReplEvent::Output(String::from(
-                "Persistent dream loop is not available in the Rust REPL yet. Use `/dream run` to consolidate once.",
-            ))],
+            "status" | "list" => {
+                if self.dream_schedule.enabled {
+                    let remaining = self.dream_schedule.every_user_turns.saturating_sub(
+                        self.user_turn_count
+                            .saturating_sub(self.dream_schedule.last_user_turn_count),
+                    );
+                    vec![ReplEvent::Output(format!(
+                        "Dream loop ENABLED. Cadence: every {} user turns. \
+                         Auto-runs this session: {}. Next auto-run in {} more user turns.",
+                        self.dream_schedule.every_user_turns,
+                        self.dream_schedule.total_auto_runs,
+                        remaining,
+                    ))]
+                } else {
+                    vec![ReplEvent::Output(String::from(
+                        "Dream loop DISABLED. Use `/dream start [--every N]` to schedule \
+                         automatic consolidation every N user turns.",
+                    ))]
+                }
+            }
+            "start" | "on" | "enable" => {
+                let cadence = match parse_dream_cadence(rest) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return vec![ReplEvent::Output(format!("/dream start: {error}"))];
+                    }
+                };
+                self.dream_schedule.enabled = true;
+                self.dream_schedule.every_user_turns = cadence;
+                self.dream_schedule.last_user_turn_count = self.user_turn_count;
+                vec![ReplEvent::Output(format!(
+                    "Dream loop enabled. Will auto-consolidate every {cadence} user turns. \
+                     Use `/dream stop` to disable, `/dream status` to inspect.",
+                ))]
+            }
             "stop" | "off" | "disable" | "cancel" => {
-                vec![ReplEvent::Output(String::from("No dream loop is active."))]
+                if self.dream_schedule.enabled {
+                    self.dream_schedule.enabled = false;
+                    vec![ReplEvent::Output(format!(
+                        "Dream loop disabled. {} automatic runs fired during this session.",
+                        self.dream_schedule.total_auto_runs,
+                    ))]
+                } else {
+                    vec![ReplEvent::Output(String::from(
+                        "Dream loop already disabled.",
+                    ))]
+                }
             }
             _ => vec![ReplEvent::Output(String::from(
-                "Usage: /dream [run | status]",
+                "Usage: /dream [run | start [--every N] | stop | status]",
             ))],
         }
     }
@@ -1537,6 +1681,40 @@ fn build_goal_continuation_prompt(goal: &str) -> String {
 /// Format per-turn token and cost diagnostics for the supplied turns. Returns
 /// `None` when there are no turns (e.g. a model error or a backend that
 /// reports no usage), so callers can skip emitting an empty debug line.
+/// Parse a `/dream start` cadence argument. Accepts both bare integers
+/// (`/dream start 50`) and `--every`/`-n` flags (`/dream start --every 50`).
+/// Empty input means "use the default cadence". Invalid input produces a
+/// short, actionable error message.
+fn parse_dream_cadence(rest: &str) -> Result<usize, String> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Ok(DEFAULT_DREAM_CADENCE);
+    }
+    let value_str = if let Some(after) = rest.strip_prefix("--every") {
+        after.trim_start_matches('=').trim()
+    } else if let Some(after) = rest.strip_prefix("--every=") {
+        after.trim()
+    } else if let Some(after) = rest.strip_prefix("-n") {
+        after.trim_start_matches('=').trim()
+    } else {
+        rest
+    };
+    let value: usize = value_str
+        .parse()
+        .map_err(|_| format!("expected integer cadence, got '{value_str}'"))?;
+    if value < MIN_DREAM_CADENCE {
+        return Err(format!(
+            "cadence must be >= {MIN_DREAM_CADENCE}; got {value}"
+        ));
+    }
+    if value > MAX_DREAM_CADENCE {
+        return Err(format!(
+            "cadence must be <= {MAX_DREAM_CADENCE}; got {value}"
+        ));
+    }
+    Ok(value)
+}
+
 fn format_debug_turns(turns: &[crate::TurnRecord]) -> Option<String> {
     if turns.is_empty() {
         return None;

@@ -1,7 +1,7 @@
 use crate::{
-    CostTracker, PermissionDecision, PermissionManager, PermissionMode, PermissionRules,
-    ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler, ToolContext, ToolRegistry,
-    TurnUsage,
+    CompressionReport, ContextWindowConfig, ContextWindowManager, CostTracker, PermissionDecision,
+    PermissionManager, PermissionMode, PermissionRules, ToolBatchFailureClassifier, ToolBatchItem,
+    ToolBatchLabeler, ToolContext, ToolRegistry, TurnUsage,
 };
 use std::io;
 use std::sync::Arc;
@@ -212,6 +212,7 @@ pub struct AgentLoop {
     permission_manager: PermissionManager,
     subagent_backend_factory: Option<SubAgentBackendFactory>,
     system_prompt: Option<String>,
+    context_window: ContextWindowManager,
 }
 
 impl AgentLoop {
@@ -231,7 +232,16 @@ impl AgentLoop {
             permission_manager: PermissionManager::new(PermissionMode::Default, rules),
             subagent_backend_factory: None,
             system_prompt: None,
+            context_window: ContextWindowManager::new(ContextWindowConfig::default()),
         }
+    }
+
+    /// Compact the in-memory transcript on demand (the `/compact` command),
+    /// folding older turns into a rolling summary while preserving recent
+    /// context and any tool_use/tool_result pairing. Returns a report of what
+    /// was compressed.
+    pub fn compact(&mut self) -> CompressionReport {
+        self.context_window.force_compress(&mut self.messages)
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {

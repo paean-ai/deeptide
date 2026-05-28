@@ -115,6 +115,53 @@ fn repl_without_debug_emits_no_diagnostics() {
 }
 
 #[test]
+fn repl_compact_folds_older_messages() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    // Four prompts -> eight messages, beyond the default recent window.
+    for _ in 0..4 {
+        repl.submit("hello");
+    }
+    let before = repl.agent_loop().messages().len();
+    assert!(
+        before > 6,
+        "expected more than the window of messages, got {before}"
+    );
+
+    let output = only_output(repl.submit("/compact"));
+    assert!(
+        output.contains("Context compacted"),
+        "expected a compaction report, got: {output}"
+    );
+
+    let after = repl.agent_loop().messages().len();
+    assert!(
+        after < before,
+        "compaction should reduce the transcript: {before} -> {after}"
+    );
+    // The rewritten transcript must still open on a user message (the summary).
+    assert!(
+        repl.agent_loop()
+            .messages()
+            .first()
+            .is_some_and(|m| m.content.contains("[context-summary]")),
+        "compaction should prepend a summary message"
+    );
+}
+
+#[test]
+fn repl_compact_is_noop_for_short_transcripts() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    repl.submit("hello");
+
+    let output = only_output(repl.submit("/compact"));
+    assert!(
+        output.contains("Nothing to compact"),
+        "short transcripts should report nothing to compact, got: {output}"
+    );
+}
+
+#[test]
 fn repl_shows_tool_batch_summary_before_tool_output() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\n").expect("write fixture");
@@ -926,6 +973,136 @@ fn repl_permission_command_lists_adds_and_removes_rules() {
     let stored = std::fs::read_to_string(rules_path).expect("rules should be saved");
     assert!(stored.contains("secrets*"));
     assert!(!stored.contains("cargo test*"));
+}
+
+#[test]
+fn dream_start_enables_persistent_loop_and_status_reports_cadence() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let start = only_output(repl.submit("/dream start --every 3"));
+    assert!(start.contains("Dream loop enabled"));
+    assert!(start.contains("every 3 user turns"));
+
+    let status = only_output(repl.submit("/dream status"));
+    assert!(status.contains("ENABLED"));
+    assert!(status.contains("every 3 user turns"));
+    assert!(status.contains("Next auto-run in 3 more"));
+}
+
+#[test]
+fn dream_start_accepts_bare_integer_and_equals_syntax() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    assert!(only_output(repl.submit("/dream start 7")).contains("every 7 user turns"));
+    assert!(only_output(repl.submit("/dream start --every=42")).contains("every 42 user turns"));
+    assert!(only_output(repl.submit("/dream start")).contains("user turns"));
+}
+
+#[test]
+fn dream_start_rejects_invalid_cadence() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let zero = only_output(repl.submit("/dream start --every 0"));
+    assert!(
+        zero.contains("/dream start") && zero.contains("0"),
+        "got: {zero}"
+    );
+    let nope = only_output(repl.submit("/dream start abc"));
+    assert!(
+        nope.contains("/dream start") && nope.contains("abc"),
+        "got: {nope}"
+    );
+    let huge = only_output(repl.submit("/dream start 99999"));
+    assert!(
+        huge.contains("/dream start") && huge.contains("99999"),
+        "got: {huge}"
+    );
+}
+
+#[test]
+fn dream_stop_disables_loop_and_status_flips() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    repl.submit("/dream start --every 5");
+    let stop = only_output(repl.submit("/dream stop"));
+    assert!(stop.contains("Dream loop disabled"));
+    let status = only_output(repl.submit("/dream status"));
+    assert!(status.contains("DISABLED"));
+
+    // Stop is idempotent.
+    let again = only_output(repl.submit("/dream stop"));
+    assert!(again.contains("already disabled"));
+}
+
+#[test]
+fn dream_auto_fires_after_cadence_user_turns() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    repl.submit("/dream start --every 2");
+
+    // Slash commands do NOT advance the user-turn counter.
+    let _ = repl.submit("/help");
+
+    // Turn 1: counter goes 0 -> 1. No fire (1 < 2).
+    let r1: Vec<String> = repl
+        .submit("hello 1")
+        .into_iter()
+        .filter_map(|event| match event {
+            ReplEvent::Output(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !r1.iter()
+            .any(|text| text.contains("[dream] auto-consolidating")),
+        "no auto-fire expected on turn 1, got: {r1:?}"
+    );
+
+    // Turn 2: counter goes 1 -> 2. since=2 >= cadence=2, must fire.
+    let r2: Vec<String> = repl
+        .submit("hello 2")
+        .into_iter()
+        .filter_map(|event| match event {
+            ReplEvent::Output(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        r2.iter()
+            .any(|text| text.contains("[dream] auto-consolidating")),
+        "expected auto-dream marker on turn 2, got: {r2:?}"
+    );
+
+    // After firing, the status line records the run.
+    let status = only_output(repl.submit("/dream status"));
+    assert!(
+        status.contains("Auto-runs this session: 1"),
+        "expected auto-run counter, got: {status}"
+    );
+}
+
+#[test]
+fn dream_run_fires_one_pass_without_changing_schedule() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let outputs: Vec<String> = repl
+        .submit("/dream run")
+        .into_iter()
+        .filter_map(|event| match event {
+            ReplEvent::Output(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        outputs
+            .iter()
+            .any(|text| text.contains("Queued one dream consolidation run")),
+        "expected 'Queued one ...' header, got: {outputs:?}"
+    );
+    // Schedule remains disabled after a manual run.
+    let status = only_output(repl.submit("/dream status"));
+    assert!(status.contains("DISABLED"));
+}
+
+#[test]
+fn dream_unknown_subcommand_shows_usage_hint() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let out = only_output(repl.submit("/dream wat"));
+    assert!(out.contains("Usage:") && out.contains("/dream"));
 }
 
 fn only_output(events: Vec<ReplEvent>) -> String {
