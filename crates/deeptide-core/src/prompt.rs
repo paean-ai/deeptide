@@ -54,6 +54,23 @@ const FILE_FIRST_SECTION: &str = "\
 - Before making factual claims about code or editing a file, read the current file content or run the relevant command. Base edits on the latest file contents, not on an index, memory, or stale summary.
 - If a search result conflicts with a direct file read or command output, trust the direct source.";
 
+/// Contract for producing named output files. Mirrors the Swift
+/// `artifactContractSection`.
+const ARTIFACT_CONTRACT_SECTION: &str = "\
+# Output artifact contract
+- When a task asks for named output files, treat each filename as a hard contract with the current working directory. Write `analysis.json`, `Dockerfile`, `report.pdf`, etc. at exactly that relative path unless the user explicitly gives another path. Do not write deliverable artifacts under a temp directory or an absolute path unless that exact path was requested.
+- After creating an artifact with Bash or a script, verify it from the workspace with a direct filesystem check before claiming completion (for example `ls -l <artifact>` plus a parser or content check). If a local verifier such as `verify.sh` or `pytest` exists, run it.
+- For structured extraction from HTML, XML, JSON, CSV, spreadsheets, or archives, prefer a small parser script over visual or manual counting. Count nodes, elements, and rows from the parsed source, not from a prose summary.
+- For generated binary documents, verify both container validity and extractable text; if a raw-byte or parser check fails, regenerate rather than asserting success from visual intent.
+- For finance, statistics, and backtests, implement the calculation as executable code, run it, write the requested artifact, then inspect it. Pay attention to execution lag, inclusive window boundaries, denominators, and annualization periods.";
+
+/// Commit-attribution convention. Mirrors the Swift `gitCollaborationSection`.
+const GIT_COLLABORATION_SECTION: &str = "\
+# Git collaboration attribution
+- When the user asks you to create a git commit, or to commit and push your changes, include the commit message trailer `Co-authored-by: Deeptide <ds@deeptide.sh>` unless the user explicitly asks you not to.
+- Do not override the user's configured git author or committer identity. Add Deeptide only as a commit message co-author trailer.
+- If the user provides a complete commit message, preserve their message and append the Deeptide co-author trailer only if it is not already present.";
+
 /// Guidance about reversibility and confirmation. Mirrors the Swift
 /// `executingActionsWithCareSection`.
 const EXECUTING_ACTIONS_SECTION: &str = "\
@@ -124,6 +141,8 @@ pub fn build_system_prompt(cwd: &Path) -> String {
         environment_section(cwd),
         DOING_TASKS_SECTION.to_owned(),
         FILE_FIRST_SECTION.to_owned(),
+        ARTIFACT_CONTRACT_SECTION.to_owned(),
+        GIT_COLLABORATION_SECTION.to_owned(),
         EXECUTING_ACTIONS_SECTION.to_owned(),
         USING_TOOLS_SECTION.to_owned(),
         TONE_SECTION.to_owned(),
@@ -276,6 +295,8 @@ mod tests {
             "# System",
             "# Doing tasks",
             "# File-first reliability",
+            "# Output artifact contract",
+            "# Git collaboration attribution",
             "# Executing actions with care",
             "# Using your tools",
             "# Tone and style",
