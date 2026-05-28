@@ -10290,6 +10290,18 @@ fn grep_path(
     offset: usize,
 ) -> ToolResult {
     if path.is_file() {
+        // Don't surface matching lines from a sensitive file (e.g. `.env`)
+        // unless it has been explicitly opened — return as if it had no matches.
+        if !crate::sensitive_file::is_allowed(path) {
+            return render_grep_output(
+                output_mode,
+                BTreeMap::new(),
+                Vec::new(),
+                head_limit,
+                offset,
+                base,
+            );
+        }
         return grep_file(
             path.parent().unwrap_or(base),
             path,
@@ -10307,6 +10319,11 @@ fn grep_path(
     let mut matching_files = BTreeMap::<String, usize>::new();
     let mut content_matches = Vec::new();
     collect_files(path, path, &mut |relative, full_path| {
+        // Skip sensitive files (unless opened) so secret contents never leak
+        // into grep results; keep walking the rest of the tree.
+        if !crate::sensitive_file::is_allowed(full_path) {
+            return true;
+        }
         if let Some(glob) = glob
             && !glob.matches(relative)
         {

@@ -2163,6 +2163,50 @@ fn grep_tool_finds_files_with_matches() {
 }
 
 #[test]
+fn grep_tool_excludes_sensitive_files_until_opened() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join(".env"), "API_KEY=super-secret\n").expect("write .env");
+    std::fs::write(temp.path().join("app.txt"), "API_KEY=placeholder\n").expect("write app");
+    let context = ToolContext::new(temp.path());
+    let registry = ToolRegistry::with_builtin_tools();
+
+    // Directory grep must not surface the secret line from .env.
+    let dir = registry.call(
+        "Grep",
+        serde_json::json!({"pattern": "API_KEY", "output_mode": "content"}),
+        &context,
+    );
+    assert!(
+        !dir.content.contains("super-secret"),
+        "secret leaked via grep"
+    );
+    assert!(
+        dir.content.contains("placeholder"),
+        "non-sensitive match still found"
+    );
+
+    // Grepping the sensitive file directly yields no matches until opened.
+    let direct = registry.call(
+        "Grep",
+        serde_json::json!({"pattern": "API_KEY", "path": ".env", "output_mode": "content"}),
+        &context,
+    );
+    assert!(!direct.content.contains("super-secret"));
+
+    // After /open, the secret is searchable.
+    deeptide_core::sensitive_file::mark_open(&context.resolve_path(".env"));
+    let opened = registry.call(
+        "Grep",
+        serde_json::json!({"pattern": "API_KEY", "path": ".env", "output_mode": "content"}),
+        &context,
+    );
+    assert!(
+        opened.content.contains("super-secret"),
+        "opened .env should be searchable"
+    );
+}
+
+#[test]
 fn grep_tool_content_mode_includes_line_numbers() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\nalphabet\n").expect("write");
