@@ -140,6 +140,7 @@ impl ReplSession {
             "copy" | "yank" => self.execute_copy_command(args),
             "export" => self.execute_export_command(args),
             "diff" => self.execute_diff_command(args),
+            "branch" => self.execute_branch_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
@@ -291,6 +292,27 @@ impl ReplSession {
         }
 
         CommandResult::Text(render_workspace_diff(&self.tool_context.cwd))
+    }
+
+    fn execute_branch_command(&self, args: &str) -> CommandResult {
+        match branch_args(args) {
+            Ok(BranchAction::List) => CommandResult::Text(render_git_command(
+                &self.tool_context.cwd,
+                ["branch"].as_slice(),
+                "(no branches)",
+            )),
+            Ok(BranchAction::Create(name)) => CommandResult::Text(render_git_command(
+                &self.tool_context.cwd,
+                ["checkout", "-b", name.as_str()].as_slice(),
+                "",
+            )),
+            Ok(BranchAction::Checkout(name)) => CommandResult::Text(render_git_command(
+                &self.tool_context.cwd,
+                ["checkout", name.as_str()].as_slice(),
+                "",
+            )),
+            Err(message) => CommandResult::Text(message),
+        }
     }
 
     fn execute_permission_command(&mut self, args: &str) -> CommandResult {
@@ -478,6 +500,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             Vec::<&str>::new(),
             "Show pending workspace git diff",
             "/diff",
+        ),
+        CommandCompletionSource::new(
+            "branch",
+            Vec::<&str>::new(),
+            "List git branches; optionally checkout/create",
+            "/branch [name | -b name]",
         ),
         CommandCompletionSource::new(
             "read",
@@ -841,6 +869,68 @@ fn render_workspace_diff(cwd: &std::path::Path) -> String {
         String::from("No pending git diff in workspace.")
     } else {
         format!("Pending workspace diff:\n{diff}")
+    }
+}
+
+enum BranchAction {
+    List,
+    Create(String),
+    Checkout(String),
+}
+
+fn branch_args(args: &str) -> Result<BranchAction, String> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return Ok(BranchAction::List);
+    }
+
+    if trimmed == "-b" {
+        return Err(String::from("Usage: /branch [name | -b name]"));
+    }
+
+    if let Some(raw) = trimmed.strip_prefix("-b ") {
+        let name = raw.trim();
+        if name.is_empty() || name.split_whitespace().count() > 1 {
+            return Err(String::from("Usage: /branch [name | -b name]"));
+        }
+        return Ok(BranchAction::Create(name.to_owned()));
+    }
+
+    if trimmed.split_whitespace().count() > 1 {
+        return Err(String::from("Usage: /branch [name | -b name]"));
+    }
+
+    Ok(BranchAction::Checkout(trimmed.to_owned()))
+}
+
+fn render_git_command(cwd: &std::path::Path, args: &[&str], empty_message: &str) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output();
+
+    let Ok(output) = output else {
+        return String::from("git: failed to run git");
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .trim_end()
+        .to_owned();
+    let combined = match (stdout.is_empty(), stderr.is_empty()) {
+        (false, false) => format!("{stdout}\n{stderr}"),
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (true, true) => String::new(),
+    };
+
+    if combined.is_empty() {
+        empty_message.to_owned()
+    } else {
+        combined
     }
 }
 

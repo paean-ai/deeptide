@@ -347,6 +347,62 @@ fn repl_diff_reports_pending_workspace_diff() {
 }
 
 #[test]
+fn repl_branch_lists_creates_and_switches_branches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    git(temp.path(), ["init"]);
+    git(
+        temp.path(),
+        ["config", "user.email", "deeptide@example.invalid"],
+    );
+    git(temp.path(), ["config", "user.name", "Deeptide Tests"]);
+    std::fs::write(temp.path().join("notes.txt"), "hello\n").expect("write initial file");
+    git(temp.path(), ["add", "notes.txt"]);
+    git(temp.path(), ["commit", "-m", "initial"]);
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    let listed = only_output(repl.submit("/branch"));
+    assert!(listed.contains("*"));
+    assert!(listed.contains("master") || listed.contains("main"));
+
+    let created = only_output(repl.submit("/branch -b feature/test"));
+    assert!(created.contains("feature/test"));
+    assert_eq!(
+        git_stdout(temp.path(), ["branch", "--show-current"]),
+        "feature/test"
+    );
+
+    let default_branch = if listed.contains("master") {
+        "master"
+    } else {
+        "main"
+    };
+    let switched = only_output(repl.submit(&format!("/branch {default_branch}")));
+    assert!(switched.contains(default_branch));
+    assert_eq!(
+        git_stdout(temp.path(), ["branch", "--show-current"]),
+        default_branch
+    );
+}
+
+#[test]
+fn repl_branch_rejects_invalid_arguments() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/branch one two"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /branch [name | -b name]"
+        ))]
+    );
+    assert_eq!(
+        repl.submit("/branch -b"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /branch [name | -b name]"
+        ))]
+    );
+}
+
+#[test]
 fn repl_honors_max_turns_setting() {
     let mut repl = ReplSession::new(Box::new(AlwaysToolBackend)).with_max_turns(1);
 
@@ -459,6 +515,20 @@ fn git<const N: usize>(cwd: &std::path::Path, args: [&str; N]) {
         .status()
         .expect("git command should start");
     assert!(status.success(), "git command should succeed");
+}
+
+fn git_stdout<const N: usize>(cwd: &std::path::Path, args: [&str; N]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .expect("git command should start");
+    assert!(output.status.success(), "git command should succeed");
+    String::from_utf8(output.stdout)
+        .expect("git stdout should be utf8")
+        .trim()
+        .to_owned()
 }
 
 struct StaticBackend;
