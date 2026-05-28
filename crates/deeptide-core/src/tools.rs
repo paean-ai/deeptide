@@ -384,12 +384,17 @@ impl Tool for GrepTool {
             return ToolResult::error("pattern is required");
         }
 
-        let pattern = if input.get("-i").and_then(serde_json::Value::as_bool) == Some(true) {
-            format!("(?i){pattern}")
-        } else {
-            pattern.to_owned()
-        };
-        let regex = match regex::Regex::new(&pattern) {
+        let case_insensitive = input.get("-i").and_then(serde_json::Value::as_bool) == Some(true);
+        // Multiline mode lets `.` span newlines and `^`/`$` anchor at line
+        // boundaries, so a pattern can match across lines (Swift's -U
+        // --multiline-dotall).
+        let multiline = input.get("multiline").and_then(serde_json::Value::as_bool) == Some(true);
+        let regex = match regex::RegexBuilder::new(pattern)
+            .case_insensitive(case_insensitive)
+            .dot_matches_new_line(multiline)
+            .multi_line(multiline)
+            .build()
+        {
             Ok(regex) => regex,
             Err(error) => return ToolResult::error(format!("Invalid regex pattern: {error}")),
         };
@@ -456,6 +461,7 @@ impl Tool for GrepTool {
             after,
             line_numbers,
             type_extensions,
+            multiline,
         };
 
         grep_path(&base, &base, &regex, glob.as_ref(), &options)
@@ -10435,6 +10441,9 @@ struct GrepOptions {
     /// When `Some`, only files with one of these (lowercase, dotless)
     /// extensions are searched. Resolved from the `type` parameter.
     type_extensions: Option<Vec<String>>,
+    /// Whether the pattern may span lines (the regex was built with
+    /// dot-matches-newline + multiline anchoring).
+    multiline: bool,
 }
 
 impl GrepOptions {
@@ -10556,6 +10565,39 @@ fn grep_file(base: &Path, path: &Path, regex: &regex::Regex, options: &GrepOptio
 
 /// Read `path`, returning the number of matching lines and — in content mode —
 /// the formatted output lines (matches plus any requested context).
+/// Match `regex` against the whole file (lines joined with `\n`) and return the
+/// sorted, de-duplicated indices of every line spanned by a match. Used for
+/// multiline searches where a single match can cover several lines.
+fn multiline_match_indices(all_lines: &[String], regex: &regex::Regex) -> Vec<usize> {
+    let content = all_lines.join("\n");
+    // Byte offset at which each line begins within `content`.
+    let mut line_starts = Vec::with_capacity(all_lines.len());
+    let mut offset = 0usize;
+    for line in all_lines {
+        line_starts.push(offset);
+        offset += line.len() + 1; // +1 for the joining '\n'
+    }
+    let line_of = |byte: usize| -> usize {
+        // Last line whose start is <= byte.
+        line_starts
+            .partition_point(|&start| start <= byte)
+            .saturating_sub(1)
+    };
+
+    let mut indices = std::collections::BTreeSet::new();
+    for m in regex.find_iter(&content) {
+        let start_line = line_of(m.start());
+        // Use the last byte of the match so a match ending exactly at a line
+        // boundary doesn't pull in the following line.
+        let last_byte = m.end().saturating_sub(1).max(m.start());
+        let end_line = line_of(last_byte);
+        for line in start_line..=end_line {
+            indices.insert(line);
+        }
+    }
+    indices.into_iter().collect()
+}
+
 fn process_grep_file(
     relative: &str,
     path: &Path,
@@ -10567,12 +10609,16 @@ fn process_grep_file(
     for line in io::BufReader::new(file).lines() {
         all_lines.push(line?);
     }
-    let match_indices: Vec<usize> = all_lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| regex.is_match(line))
-        .map(|(index, _)| index)
-        .collect();
+    let match_indices = if options.multiline {
+        multiline_match_indices(&all_lines, regex)
+    } else {
+        all_lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| regex.is_match(line))
+            .map(|(index, _)| index)
+            .collect()
+    };
     if match_indices.is_empty() {
         return Ok((0, Vec::new()));
     }

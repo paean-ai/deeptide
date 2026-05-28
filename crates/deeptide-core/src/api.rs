@@ -686,6 +686,7 @@ fn tool_schemas() -> Vec<WireTool> {
                     "context": {"type": "integer", "description": "Alias for -C."},
                     "-n": {"type": "boolean", "description": "Show line numbers in content mode (default true)."},
                     "-i": {"type": "boolean", "description": "Case insensitive search."},
+                    "multiline": {"type": "boolean", "description": "Enable multiline mode where . matches newlines and patterns can span lines."},
                     "head_limit": {"type": "integer", "description": "Limit output to first N entries. Use 0 for unlimited."},
                     "offset": {"type": "integer", "description": "Skip first N entries before applying head_limit for pagination. Defaults to 0."}
                 },

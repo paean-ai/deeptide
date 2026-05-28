@@ -2259,6 +2259,81 @@ fn edit_tool_blocks_sensitive_files() {
 }
 
 #[test]
+fn grep_tool_multiline_matches_across_lines() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("code.rs"),
+        "fn start() {}\nfn wrapped(\n    a: i32,\n) {}\nfn end() {}\n",
+    )
+    .expect("write");
+
+    // This pattern spans the `fn wrapped(` line and its args, so a normal
+    // per-line search would miss it.
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({
+            "pattern": r"fn wrapped\([^)]*\)",
+            "path": "code.rs",
+            "output_mode": "content",
+            "multiline": true
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("code.rs:2:fn wrapped("));
+    assert!(result.content.contains("code.rs:3:    a: i32,"));
+    assert!(result.content.contains("code.rs:4:) {}"));
+    assert!(!result.content.contains("fn start"));
+    assert!(!result.content.contains("fn end"));
+}
+
+#[test]
+fn grep_tool_without_multiline_does_not_span_lines() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("code.rs"),
+        "fn wrapped(\n    a: i32,\n) {}\n",
+    )
+    .expect("write");
+
+    // The same cross-line pattern finds nothing in per-line (default) mode.
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({
+            "pattern": r"fn wrapped\([^)]*\)",
+            "path": "code.rs",
+            "output_mode": "content"
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("No matches"), "{}", result.content);
+}
+
+#[test]
+fn grep_tool_multiline_respects_case_insensitive() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("code.rs"), "Alpha\nBETA\n").expect("write");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({
+            "pattern": "beta",
+            "path": "code.rs",
+            "output_mode": "content",
+            "multiline": true,
+            "-i": true
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("code.rs:2:BETA"));
+}
+
+#[test]
 fn grep_tool_finds_files_with_matches() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(temp.path().join("src")).expect("mkdir");
