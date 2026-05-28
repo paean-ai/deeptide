@@ -165,6 +165,14 @@ struct Cli {
     no_color: bool,
 
     #[arg(
+        long,
+        env = "DEEPTIDE_DEBUG",
+        action = ArgAction::SetTrue,
+        help = "Start the REPL with debug diagnostics (per-turn token/cost) enabled. Toggle at runtime with /debug."
+    )]
+    debug: bool,
+
+    #[arg(
         long = "stream",
         env = "DEEPTIDE_STREAM",
         action = ArgAction::SetTrue,
@@ -289,6 +297,9 @@ fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
     }
     if let Some(true) = cfg.no_color {
         cli.no_color = true;
+    }
+    if let Some(true) = cfg.debug {
+        cli.debug = true;
     }
 }
 
@@ -477,6 +488,7 @@ fn run_interactive(
         .with_permission_mode(permission_mode)
         .with_max_turns(cli.max_turns)
         .with_pricing_overrides(pricing_overrides)
+        .with_debug(cli.debug)
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
     let rl_config = rustyline::config::Config::builder()
@@ -910,6 +922,7 @@ mod tests {
             system_prompt_file: None,
             no_prompt_cache: false,
             no_color: false,
+            debug: false,
             stream: false,
         }
     }
@@ -1084,6 +1097,23 @@ mod tests {
         };
         apply_config_fallbacks(&mut cli, &cfg);
         assert!(cli.no_color);
+    }
+
+    #[test]
+    fn config_debug_folds_into_cli_flag() {
+        let _guard = env_guard();
+        unsafe {
+            std::env::remove_var("TIDE_PROFILE");
+        }
+        let mut cli = sample_cli();
+        assert!(!cli.debug);
+
+        let cfg = ConfigData {
+            debug: Some(true),
+            ..Default::default()
+        };
+        apply_config_fallbacks(&mut cli, &cfg);
+        assert!(cli.debug);
     }
 
     #[test]

@@ -122,6 +122,14 @@ impl ReplSession {
         self
     }
 
+    /// Set the initial debug-output state (the `--debug` flag / `debug`
+    /// config). When enabled, each prompt is followed by per-turn token and
+    /// cost diagnostics; `/debug` toggles it at runtime.
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug_enabled = debug;
+        self
+    }
+
     pub fn with_subagent_backend_factory<F>(mut self, factory: F) -> Self
     where
         F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,
@@ -148,14 +156,47 @@ impl ReplSession {
             return self.execute_command(command_line);
         }
 
-        let events: Vec<ReplEvent> = self
+        let turns_before = self.agent_loop.cost_tracker().summary().turns.len();
+        let mut events: Vec<ReplEvent> = self
             .agent_loop
             .run(trimmed)
             .into_iter()
             .filter_map(agent_event_to_repl_event)
             .collect();
+        if self.debug_enabled
+            && let Some(debug) = self.debug_turn_summary(turns_before)
+        {
+            events.push(ReplEvent::Output(debug));
+        }
         self.autosave_session();
         events
+    }
+
+    /// Format per-turn token and cost diagnostics for the turns recorded since
+    /// `turns_before`. Returns `None` when the run recorded no new turns (e.g.
+    /// a model error or a backend that reports no usage).
+    fn debug_turn_summary(&self, turns_before: usize) -> Option<String> {
+        let summary = self.agent_loop.cost_tracker().summary();
+        if summary.turns.len() <= turns_before {
+            return None;
+        }
+        let lines: Vec<String> = summary.turns[turns_before..]
+            .iter()
+            .map(|turn| {
+                format!(
+                    "[debug] turn {} · {} · in {} out {} · cache +{}/{} · {}ms · {}",
+                    turn.turn,
+                    turn.model,
+                    CostTracker::format_tokens(turn.input_tokens),
+                    CostTracker::format_tokens(turn.output_tokens),
+                    CostTracker::format_tokens(turn.cache_create),
+                    CostTracker::format_tokens(turn.cache_read),
+                    turn.duration_ms,
+                    CostTracker::format_usd(turn.cost_usd),
+                )
+            })
+            .collect();
+        Some(lines.join("\n"))
     }
 
     fn autosave_session(&self) {

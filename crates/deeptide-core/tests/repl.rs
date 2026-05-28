@@ -18,6 +18,43 @@ fn repl_routes_plain_input_to_agent_loop() {
 }
 
 #[test]
+fn repl_debug_mode_emits_per_turn_diagnostics() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_debug(true);
+
+    let outputs: Vec<String> = repl
+        .submit("hello")
+        .into_iter()
+        .filter_map(|event| match event {
+            ReplEvent::Output(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        outputs.iter().any(|text| text.contains("[debug] turn")),
+        "expected a per-turn debug line, got: {outputs:?}"
+    );
+    assert!(
+        outputs.iter().any(|text| text.contains("in 4 out 2")),
+        "debug line should report token usage, got: {outputs:?}"
+    );
+}
+
+#[test]
+fn repl_without_debug_emits_no_diagnostics() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    let events = repl.submit("hello");
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ReplEvent::Output(text) if text.contains("[debug]"))),
+        "debug diagnostics must not appear unless debug mode is enabled"
+    );
+}
+
+#[test]
 fn repl_shows_tool_batch_summary_before_tool_output() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\n").expect("write fixture");
