@@ -170,6 +170,10 @@ impl AgentLoop {
         self
     }
 
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.model = model.into();
+    }
+
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns.max(1);
         self

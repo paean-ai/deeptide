@@ -136,6 +136,7 @@ impl ReplSession {
             }
             "compact" | "compress" => CompactCommand.execute(args, &context),
             "cost" => CostCommand.execute(args, &context),
+            "model" | "m" => self.execute_model_command(args),
             "status" => self.execute_status_command(args),
             "context" | "ctx" => self.execute_context_command(args),
             "retry" | "r" | "again" => return self.execute_retry_command(args),
@@ -207,6 +208,24 @@ impl ReplSession {
             &self.tool_context.cwd,
             &self.additional_dirs,
         ))
+    }
+
+    fn execute_model_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            return CommandResult::Text(render_model_status(self.agent_loop.model()));
+        }
+        if trimmed.split_whitespace().count() > 1 {
+            return CommandResult::Text(String::from("Usage: /model <model-name | flash | pro>"));
+        }
+
+        let resolved = resolve_model_alias(trimmed);
+        self.agent_loop.set_model(resolved.clone());
+        if resolved == trimmed {
+            CommandResult::Text(format!("Model: {resolved}"))
+        } else {
+            CommandResult::Text(format!("Model: {resolved} (alias {trimmed})"))
+        }
     }
 
     fn execute_retry_command(&mut self, args: &str) -> Vec<ReplEvent> {
@@ -509,6 +528,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
         CommandCompletionSource::from_command(&CompactCommand),
         CommandCompletionSource::from_command(&CostCommand),
         CommandCompletionSource::new(
+            "model",
+            ["m"],
+            "Switch the AI model at runtime",
+            "/model <model-name | flash | pro>",
+        ),
+        CommandCompletionSource::new(
             "status",
             Vec::<&str>::new(),
             "Show session status: model, cwd, turns, tokens, cost",
@@ -801,6 +826,39 @@ fn render_additional_dirs(additional_dirs: &[std::path::PathBuf]) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+fn render_model_status(current_model: &str) -> String {
+    let mut lines = vec![
+        format!("Current model: {current_model}"),
+        String::new(),
+        String::from("Aliases:"),
+    ];
+    lines.extend(model_alias_summary().into_iter().map(String::from));
+    lines.push(String::new());
+    lines.push(String::from(
+        "Usage: /model <name-or-alias>  (e.g. /model flash, /model pro)",
+    ));
+    lines.join("\n")
+}
+
+fn resolve_model_alias(name: &str) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "pro" | "v4-pro" | "v4" => String::from("deepseek-v4-pro"),
+        "flash" | "fast" | "v4-flash" => String::from("deepseek-v4-flash"),
+        "flash-q4" | "flash-q4k" | "v4-flash-q4" | "v4-flash-q4k" => {
+            String::from("deepseek-v4-flash-q4k")
+        }
+        _ => name.to_owned(),
+    }
+}
+
+fn model_alias_summary() -> Vec<&'static str> {
+    vec![
+        "  deepseek-v4-flash <- fast, flash, v4-flash",
+        "  deepseek-v4-flash-q4k <- flash-q4, flash-q4k, v4-flash-q4, v4-flash-q4k",
+        "  deepseek-v4-pro <- pro, v4, v4-pro",
+    ]
 }
 
 fn render_cache_health(cache: &crate::CacheHealth) -> String {

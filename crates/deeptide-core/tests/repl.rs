@@ -120,6 +120,47 @@ fn repl_cost_command_uses_agent_loop_usage() {
 }
 
 #[test]
+fn repl_model_command_lists_current_model_and_aliases() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_model("deepseek-v4-flash");
+
+    let output = only_output(repl.submit("/model"));
+
+    assert!(output.contains("Current model: deepseek-v4-flash"));
+    assert!(output.contains("Aliases:"));
+    assert!(output.contains("deepseek-v4-pro <- pro, v4, v4-pro"));
+    assert!(output.contains("Usage: /model <name-or-alias>"));
+}
+
+#[test]
+fn repl_model_command_switches_model_and_resolves_aliases() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        only_output(repl.submit("/model flash")),
+        "Model: deepseek-v4-flash (alias flash)"
+    );
+    assert_eq!(repl.agent_loop().model(), "deepseek-v4-flash");
+
+    assert_eq!(
+        only_output(repl.submit("/m custom-model")),
+        "Model: custom-model"
+    );
+    assert_eq!(repl.agent_loop().model(), "custom-model");
+}
+
+#[test]
+fn repl_model_command_rejects_extra_arguments() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/model one two"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /model <model-name | flash | pro>"
+        ))]
+    );
+}
+
+#[test]
 fn repl_status_command_reports_session_shape() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut repl = ReplSession::new(Box::new(StaticBackend))
