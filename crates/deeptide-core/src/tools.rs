@@ -718,14 +718,18 @@ impl Tool for MemoryWriteTool {
         let Some(scope) = MemoryScope::parse(scope) else {
             return ToolResult::error("scope must be project or global");
         };
-        let memory_type = input
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .and_then(parse_memory_type)
-            .unwrap_or(match scope {
+        let memory_type = match input.get("type").and_then(serde_json::Value::as_str) {
+            Some(raw) => {
+                let Some(memory_type) = parse_memory_type(raw) else {
+                    return ToolResult::error("type must be user, feedback, project, or reference");
+                };
+                memory_type
+            }
+            None => match scope {
                 MemoryScope::Project => MemoryType::Project,
                 MemoryScope::Global => MemoryType::User,
-            });
+            },
+        };
 
         let file_name = unique_memory_file_name(&title, &context.cwd, scope);
         let content = create_memory_file(&title, &reason, memory_type, body);

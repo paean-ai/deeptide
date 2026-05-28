@@ -753,6 +753,21 @@ fn memory_write_tool_rejects_invalid_inputs() {
     );
     assert!(bad_scope.is_error);
     assert_eq!(bad_scope.content, "scope must be project or global");
+
+    let bad_type = MemoryWriteTool.call(
+        serde_json::json!({
+            "title": "Valid Title",
+            "body": "Valid durable memory body.",
+            "reason": "Useful later",
+            "type": "transient"
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(bad_type.is_error);
+    assert_eq!(
+        bad_type.content,
+        "type must be user, feedback, project, or reference"
+    );
 }
 
 #[test]
