@@ -678,7 +678,13 @@ fn tool_schemas() -> Vec<WireTool> {
                     "pattern": {"type": "string", "description": "Regular expression pattern to search for."},
                     "path": {"type": "string", "description": "File or directory to search. Defaults to the workspace root."},
                     "glob": {"type": "string", "description": "Optional glob pattern to filter files."},
+                    "type": {"type": "string", "description": "File type to search (e.g. js, py, rust, go, ts). More convenient than glob for standard types."},
                     "output_mode": {"type": "string", "description": "files_with_matches, content, or count."},
+                    "-B": {"type": "integer", "description": "Lines to show before each match (content mode only)."},
+                    "-A": {"type": "integer", "description": "Lines to show after each match (content mode only)."},
+                    "-C": {"type": "integer", "description": "Context lines before and after each match (content mode only)."},
+                    "context": {"type": "integer", "description": "Alias for -C."},
+                    "-n": {"type": "boolean", "description": "Show line numbers in content mode (default true)."},
                     "-i": {"type": "boolean", "description": "Case insensitive search."},
                     "head_limit": {"type": "integer", "description": "Limit output to first N entries. Use 0 for unlimited."},
                     "offset": {"type": "integer", "description": "Skip first N entries before applying head_limit for pagination. Defaults to 0."}
