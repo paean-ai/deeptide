@@ -34,6 +34,20 @@ const EXACT_NAMES: &[&str] = &[
 /// File extensions (case-insensitive, without the dot) treated as sensitive.
 const SENSITIVE_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "crt", "cer"];
 
+/// Commands that read/exfiltrate file contents. A shell command is only
+/// blocked for mentioning a sensitive path when it also invokes one of these.
+/// Mirrors Swift's `SensitiveFilePolicy.readCommands`.
+const READ_COMMANDS: &[&str] = &[
+    "cat", "head", "tail", "less", "more", "sed", "awk", "grep", "egrep", "fgrep", "rg", "ripgrep",
+    "strings", "base64", "xxd", "hexdump", "python", "python3", "ruby", "perl", "node", "deno",
+    "jq", "yq", "cp", "rsync", "tar", "zip", "gzip", "openssl",
+];
+
+/// Shell token separators used to split a command into words/paths.
+const SHELL_SEPARATORS: &[char] = &[
+    ' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>', '"', '\'',
+];
+
 /// Whether `path`'s file name marks it as likely holding secrets.
 ///
 /// Matches Swift's `SensitiveFilePolicy.isSensitive`: exact names, the `.env.`
@@ -87,6 +101,48 @@ pub fn is_open(path: &Path) -> bool {
 /// allowed; sensitive files only after an explicit `/open`.
 pub fn is_allowed(path: &Path) -> bool {
     !is_sensitive(path) || is_open(path)
+}
+
+/// Decide whether a shell command should be blocked because it reads a
+/// sensitive file that has not been `/open`'d.
+///
+/// Blocks when the command invokes a read-like command (`cat`, `grep`, …) AND
+/// names a resolved sensitive path that is not open. `resolve` maps a raw
+/// command token to the absolute path the read tools would use, so opened
+/// paths match. Returns the denial message, or `None` to allow.
+///
+/// This is stricter than Swift's coarse substring pre-filter: it classifies
+/// every token by [`is_sensitive`], so `cat secrets.txt` / `head key.pem` are
+/// caught too (Swift's `mentionsSensitivePath` substring list misses those).
+pub fn shell_command_block_reason(
+    command: &str,
+    resolve: impl Fn(&str) -> PathBuf,
+) -> Option<String> {
+    let tokens: Vec<&str> = command
+        .split(SHELL_SEPARATORS)
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    let uses_read_command = tokens
+        .iter()
+        .any(|token| READ_COMMANDS.contains(&token.to_ascii_lowercase().as_str()));
+    if !uses_read_command {
+        return None;
+    }
+
+    let mentions_blocked = tokens.iter().any(|token| {
+        let path = resolve(token);
+        is_sensitive(&path) && !is_open(&path)
+    });
+    if !mentions_blocked {
+        return None;
+    }
+
+    Some(String::from(
+        "Sensitive file access blocked in this shell command (it may hold secrets, \
+         credentials, or keys). Run `/open <path>` for each sensitive file you want \
+         this session to read, then retry.",
+    ))
 }
 
 /// Message returned when a sensitive file is read without being opened first.
@@ -175,5 +231,38 @@ mod tests {
         let msg = denial_message(&PathBuf::from("/proj/.env"));
         assert!(msg.contains("/open"));
         assert!(msg.contains(".env"));
+    }
+
+    #[test]
+    fn shell_command_blocking_targets_reads_of_unopened_sensitive_paths() {
+        let resolve = |token: &str| PathBuf::from(format!("/proj/{token}"));
+
+        // Read-like command touching a sensitive file → blocked.
+        assert!(shell_command_block_reason("cat .env", resolve).is_some());
+        assert!(shell_command_block_reason("head -n5 secrets.txt", resolve).is_some());
+        assert!(shell_command_block_reason("grep KEY config/app.pem", resolve).is_some());
+        // Pipelines / chained commands are split on separators.
+        assert!(shell_command_block_reason("echo hi && cat .env", resolve).is_some());
+
+        // No read-like command → allowed even if a sensitive path appears.
+        assert!(shell_command_block_reason("rm .env", resolve).is_none());
+        assert!(shell_command_block_reason("ls -la", resolve).is_none());
+        // Read command but no sensitive path → allowed.
+        assert!(shell_command_block_reason("cat README.md", resolve).is_none());
+    }
+
+    #[test]
+    fn shell_command_blocking_respects_opened_paths() {
+        // Resolve to a unique dir so the global registry can't be polluted by
+        // other tests running in parallel.
+        let dir = "/tmp/deeptide-shell-block-unique-abc";
+        let resolve = |token: &str| PathBuf::from(format!("{dir}/{token}"));
+        assert!(shell_command_block_reason("cat .env", resolve).is_some());
+
+        mark_open(&PathBuf::from(format!("{dir}/.env")));
+        assert!(
+            shell_command_block_reason("cat .env", resolve).is_none(),
+            "once opened, the shell read is allowed"
+        );
     }
 }

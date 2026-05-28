@@ -779,6 +779,25 @@ fn bash_tool_executes_commands_in_workspace() {
 }
 
 #[test]
+fn bash_tool_blocks_reading_sensitive_files_until_opened() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join(".env"), "API_KEY=super-secret\n").expect("write .env");
+    let context = ToolContext::new(temp.path());
+
+    // `cat .env` is refused before the command runs — the secret never leaks.
+    let blocked = BashTool.call(serde_json::json!({"command": "cat .env"}), &context);
+    assert!(blocked.is_error, "cat .env should be blocked");
+    assert!(blocked.content.contains("Sensitive file access blocked"));
+    assert!(!blocked.content.contains("super-secret"));
+
+    // After /open marks it readable, the same command is permitted to run.
+    deeptide_core::sensitive_file::mark_open(&context.resolve_path(".env"));
+    let allowed = BashTool.call(serde_json::json!({"command": "cat .env"}), &context);
+    assert!(!allowed.is_error, "opened .env should be readable via Bash");
+    assert!(allowed.content.contains("super-secret"));
+}
+
+#[test]
 fn bash_tool_reports_stderr_and_exit_status_as_error() {
     let temp = tempfile::tempdir().expect("tempdir");
 
