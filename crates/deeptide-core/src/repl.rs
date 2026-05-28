@@ -58,6 +58,7 @@ pub struct ReplSession {
     additional_dirs: Vec<std::path::PathBuf>,
     provider_profile: ProviderProfile,
     debug_enabled: bool,
+    tps_samples: Vec<crate::tps::TpsSample>,
     active_goal: Option<String>,
     session_id: String,
     session_started_at: String,
@@ -76,6 +77,7 @@ impl ReplSession {
             additional_dirs: Vec::new(),
             provider_profile: ProviderProfile::Legacy,
             debug_enabled: false,
+            tps_samples: Vec::new(),
             active_goal: None,
             session_id: new_session_id(),
             session_started_at: time::OffsetDateTime::now_utc()
@@ -163,40 +165,28 @@ impl ReplSession {
             .into_iter()
             .filter_map(agent_event_to_repl_event)
             .collect();
+
+        // Record per-turn throughput and (optionally) emit debug diagnostics
+        // for the turns this run produced, reading the cost summary once.
+        let summary = self.agent_loop.cost_tracker().summary();
+        let new_turns = summary.turns.get(turns_before..).unwrap_or(&[]);
+        for turn in new_turns {
+            if turn.output_tokens > 0 && turn.duration_ms > 0 {
+                self.tps_samples.push(crate::tps::TpsSample {
+                    model: turn.model.clone(),
+                    output_tokens: turn.output_tokens,
+                    duration_ms: turn.duration_ms,
+                });
+            }
+        }
         if self.debug_enabled
-            && let Some(debug) = self.debug_turn_summary(turns_before)
+            && let Some(debug) = format_debug_turns(new_turns)
         {
             events.push(ReplEvent::Output(debug));
         }
+
         self.autosave_session();
         events
-    }
-
-    /// Format per-turn token and cost diagnostics for the turns recorded since
-    /// `turns_before`. Returns `None` when the run recorded no new turns (e.g.
-    /// a model error or a backend that reports no usage).
-    fn debug_turn_summary(&self, turns_before: usize) -> Option<String> {
-        let summary = self.agent_loop.cost_tracker().summary();
-        if summary.turns.len() <= turns_before {
-            return None;
-        }
-        let lines: Vec<String> = summary.turns[turns_before..]
-            .iter()
-            .map(|turn| {
-                format!(
-                    "[debug] turn {} · {} · in {} out {} · cache +{}/{} · {}ms · {}",
-                    turn.turn,
-                    turn.model,
-                    CostTracker::format_tokens(turn.input_tokens),
-                    CostTracker::format_tokens(turn.output_tokens),
-                    CostTracker::format_tokens(turn.cache_create),
-                    CostTracker::format_tokens(turn.cache_read),
-                    turn.duration_ms,
-                    CostTracker::format_usd(turn.cost_usd),
-                )
-            })
-            .collect();
-        Some(lines.join("\n"))
     }
 
     fn autosave_session(&self) {
@@ -419,24 +409,26 @@ impl ReplSession {
         ))
     }
 
-    fn execute_tps_command(&self, args: &str) -> CommandResult {
+    fn execute_tps_command(&mut self, args: &str) -> CommandResult {
         let flags = args.split_whitespace().collect::<Vec<_>>();
-        if flags.contains(&"--reset") {
-            return CommandResult::Text(String::from(
-                "No model TPS samples are recorded by the Rust REPL yet.",
-            ));
-        }
-
-        if flags.iter().any(|flag| *flag != "--json") {
+        if flags
+            .iter()
+            .any(|flag| !matches!(*flag, "--json" | "--reset"))
+        {
             return CommandResult::Text(String::from("Usage: /tps [--json | --reset]"));
         }
 
+        if flags.contains(&"--reset") {
+            let cleared = self.tps_samples.len();
+            self.tps_samples.clear();
+            return CommandResult::Text(format!("Cleared {cleared} TPS sample(s)."));
+        }
+
+        let records = crate::tps::aggregate(&self.tps_samples);
         if flags.contains(&"--json") {
-            CommandResult::Text(String::from("[]"))
+            CommandResult::Text(crate::tps::to_json(&records))
         } else {
-            CommandResult::Text(String::from(
-                "No model TPS samples recorded yet. Run a streamed model session to collect speed telemetry.",
-            ))
+            CommandResult::Text(crate::tps::render(&records))
         }
     }
 
@@ -1518,6 +1510,32 @@ fn build_goal_continuation_prompt(goal: &str) -> String {
         Do not create cron jobs, recurring jobs, background loops, or a new persistent goal.\n\
         [/deeptide-goal-continue]"
     )
+}
+
+/// Format per-turn token and cost diagnostics for the supplied turns. Returns
+/// `None` when there are no turns (e.g. a model error or a backend that
+/// reports no usage), so callers can skip emitting an empty debug line.
+fn format_debug_turns(turns: &[crate::TurnRecord]) -> Option<String> {
+    if turns.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = turns
+        .iter()
+        .map(|turn| {
+            format!(
+                "[debug] turn {} · {} · in {} out {} · cache +{}/{} · {}ms · {}",
+                turn.turn,
+                turn.model,
+                CostTracker::format_tokens(turn.input_tokens),
+                CostTracker::format_tokens(turn.output_tokens),
+                CostTracker::format_tokens(turn.cache_create),
+                CostTracker::format_tokens(turn.cache_read),
+                turn.duration_ms,
+                CostTracker::format_usd(turn.cost_usd),
+            )
+        })
+        .collect();
+    Some(lines.join("\n"))
 }
 
 fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
