@@ -227,6 +227,8 @@ mod tests {
         ConversationMessage {
             role,
             content: content.to_string(),
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
         }
     }
 
