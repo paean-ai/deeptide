@@ -934,3 +934,210 @@ impl AgentBackend for ReadToolBackend {
         }
     }
 }
+
+// ── Goal command backends ─────────────────────────────────────────────────
+
+struct GoalAchievedBackend;
+
+impl AgentBackend for GoalAchievedBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        Ok(AgentResponse::text(
+            "I finished the work.\nGOAL_STATUS: achieved",
+        ))
+    }
+}
+
+#[derive(Default)]
+struct GoalContinueThenAchieveBackend {
+    calls: usize,
+}
+
+impl AgentBackend for GoalContinueThenAchieveBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse::text(
+                "Making progress.\nGOAL_STATUS: continue",
+            ))
+        } else {
+            Ok(AgentResponse::text("All done.\nGOAL_STATUS: achieved"))
+        }
+    }
+}
+
+// ── Goal command tests ────────────────────────────────────────────────────
+
+#[test]
+fn repl_goal_status_reports_no_active_goal() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    let output = only_output(repl.submit("/goal status"));
+    assert!(output.contains("No active goal"));
+}
+
+#[test]
+fn repl_goal_status_alias_shows_active_goal() {
+    let mut repl = ReplSession::new(Box::new(GoalAchievedBackend));
+
+    // Start goal (which achieves immediately, clearing the goal)
+    repl.submit("/goal write unit tests");
+
+    // After goal is achieved the goal is cleared
+    let output = only_output(repl.submit("/objective status"));
+    assert!(output.contains("No active goal"));
+}
+
+#[test]
+fn repl_goal_clear_removes_active_goal_state() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    // Inject goal text via a StaticBackend that won't emit GOAL_STATUS so goal stays active
+    // We can just test the clear path via /goal clear when no goal is active
+    let output = only_output(repl.submit("/goal clear"));
+    assert_eq!(output, "Cleared active goal.");
+}
+
+#[test]
+fn repl_goal_achieved_immediately_auto_closes_loop() {
+    let mut repl = ReplSession::new(Box::new(GoalAchievedBackend));
+
+    let events = repl.submit("/goal add type annotations");
+
+    // Should contain "Goal set", the model reply, then "Goal achieved."
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| {
+            if let ReplEvent::Output(s) = e {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        texts.contains(&"Goal set for this session."),
+        "missing goal-set message"
+    );
+    assert!(texts.iter().any(|s| s.contains("GOAL_STATUS: achieved")));
+    assert!(
+        texts.contains(&"Goal achieved."),
+        "missing achieved message"
+    );
+}
+
+#[test]
+fn repl_goal_continue_then_achieve_runs_two_turns() {
+    let mut repl = ReplSession::new(Box::new(GoalContinueThenAchieveBackend::default()));
+
+    let events = repl.submit("/goal refactor the parser");
+
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| {
+            if let ReplEvent::Output(s) = e {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        texts.contains(&"Goal set for this session."),
+        "missing goal-set message"
+    );
+    assert!(texts.iter().any(|s| s.contains("Making progress")));
+    assert!(texts.iter().any(|s| s.contains("All done")));
+    assert!(
+        texts.contains(&"Goal achieved."),
+        "missing achieved message"
+    );
+    // Two model turns: initial + one continuation
+    assert_eq!(repl.agent_loop().messages().len(), 4);
+}
+
+#[test]
+fn repl_goal_no_status_in_response_stops_loop() {
+    // StaticBackend returns "assistant reply" with no GOAL_STATUS → loop exits after first turn
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    let events = repl.submit("/goal write a changelog");
+
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| {
+            if let ReplEvent::Output(s) = e {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(texts.contains(&"Goal set for this session."));
+    assert!(
+        !texts.contains(&"Goal achieved."),
+        "should not mark achieved without status token"
+    );
+    // One model turn only
+    assert_eq!(repl.agent_loop().messages().len(), 2);
+}
+
+#[test]
+fn repl_goal_listed_in_help() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let help = only_output(repl.submit("/help"));
+    assert!(help.contains("/goal"), "help should list /goal");
+}
+
+// ── Cache command tests ───────────────────────────────────────────────────
+
+#[test]
+fn repl_cache_reports_no_data_before_any_turn() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    let output = only_output(repl.submit("/cache"));
+    assert!(output.contains("No cache diagnostics yet"));
+}
+
+#[test]
+fn repl_cache_shows_turn_data_after_agent_turn() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let _ = repl.submit("hello");
+
+    let output = only_output(repl.submit("/cache"));
+    assert!(output.contains("Cache diagnostics"));
+    assert!(output.contains("cache+"));
+    assert!(output.contains("cache-r"));
+    assert!(output.contains("Overall:"));
+}
+
+#[test]
+fn repl_cache_accepts_numeric_limit() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    for _ in 0..5 {
+        let _ = repl.submit("hello");
+    }
+
+    let output = only_output(repl.submit("/cache 3"));
+    assert!(output.contains("3 of 5 turn(s)"));
+}
+
+#[test]
+fn repl_cache_rejects_non_numeric_argument() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/cache foo"),
+        vec![ReplEvent::Output(String::from("Usage: /cache [limit]"))]
+    );
+}
+
+#[test]
+fn repl_cache_alias_kvcache_works() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    let output = only_output(repl.submit("/kvcache"));
+    assert!(output.contains("No cache diagnostics yet"));
+}

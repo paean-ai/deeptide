@@ -56,6 +56,7 @@ pub struct ReplSession {
     additional_dirs: Vec<std::path::PathBuf>,
     provider_profile: ProviderProfile,
     debug_enabled: bool,
+    active_goal: Option<String>,
 }
 
 impl ReplSession {
@@ -71,6 +72,7 @@ impl ReplSession {
             additional_dirs: Vec::new(),
             provider_profile: ProviderProfile::Legacy,
             debug_enabled: false,
+            active_goal: None,
         }
     }
 
@@ -226,6 +228,8 @@ impl ReplSession {
             "reminder" | "anchor" | "reorient" => return self.execute_reminder_command(args),
             "dream" => return self.execute_dream_command(args),
             "cron" => self.execute_cron_command(args),
+            "goal" | "objective" => return self.execute_goal_command(args),
+            "cache" | "kvcache" | "manifest" => self.execute_cache_command(args),
             _ => CommandResult::Text(format!(
                 "Unknown command: /{name}\nType /help for the full list."
             )),
@@ -991,6 +995,146 @@ impl ReplSession {
         }
     }
 
+    fn execute_goal_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let trimmed = args.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        match lower.as_str() {
+            "" | "status" | "show" => match &self.active_goal {
+                None => vec![ReplEvent::Output(String::from(
+                    "No active goal. Use /goal <target> to start one for this session.",
+                ))],
+                Some(goal) => vec![ReplEvent::Output(format!("Active goal:\n  {goal}"))],
+            },
+            "clear" | "stop" | "cancel" | "remove" => {
+                self.active_goal = None;
+                vec![ReplEvent::Output(String::from("Cleared active goal."))]
+            }
+            _ => {
+                self.active_goal = Some(trimmed.to_owned());
+                let prompt = build_goal_initial_prompt(trimmed);
+                let mut events = vec![ReplEvent::Output(String::from(
+                    "Goal set for this session.",
+                ))];
+                events.extend(self.run_goal_loop(&prompt));
+                events
+            }
+        }
+    }
+
+    fn run_goal_loop(&mut self, initial_prompt: &str) -> Vec<ReplEvent> {
+        let mut all_events = Vec::new();
+        let mut prompt = initial_prompt.to_owned();
+
+        for turn in 0..MAX_GOAL_CONTINUATION_TURNS {
+            let turn_events: Vec<ReplEvent> = self
+                .agent_loop
+                .run(&prompt)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event)
+                .collect();
+            all_events.extend(turn_events);
+
+            let status = last_assistant_reply(self.agent_loop.messages())
+                .and_then(|reply| parse_goal_status(&reply));
+            match status {
+                Some(GoalStatus::Achieved) => {
+                    self.active_goal = None;
+                    all_events.push(ReplEvent::Output(String::from("Goal achieved.")));
+                    return all_events;
+                }
+                Some(GoalStatus::Continue) => {
+                    if let Some(goal) = self.active_goal.clone() {
+                        prompt = build_goal_continuation_prompt(&goal);
+                    } else {
+                        return all_events;
+                    }
+                }
+                None => return all_events,
+            }
+
+            if turn + 1 == MAX_GOAL_CONTINUATION_TURNS {
+                all_events.push(ReplEvent::Output(format!(
+                    "Goal reached the continuation limit ({MAX_GOAL_CONTINUATION_TURNS} turns). \
+                    Use /goal status to check the active goal or continue manually."
+                )));
+            }
+        }
+        all_events
+    }
+
+    fn execute_cache_command(&self, args: &str) -> CommandResult {
+        let raw = args.trim();
+        let limit = if raw.is_empty() {
+            8usize
+        } else {
+            match raw.parse::<usize>() {
+                Ok(n) => n.max(1).min(50),
+                Err(_) => return CommandResult::Text(String::from("Usage: /cache [limit]")),
+            }
+        };
+
+        let summary = self.agent_loop.cost_tracker().summary();
+        if summary.turns.is_empty() {
+            return CommandResult::Text(String::from(
+                "No cache diagnostics yet. Run at least one agent turn to see cache telemetry.",
+            ));
+        }
+
+        let all_turns = &summary.turns;
+        let shown: Vec<_> = all_turns.iter().rev().take(limit).collect();
+        let shown: Vec<_> = shown.into_iter().rev().collect();
+
+        let mut lines = vec![
+            format!(
+                "Cache diagnostics ({} of {} turn(s)):",
+                shown.len(),
+                all_turns.len()
+            ),
+            String::from("  turn   in       out     cache+    cache-r  cost"),
+        ];
+        for turn in &shown {
+            let cache_note = if turn.cache_read + turn.cache_create > 0 {
+                let total = turn.cache_read + turn.cache_create;
+                let pct = (turn.cache_read * 100).checked_div(total).unwrap_or(0);
+                format!(" ({pct}% hit)")
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "  {:<5}  {:<7}  {:<6}  {:<8}  {:<7}  {}{}",
+                turn.turn,
+                CostTracker::format_tokens(turn.input_tokens),
+                CostTracker::format_tokens(turn.output_tokens),
+                CostTracker::format_tokens(turn.cache_create),
+                CostTracker::format_tokens(turn.cache_read),
+                CostTracker::format_usd(turn.cost_usd),
+                cache_note,
+            ));
+        }
+
+        lines.push(String::new());
+        let health = summary.cache_health();
+        if let Some(hit_rate) = health.hit_rate_percent {
+            let recent = health
+                .recent_hit_rate_percent
+                .map(|r| format!(" · recent {r}% hit"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "Overall: {} created, {} read · {hit_rate}% hit{recent} · {}",
+                CostTracker::format_tokens(health.total_create_tokens),
+                CostTracker::format_tokens(health.total_read_tokens),
+                health.label()
+            ));
+        } else {
+            lines.push(format!(
+                "Overall: {} · no cache telemetry yet",
+                health.label()
+            ));
+        }
+
+        CommandResult::Text(lines.join("\n"))
+    }
+
     fn execute_cron_command(&self, args: &str) -> CommandResult {
         let trimmed = args.trim();
         let parts = trimmed.split_whitespace().collect::<Vec<_>>();
@@ -1036,6 +1180,58 @@ impl ReplSession {
             .cwd(move || cwd.clone())
             .build()
     }
+}
+
+const MAX_GOAL_CONTINUATION_TURNS: usize = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoalStatus {
+    Achieved,
+    Continue,
+}
+
+fn parse_goal_status(text: &str) -> Option<GoalStatus> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("goal_status: achieved") {
+        Some(GoalStatus::Achieved)
+    } else if lower.contains("goal_status: continue") {
+        Some(GoalStatus::Continue)
+    } else {
+        None
+    }
+}
+
+fn build_goal_initial_prompt(goal: &str) -> String {
+    format!(
+        "[deeptide-goal]\n\
+        Goal:\n\
+        {goal}\n\n\
+        Work autonomously toward this goal. If the goal is already fully achieved, say so briefly \
+        and end your final answer with exactly:\n\
+        GOAL_STATUS: achieved\n\n\
+        If more work is still needed after this turn, do the next useful work now and end your \
+        final answer with exactly:\n\
+        GOAL_STATUS: continue\n\n\
+        Do not create cron jobs, recurring jobs, background loops, or a new persistent goal. \
+        This goal exists only in the current Deeptide TUI session.\n\
+        [/deeptide-goal]"
+    )
+}
+
+fn build_goal_continuation_prompt(goal: &str) -> String {
+    format!(
+        "[deeptide-goal-continue]\n\
+        Continue working toward the active goal:\n\
+        {goal}\n\n\
+        Review the current session history and workspace state. If the goal is fully achieved now, \
+        stop and end your final answer with exactly:\n\
+        GOAL_STATUS: achieved\n\n\
+        If it is not fully achieved, perform the next useful work now and end your final answer \
+        with exactly:\n\
+        GOAL_STATUS: continue\n\n\
+        Do not create cron jobs, recurring jobs, background loops, or a new persistent goal.\n\
+        [/deeptide-goal-continue]"
+    )
 }
 
 fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
@@ -1316,6 +1512,18 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             Vec::<&str>::new(),
             "Manage scheduled cron jobs",
             "/cron [list | delete <id>]",
+        ),
+        CommandCompletionSource::new(
+            "goal",
+            ["objective"],
+            "Run an autonomous agent goal loop until achieved",
+            "/goal [status | clear | <goal text>]",
+        ),
+        CommandCompletionSource::new(
+            "cache",
+            ["kvcache", "manifest"],
+            "Show recent prompt-cache diagnostics for this session",
+            "/cache [limit]",
         ),
     ]
 }
