@@ -10,7 +10,7 @@ use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
     CommandCompletionSource, CompletionEngine, LocalEchoBackend, ReplEvent, ReplSession,
-    StreamingEvent, StreamingHandler, tui,
+    StreamingEvent, StreamingHandler, ThinkingConfig, tui,
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -102,6 +102,22 @@ struct Cli {
         help = "Model to retry with once when the primary model is transiently overloaded (HTTP 529/503)."
     )]
     fallback_model: Option<String>,
+
+    #[arg(
+        long,
+        env = "DEEPTIDE_THINKING",
+        value_name = "LEVEL",
+        help = "Extended thinking: low, medium/enabled, high, disabled, or auto (omit to let the provider decide)."
+    )]
+    thinking: Option<String>,
+
+    #[arg(
+        long,
+        env = "DEEPTIDE_EFFORT",
+        value_name = "LEVEL",
+        help = "Reasoning effort (low, medium, high); used when --thinking is unset."
+    )]
+    effort: Option<String>,
 
     #[arg(long, default_value_t = 4096)]
     max_output_tokens: usize,
@@ -244,6 +260,16 @@ fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
         && let Some(fallback) = cfg.fallback_model.as_ref()
     {
         cli.fallback_model = Some(fallback.clone());
+    }
+    if cli.thinking.is_none()
+        && let Some(thinking) = cfg.thinking.as_ref()
+    {
+        cli.thinking = Some(thinking.clone());
+    }
+    if cli.effort.is_none()
+        && let Some(effort) = cfg.effort.as_ref()
+    {
+        cli.effort = Some(effort.clone());
     }
     if let Some(false) = cfg.prompt_cache {
         cli.no_prompt_cache = true;
@@ -675,6 +701,13 @@ fn configured_backend_with_handler(
     config.enable_prompt_caching = !cli.no_prompt_cache;
     config.enable_streaming = cli.stream || streaming_handler.is_some();
     config.fallback_model = cli.fallback_model.clone();
+    // --thinking takes precedence over --effort; both already absorb config
+    // fallbacks. An unset/`auto` value leaves thinking omitted from requests.
+    config.thinking = cli
+        .thinking
+        .as_deref()
+        .or(cli.effort.as_deref())
+        .and_then(ThinkingConfig::from_label);
     if let Some(system_prompt) = resolve_system_prompt(cli)? {
         config = config.with_system_prompt(system_prompt);
     }
@@ -822,7 +855,7 @@ mod tests {
         normalize_embedded_mode, validate_formats,
     };
     use clap::Parser;
-    use deeptide_core::{AnthropicAuthMode, ConfigData, ProviderProfile};
+    use deeptide_core::{AnthropicAuthMode, ConfigData, ProviderProfile, ThinkingConfig};
     use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -841,6 +874,8 @@ mod tests {
             api_key: None,
             profile: None,
             fallback_model: None,
+            thinking: None,
+            effort: None,
             max_output_tokens: 4096,
             max_turns: 25,
             system_prompt: None,
@@ -977,6 +1012,51 @@ mod tests {
 
         apply_config_fallbacks(&mut cli, &cfg);
         assert_eq!(cli.base_url, "https://user-supplied.example");
+    }
+
+    #[test]
+    fn configured_backend_resolves_thinking_from_flag() {
+        let _guard = env_guard();
+        clear_api_env();
+        let mut cli = sample_cli();
+        cli.api_key = Some("k".to_owned());
+        cli.thinking = Some("high".to_owned());
+
+        let config = configured_backend(&cli)
+            .expect("backend")
+            .subagent_config
+            .expect("config");
+        assert_eq!(config.thinking, Some(ThinkingConfig::high()));
+    }
+
+    #[test]
+    fn configured_backend_uses_effort_when_thinking_unset() {
+        let _guard = env_guard();
+        clear_api_env();
+        let mut cli = sample_cli();
+        cli.api_key = Some("k".to_owned());
+        cli.effort = Some("low".to_owned());
+
+        let config = configured_backend(&cli)
+            .expect("backend")
+            .subagent_config
+            .expect("config");
+        assert_eq!(config.thinking, Some(ThinkingConfig::low()));
+    }
+
+    #[test]
+    fn configured_backend_omits_thinking_for_auto() {
+        let _guard = env_guard();
+        clear_api_env();
+        let mut cli = sample_cli();
+        cli.api_key = Some("k".to_owned());
+        cli.thinking = Some("auto".to_owned());
+
+        let config = configured_backend(&cli)
+            .expect("backend")
+            .subagent_config
+            .expect("config");
+        assert_eq!(config.thinking, None);
     }
 
     #[test]

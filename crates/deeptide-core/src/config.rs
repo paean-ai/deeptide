@@ -174,6 +174,16 @@ pub struct ConfigData {
     #[serde(rename = "fallback_model", skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
 
+    /// Extended-thinking level: `low`, `medium`/`enabled`, `high`, `disabled`,
+    /// or `auto`/unset to let the provider decide.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+
+    /// Reasoning-effort level (`low`/`medium`/`high`); an alias for `thinking`
+    /// used when `thinking` is unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+
     /// Static permission rules applied before the runtime allow/deny lists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permissions: Option<SettingsPermissions>,
@@ -212,6 +222,8 @@ impl ConfigData {
             permission_mode: other.permission_mode.or(self.permission_mode),
             prompt_cache: other.prompt_cache.or(self.prompt_cache),
             fallback_model: other.fallback_model.or(self.fallback_model),
+            thinking: other.thinking.or(self.thinking),
+            effort: other.effort.or(self.effort),
             permissions: other.permissions.or(self.permissions),
             hooks: other.hooks.or(self.hooks),
             env: merge_maps(self.env, other.env),
@@ -417,6 +429,14 @@ impl ConfigStore {
                 .fallback_model
                 .as_deref()
                 .unwrap_or("(unset — no fallback)"),
+        ));
+        lines.push(kv(
+            "thinking",
+            merged
+                .thinking
+                .as_deref()
+                .or(merged.effort.as_deref())
+                .unwrap_or("(unset — provider default)"),
         ));
         lines.push(kv(
             "max_turns",
@@ -751,6 +771,28 @@ mod tests {
             base.merge(ConfigData::default()).fallback_model.as_deref(),
             Some("base-fallback")
         );
+    }
+
+    #[test]
+    fn config_data_parses_and_merges_thinking_effort() {
+        let data: ConfigData =
+            serde_json::from_str(r#"{"thinking": "high", "effort": "low"}"#).expect("parse");
+        assert_eq!(data.thinking.as_deref(), Some("high"));
+        assert_eq!(data.effort.as_deref(), Some("low"));
+
+        let base = ConfigData {
+            thinking: Some(String::from("medium")),
+            effort: Some(String::from("low")),
+            ..Default::default()
+        };
+        let overlay = ConfigData {
+            thinking: Some(String::from("high")),
+            ..Default::default()
+        };
+        let merged = base.merge(overlay);
+        assert_eq!(merged.thinking.as_deref(), Some("high"));
+        // effort is preserved from base when the overlay omits it.
+        assert_eq!(merged.effort.as_deref(), Some("low"));
     }
 
     #[test]
