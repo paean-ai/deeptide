@@ -10,6 +10,7 @@ use crate::{
     agent_loop::{ConversationMessage, MessageRole},
     memory::MemorySystem,
     tools::{ClipboardTool, model_context_window},
+    tui::{StatusLine, StatusSegment},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,7 @@ pub struct ReplSession {
     clipboard_writer: ClipboardWriter,
     additional_dirs: Vec<std::path::PathBuf>,
     provider_profile: ProviderProfile,
+    debug_enabled: bool,
 }
 
 impl ReplSession {
@@ -68,6 +70,7 @@ impl ReplSession {
             clipboard_writer: Arc::new(write_to_system_clipboard),
             additional_dirs: Vec::new(),
             provider_profile: ProviderProfile::Legacy,
+            debug_enabled: false,
         }
     }
 
@@ -138,6 +141,29 @@ impl ReplSession {
         String::from("deeptide> ")
     }
 
+    pub fn status_line(&self) -> StatusLine {
+        let summary = self.agent_loop.cost_tracker().summary();
+        let context_tokens = estimate_repl_context_tokens(self.agent_loop.messages());
+        let window = model_context_window(self.agent_loop.model()) as usize;
+        let context_pct = context_tokens
+            .saturating_mul(100)
+            .checked_div(window)
+            .unwrap_or(0);
+        let branch = git_branch(&self.tool_context.cwd).unwrap_or_else(|| String::from("no-git"));
+
+        StatusLine::new([
+            StatusSegment::new("model", self.agent_loop.model()),
+            StatusSegment::new("mode", self.agent_loop.permission_mode().label()),
+            StatusSegment::new("ctx", format!("{context_pct}%")),
+            StatusSegment::new(
+                "turns",
+                format!("{}/{}", summary.turns.len(), self.agent_loop.max_turns()),
+            ),
+            StatusSegment::new("git", branch),
+            StatusSegment::new("cost", CostTracker::format_usd(summary.total_cost_usd)),
+        ])
+    }
+
     pub fn agent_loop(&self) -> &AgentLoop {
         &self.agent_loop
     }
@@ -174,11 +200,32 @@ impl ReplSession {
             "diff" => self.execute_diff_command(args),
             "branch" => self.execute_branch_command(args),
             "add-dir" | "add_dir" | "adddir" => self.execute_add_dir_command(args),
+            "fast" | "faster" => self.execute_fast_command(args),
+            "tps" | "speed" => self.execute_tps_command(args),
+            "debug" | "dbg" => self.execute_debug_command(args),
+            "keybindings" | "keys" => self.execute_keybindings_command(args),
+            "sessions" | "session" => self.execute_sessions_command(args),
+            "resume" | "load" | "restore" => self.execute_resume_command(args),
+            "open" => self.execute_open_command(args),
+            "paste" | "p" => self.execute_paste_command(args),
+            "doctor" => self.execute_doctor_command(args),
+            "config" => self.execute_config_command(args),
+            "hooks" => self.execute_hooks_command(args),
+            "init" => self.execute_init_command(args),
+            "update" | "upgrade" => self.execute_update_command(args),
+            "vim" | "edit" | "e" | "compose" => self.execute_vim_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
             "remember" => RememberCommand.execute(args, &context),
             "permission" | "perm" | "permissions" => self.execute_permission_command(args),
+            "commit" => return self.execute_commit_command(args),
+            "review" => return self.execute_review_command(args),
+            "simplify" => return self.execute_simplify_command(args),
+            "skills" | "skill" => self.execute_skills_command(args),
+            "reminder" | "anchor" | "reorient" => return self.execute_reminder_command(args),
+            "dream" => return self.execute_dream_command(args),
+            "cron" => self.execute_cron_command(args),
             _ => CommandResult::Text(format!(
                 "Unknown command: /{name}\nType /help for the full list."
             )),
@@ -271,6 +318,244 @@ impl ReplSession {
 
         CommandResult::Text(String::from(
             "Usage: /provider [list | use <name|deepseek|paean> | status]",
+        ))
+    }
+
+    fn execute_fast_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /fast"));
+        }
+
+        CommandResult::Text(String::from(
+            "Fast mode: use the --fast CLI flag at launch. Runtime toggle coming in a future update.",
+        ))
+    }
+
+    fn execute_tps_command(&self, args: &str) -> CommandResult {
+        let flags = args.split_whitespace().collect::<Vec<_>>();
+        if flags.contains(&"--reset") {
+            return CommandResult::Text(String::from(
+                "No model TPS samples are recorded by the Rust REPL yet.",
+            ));
+        }
+
+        if flags.iter().any(|flag| *flag != "--json") {
+            return CommandResult::Text(String::from("Usage: /tps [--json | --reset]"));
+        }
+
+        if flags.contains(&"--json") {
+            CommandResult::Text(String::from("[]"))
+        } else {
+            CommandResult::Text(String::from(
+                "No model TPS samples recorded yet. Run a streamed model session to collect speed telemetry.",
+            ))
+        }
+    }
+
+    fn execute_debug_command(&mut self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /debug"));
+        }
+
+        self.debug_enabled = !self.debug_enabled;
+        let status = if self.debug_enabled { "on" } else { "off" };
+        CommandResult::Text(format!("Debug mode: {status}"))
+    }
+
+    fn execute_keybindings_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /keybindings"));
+        }
+
+        CommandResult::Text(
+            [
+                "Key bindings:",
+                "  Enter           Submit prompt",
+                "  Backslash + Enter Continue on next line",
+                "  Tab             Autocomplete /command or @path",
+                "  Ctrl+C          Interrupt running tool / exit when idle",
+                "  Ctrl+D          Exit on empty line",
+                "  Ctrl+L          Clear screen",
+                "  Ctrl+A / Ctrl+E Move to start / end of line",
+                "  Ctrl+K          Kill to end of line",
+                "  Ctrl+U          Kill to start of line",
+                "  Ctrl+W          Delete previous word",
+                "  Up / Down       Browse history",
+            ]
+            .join("\n"),
+        )
+    }
+
+    fn execute_sessions_command(&self, args: &str) -> CommandResult {
+        if args.split_whitespace().count() > 1 {
+            return CommandResult::Text(String::from("Usage: /sessions [filter]"));
+        }
+
+        CommandResult::Text(String::from(
+            "No persisted sessions are available in the Rust REPL yet. Use /export [path] to save the current transcript.",
+        ))
+    }
+
+    fn execute_resume_command(&self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.split_whitespace().count() > 1 {
+            return CommandResult::Text(String::from("Usage: /resume [session-id]"));
+        }
+
+        if trimmed.is_empty() {
+            CommandResult::Text(String::from("No sessions to resume in this project."))
+        } else {
+            CommandResult::Text(format!(
+                "Session not found: {trimmed}. Persisted session restore is not available in the Rust REPL yet."
+            ))
+        }
+    }
+
+    fn execute_open_command(&self, args: &str) -> CommandResult {
+        let raw = unquote_path(args.trim());
+        if raw.is_empty() || raw.split_whitespace().count() > 1 && !args.trim().starts_with('"') {
+            return CommandResult::Text(String::from("Usage: /open <path>"));
+        }
+
+        let path = self.tool_context.resolve_path(&raw);
+        if !path.exists() {
+            return CommandResult::Text(format!("File does not exist: {}", path.display()));
+        }
+
+        CommandResult::Text(format!(
+            "{} is not classified as sensitive in the Rust build; normal tools can already read it.",
+            path.display()
+        ))
+    }
+
+    fn execute_paste_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /paste"));
+        }
+
+        let result =
+            ClipboardTool.call(serde_json::json!({"operation": "read"}), &self.tool_context);
+        if result.is_error {
+            return CommandResult::Text(format!("/paste: {}", result.content));
+        }
+
+        let content = result.content.trim();
+        if content.is_empty() || content == "[Clipboard is empty]" {
+            return CommandResult::Text(String::from(
+                "/paste: clipboard has no text content. Image prefill is not available in the Rust REPL yet.",
+            ));
+        }
+
+        CommandResult::Text(format!(
+            "Clipboard text:\n{content}\n\nPaste this into the prompt or use the Clipboard tool from the agent loop."
+        ))
+    }
+
+    fn execute_doctor_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /doctor"));
+        }
+
+        let env = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        let has_api_key = [
+            "DEEPSEEK_API_KEY",
+            "ZERO_CLI_API_KEY",
+            "ZERO_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ]
+        .iter()
+        .any(|key| env.get(*key).is_some_and(|value| !value.is_empty()));
+        let base_url = env
+            .get("DEEPSEEK_BASE_URL")
+            .or_else(|| env.get("ZERO_CLI_BASE_URL"))
+            .or_else(|| env.get("ANTHROPIC_BASE_URL"))
+            .map(String::as_str)
+            .unwrap_or("https://api.deepseek.com/anthropic");
+
+        let mut lines = vec![String::from("Deeptide doctor")];
+        lines.push(render_doctor_check(
+            "API key",
+            if has_api_key { "set" } else { "missing" },
+            has_api_key,
+        ));
+        lines.push(render_doctor_check("Base URL", base_url, true));
+        for command in ["git", "rg", "bash"] {
+            let path = find_executable(command);
+            lines.push(render_doctor_check(
+                command,
+                path.as_deref().unwrap_or("not found"),
+                path.is_some(),
+            ));
+        }
+        lines.push(String::new());
+        lines.push(format!(
+            "Tools: {} registered",
+            self.tool_registry.names().len()
+        ));
+        lines.push(format!(
+            "Commands: {} registered",
+            repl_command_sources().len()
+        ));
+        lines.push(format!("CWD: {}", self.tool_context.cwd.display()));
+
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    fn execute_config_command(&self, args: &str) -> CommandResult {
+        match args.trim() {
+            "" | "show" => CommandResult::Text(render_config_overview(&self.tool_context.cwd)),
+            _ => CommandResult::Text(String::from(
+                "Usage: /config [show]\nSetting values from the Rust REPL is not available yet; edit the displayed settings files directly.",
+            )),
+        }
+    }
+
+    fn execute_hooks_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /hooks"));
+        }
+
+        CommandResult::Text(String::from(
+            "No hooks configured. Add a `hooks` block to settings.json when Rust config persistence lands.",
+        ))
+    }
+
+    fn execute_init_command(&self, args: &str) -> CommandResult {
+        let extra = args.trim();
+        let mut lines = vec![
+            String::from("Project bootstrap is model-driven in Deeptide."),
+            String::from(
+                "Rust REPL can already inspect the workspace with /context, /memory, /read, /grep, and /glob-backed tools.",
+            ),
+            String::from(
+                "Ask the agent to create or refresh TIDE.md after it scans the repository.",
+            ),
+        ];
+        if !extra.is_empty() {
+            lines.push(format!("Extra context: {extra}"));
+        }
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    fn execute_update_command(&self, args: &str) -> CommandResult {
+        let parts = args.split_whitespace().collect::<Vec<_>>();
+        let allowed = ["--check", "--force"];
+        if parts.iter().any(|part| !allowed.contains(part)) {
+            return CommandResult::Text(String::from("Usage: /update [--check | --force]"));
+        }
+
+        CommandResult::Text(String::from(
+            "Update checks are not available in the Rust REPL yet. Run the packaged installer or Swift `tide update` command from your shell.",
+        ))
+    }
+
+    fn execute_vim_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /vim"));
+        }
+
+        CommandResult::Text(String::from(
+            "Editor composition is not available in the Rust REPL yet. Use your editor to draft text, then paste it at the prompt.",
         ))
     }
 
@@ -495,10 +780,249 @@ impl ReplSession {
         ))
     }
 
+    fn execute_commit_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let result = self.tool_registry.call(
+            "Skill",
+            serde_json::json!({"skill": "commit", "args": args}),
+            &self.tool_context,
+        );
+        if result.is_error {
+            return vec![ReplEvent::Output(format!("/commit: {}", result.content))];
+        }
+        let mut events = vec![ReplEvent::Output(String::from(
+            "Dispatching commit skill to the model.",
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&result.content)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    fn execute_review_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        if args.trim().is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "Usage: /review <pr-number-or-url>",
+            ))];
+        }
+        let result = self.tool_registry.call(
+            "Skill",
+            serde_json::json!({"skill": "review-pr", "args": args}),
+            &self.tool_context,
+        );
+        if result.is_error {
+            return vec![ReplEvent::Output(format!("/review: {}", result.content))];
+        }
+        let mut events = vec![ReplEvent::Output(String::from(
+            "Dispatching review-pr skill to the model.",
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&result.content)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    fn execute_simplify_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let result = self.tool_registry.call(
+            "Skill",
+            serde_json::json!({"skill": "simplify", "args": args}),
+            &self.tool_context,
+        );
+        if result.is_error {
+            return vec![ReplEvent::Output(format!("/simplify: {}", result.content))];
+        }
+        let mut events = vec![ReplEvent::Output(String::from(
+            "Dispatching simplify skill to the model.",
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&result.content)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    fn execute_skills_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /skills"));
+        }
+        let direct: &[(&str, &str, &str)] = &[
+            (
+                "commit",
+                "/commit",
+                "Stage changes, draft message, and commit",
+            ),
+            ("review-pr", "/review", "Review a GitHub pull request"),
+            (
+                "simplify",
+                "/simplify",
+                "Review changed code for quality and efficiency",
+            ),
+        ];
+        let model_only: &[(&str, &str)] = &[
+            ("init", "Bootstrap project memory and write TIDE.md"),
+            ("batch", "Plan and execute large parallelizable changes"),
+            ("publish", "Publish a static frontend on clide.app"),
+            ("update-config", "Configure Deeptide CLI settings"),
+        ];
+        let total = direct.len() + model_only.len();
+        let mut lines = vec![
+            String::new(),
+            format!("Built-in skills ({total}):"),
+            String::new(),
+        ];
+        for (name, cmd, desc) in direct {
+            lines.push(format!("  {name:<20} {desc}"));
+            lines.push(format!("  {:<20} trigger: {cmd}", ""));
+        }
+        for (name, desc) in model_only {
+            lines.push(format!("  {name:<20} {desc}"));
+            lines.push(format!("  {:<20} ask in prose, or use the Skill tool", ""));
+        }
+        lines.push(String::new());
+        lines.push(String::from(
+            "Skills expand to a structured prompt the model executes. $ARGUMENTS is replaced with the command tail.",
+        ));
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    fn execute_reminder_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let sub = args.trim().to_ascii_lowercase();
+        let text = self.build_reminder_text();
+        match sub.as_str() {
+            "" | "send" | "now" => {
+                let mut events = vec![ReplEvent::Output(String::from(
+                    "Queued a short state reminder for the next model turn.",
+                ))];
+                events.extend(
+                    self.agent_loop
+                        .run(&text)
+                        .into_iter()
+                        .filter_map(agent_event_to_repl_event),
+                );
+                events
+            }
+            "show" | "print" => vec![ReplEvent::Output(text)],
+            _ => vec![ReplEvent::Output(String::from(
+                "Usage: /reminder [show|send]",
+            ))],
+        }
+    }
+
+    fn build_reminder_text(&self) -> String {
+        let cwd = self.tool_context.cwd.display().to_string();
+        let model = self.agent_loop.model().to_owned();
+        let tool_names = self.tool_registry.names();
+        let preferred = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite"];
+        let available: std::collections::HashSet<&str> = tool_names.iter().copied().collect();
+        let listed: Vec<&str> = preferred
+            .iter()
+            .copied()
+            .filter(|t| available.contains(t))
+            .collect();
+        let tools = if listed.is_empty() {
+            preferred.join(", ")
+        } else {
+            listed.join(", ")
+        };
+        format!(
+            "<system-reminder>\n\
+            You are Deeptide, a coding agent.\n\
+            cwd: {cwd}\n\
+            model: {model}\n\
+            You can inspect and modify this workspace through tool calls. Do not claim you cannot access local files.\n\
+            Core tools available: {tools}.\n\
+            For file questions, call Read/Glob/Grep/Bash as needed. For requested file edits, call Write/Edit instead of printing large code blocks.\n\
+            Continue the user's active coding task from the transcript; do not invent unrelated goals or identities.\n\
+            </system-reminder>\n\
+            Reply briefly that you are re-oriented, then proceed with the user's next instruction."
+        )
+    }
+
+    fn execute_dream_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let sub = args.trim().to_ascii_lowercase();
+        match sub.as_str() {
+            "run" | "now" | "" => {
+                let cwd = self.tool_context.cwd.display().to_string();
+                let prompt = format!(
+                    "[dream manual run — execute once, do NOT create cron jobs or loops]\n\n\
+                    You are running Deeptide's local dream consolidation pass for workspace:\n\
+                    {cwd}\n\n\
+                    Goal:\n\
+                    - Review recent useful session history.\n\
+                    - Extract durable project facts, decisions, preferences, recurring constraints, and unresolved follow-ups.\n\
+                    - Save or update concise long-term memory in `.deeptide/MEMORY.md` or project memory files.\n\
+                    - Merge duplicate or stale entries instead of appending noise.\n\n\
+                    Rules:\n\
+                    - Execute exactly once.\n\
+                    - Do not edit system prompts, settings, cron jobs, or provider configuration.\n\
+                    - Do not add memories that are generic, obvious, temporary, secret, or unsupported by session history.\n\
+                    - Keep memory files compact and human-readable."
+                );
+                let mut events = vec![ReplEvent::Output(String::from(
+                    "Queued one dream consolidation run.",
+                ))];
+                events.extend(
+                    self.agent_loop
+                        .run(&prompt)
+                        .into_iter()
+                        .filter_map(agent_event_to_repl_event),
+                );
+                events
+            }
+            "status" | "list" => vec![ReplEvent::Output(String::from(
+                "No dream loop is active. Use `/dream run` to consolidate session history once.",
+            ))],
+            "start" | "on" | "enable" => vec![ReplEvent::Output(String::from(
+                "Persistent dream loop is not available in the Rust REPL yet. Use `/dream run` to consolidate once.",
+            ))],
+            "stop" | "off" | "disable" | "cancel" => {
+                vec![ReplEvent::Output(String::from("No dream loop is active."))]
+            }
+            _ => vec![ReplEvent::Output(String::from(
+                "Usage: /dream [run | status]",
+            ))],
+        }
+    }
+
+    fn execute_cron_command(&self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+        let sub = parts.first().copied().unwrap_or("").to_ascii_lowercase();
+        match sub.as_str() {
+            "" | "list" | "ls" => {
+                let result =
+                    self.tool_registry
+                        .call("CronList", serde_json::json!({}), &self.tool_context);
+                CommandResult::Text(result.content)
+            }
+            "delete" | "rm" | "remove" => {
+                let id = parts.get(1).copied().unwrap_or("");
+                if id.is_empty() {
+                    return CommandResult::Text(String::from("Usage: /cron delete <id>"));
+                }
+                let result = self.tool_registry.call(
+                    "CronDelete",
+                    serde_json::json!({"id": id}),
+                    &self.tool_context,
+                );
+                CommandResult::Text(result.content)
+            }
+            _ => CommandResult::Text(String::from("Usage: /cron [list | delete <id>]")),
+        }
+    }
+
     fn command_context(&self) -> CommandContext {
         let cost_display_enabled = Arc::clone(&self.cost_display_enabled);
         let set_cost_display_enabled = Arc::clone(&self.cost_display_enabled);
         let summary = self.agent_loop.cost_tracker().summary();
+        let cwd = self.tool_context.cwd.clone();
 
         CommandContext::builder()
             .clear_conversation(|| Some(String::new()))
@@ -509,6 +1033,7 @@ impl ReplSession {
             .set_cost_display_enabled(move |enabled| {
                 set_cost_display_enabled.store(enabled, Ordering::SeqCst);
             })
+            .cwd(move || cwd.clone())
             .build()
     }
 }
@@ -652,6 +1177,85 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "/add-dir <path>",
         ),
         CommandCompletionSource::new(
+            "fast",
+            ["faster"],
+            "Toggle fast mode (same model, faster output)",
+            "/fast",
+        ),
+        CommandCompletionSource::new(
+            "tps",
+            ["speed"],
+            "Show recorded per-model TPS",
+            "/tps [--json | --reset]",
+        ),
+        CommandCompletionSource::new("debug", ["dbg"], "Toggle debug output", "/debug"),
+        CommandCompletionSource::new(
+            "keybindings",
+            ["keys"],
+            "Show current key bindings",
+            "/keybindings",
+        ),
+        CommandCompletionSource::new(
+            "sessions",
+            ["session"],
+            "List saved sessions",
+            "/sessions [filter]",
+        ),
+        CommandCompletionSource::new(
+            "resume",
+            ["load", "restore"],
+            "Resume a previous session",
+            "/resume [session-id]",
+        ),
+        CommandCompletionSource::new(
+            "open",
+            Vec::<&str>::new(),
+            "Allow a sensitive file to be read this session",
+            "/open <path>",
+        ),
+        CommandCompletionSource::new(
+            "paste",
+            ["p"],
+            "Attach or read clipboard content for the next prompt",
+            "/paste",
+        ),
+        CommandCompletionSource::new(
+            "doctor",
+            Vec::<&str>::new(),
+            "Diagnose installation and environment",
+            "/doctor",
+        ),
+        CommandCompletionSource::new(
+            "config",
+            Vec::<&str>::new(),
+            "Show merged settings",
+            "/config [show]",
+        ),
+        CommandCompletionSource::new(
+            "hooks",
+            Vec::<&str>::new(),
+            "List configured hooks",
+            "/hooks",
+        ),
+        CommandCompletionSource::new(
+            "init",
+            Vec::<&str>::new(),
+            "Bootstrap project memory and guide files",
+            "/init [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "update",
+            ["upgrade"],
+            "Update deeptide to the latest published version",
+            "/update [--check | --force]",
+        ),
+        CommandCompletionSource::new(
+            "vim",
+            ["edit", "e", "compose"],
+            "Open $EDITOR for the next prompt",
+            "/vim",
+        ),
+        CommandCompletionSource::new(
             "read",
             Vec::<&str>::new(),
             "Read a text file with optional line range",
@@ -671,7 +1275,125 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "List or modify permission rules",
             "/permission [--allow Pattern | --deny Pattern | --remove pattern]",
         ),
+        CommandCompletionSource::new(
+            "commit",
+            Vec::<&str>::new(),
+            "Run the commit skill (stage changes, draft message, commit)",
+            "/commit [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "review",
+            Vec::<&str>::new(),
+            "Run the review-pr skill on a GitHub PR",
+            "/review <pr-number-or-url>",
+        ),
+        CommandCompletionSource::new(
+            "simplify",
+            Vec::<&str>::new(),
+            "Review changed code for reuse, quality, and efficiency",
+            "/simplify [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "skills",
+            ["skill"],
+            "List available built-in skills",
+            "/skills",
+        ),
+        CommandCompletionSource::new(
+            "reminder",
+            ["anchor", "reorient"],
+            "Re-anchor the agent's cwd/model/tool state",
+            "/reminder [show|send]",
+        ),
+        CommandCompletionSource::new(
+            "dream",
+            Vec::<&str>::new(),
+            "Consolidate session history into local long-term memory",
+            "/dream [run | status]",
+        ),
+        CommandCompletionSource::new(
+            "cron",
+            Vec::<&str>::new(),
+            "Manage scheduled cron jobs",
+            "/cron [list | delete <id>]",
+        ),
     ]
+}
+
+fn unquote_path(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        trimmed[1..trimmed.len() - 1].to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn render_doctor_check(label: &str, value: &str, ok: bool) -> String {
+    let mark = if ok { "ok" } else { "missing" };
+    format!("  {mark:<7} {label:<9} {value}")
+}
+
+fn find_executable(command: &str) -> Option<String> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return Some(candidate.display().to_string());
+        }
+
+        #[cfg(windows)]
+        {
+            for extension in ["exe", "cmd", "bat"] {
+                let candidate = dir.join(format!("{command}.{extension}"));
+                if candidate.is_file() {
+                    return Some(candidate.display().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn render_config_overview(cwd: &std::path::Path) -> String {
+    let mut lines = vec![String::from("Settings files:")];
+    for (label, path) in candidate_config_files(cwd) {
+        let status = if path.exists() { "present" } else { "missing" };
+        lines.push(format!("  {label:<8} {status:<7} {}", path.display()));
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "Rust config editing is intentionally read-only for now; align cloud API behavior with zero-cli launch environment variables.",
+    ));
+    lines.join("\n")
+}
+
+fn candidate_config_files(cwd: &std::path::Path) -> Vec<(&'static str, std::path::PathBuf)> {
+    let mut files = vec![
+        ("project", cwd.join(".deeptide").join("settings.json")),
+        ("local", cwd.join(".deeptide").join("settings.local.json")),
+    ];
+    if let Some(home) = repl_home_dir() {
+        files.push((
+            "global",
+            home.join(".config").join("tide").join("settings.json"),
+        ));
+    }
+    files
+}
+
+fn repl_home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(std::path::PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(std::path::PathBuf::from)
+    }
 }
 
 fn render_status(

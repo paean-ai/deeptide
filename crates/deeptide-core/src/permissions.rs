@@ -490,7 +490,11 @@ fn is_plan_safe_shell_command(command: Option<&str>) -> bool {
         return false;
     }
 
-    const BLOCKED_FRAGMENTS: [&str; 8] = [";", "&&", "||", ">", "<", "&", "`", "$("];
+    // Reject any shell metacharacter that could chain commands, redirect IO, or
+    // perform command substitution. These are checked against the raw command
+    // string. Inside quoted arguments they would still trigger a rejection, but
+    // that is an intentional conservative bias for plan mode.
+    const BLOCKED_FRAGMENTS: [&str; 9] = [";", "&&", "||", ">", "<", "&", "`", "$(", "\n"];
     if BLOCKED_FRAGMENTS
         .iter()
         .any(|fragment| trimmed.contains(fragment))
@@ -500,20 +504,14 @@ fn is_plan_safe_shell_command(command: Option<&str>) -> bool {
 
     for raw_segment in trimmed.split('|') {
         let segment = raw_segment.trim();
-        if segment.contains(" -exec ")
-            || segment.contains(" --exec")
-            || segment.contains(" -delete")
-            || segment.contains(" -i ")
-            || segment.ends_with(" -i")
-        {
+        if segment.is_empty() {
             return false;
         }
-
-        let mut parts = segment.split_whitespace();
-        let Some(executable) = parts.next() else {
+        let tokens: Vec<&str> = segment.split_whitespace().collect();
+        let Some((executable, args)) = tokens.split_first() else {
             return false;
         };
-        if !is_plan_safe_executable(executable, segment) {
+        if !is_plan_safe_executable(executable, args) {
             return false;
         }
     }
@@ -521,31 +519,62 @@ fn is_plan_safe_shell_command(command: Option<&str>) -> bool {
     true
 }
 
-fn is_plan_safe_executable(executable: &str, segment: &str) -> bool {
+fn is_plan_safe_executable(executable: &str, args: &[&str]) -> bool {
     match executable {
-        "pwd" | "ls" | "find" | "fd" | "rg" | "grep" | "cat" | "sed" | "head" | "tail" | "wc"
-        | "sort" | "uniq" | "jq" | "tree" | "file" | "stat" | "du" | "df" | "which" | "type" => {
+        "pwd" | "ls" | "fd" | "rg" | "grep" | "cat" | "head" | "tail" | "wc" | "sort" | "uniq"
+        | "jq" | "tree" | "file" | "stat" | "du" | "df" | "which" | "type" => true,
+        "sed" => {
+            // sed has several flags that turn it into a destructive editor:
+            //   -i / -i<suffix> / -ibak / --in-place[=<suffix>]   — in-place edit
+            //   -f <script> / --file=<script>                     — runs arbitrary commands
+            // We must catch combined-flag forms (e.g. `-i.bak`, `-ibak`) that
+            // the previous substring check missed.
+            for arg in args {
+                if *arg == "--in-place" || arg.starts_with("--in-place=") {
+                    return false;
+                }
+                if *arg == "-f" || *arg == "--file" || arg.starts_with("--file=") {
+                    return false;
+                }
+                // -i, -i.bak, -ibak, etc. Long options start with "--" so are skipped.
+                if arg.starts_with("-i") && !arg.starts_with("--") {
+                    return false;
+                }
+            }
             true
         }
-        "git" => {
-            let parts: Vec<_> = segment.split_whitespace().collect();
-            matches!(
-                parts.get(1).copied(),
-                Some(
-                    "status"
-                        | "diff"
-                        | "log"
-                        | "show"
-                        | "branch"
-                        | "rev-parse"
-                        | "grep"
-                        | "ls-files"
-                        | "remote"
-                        | "blame"
-                        | "describe"
-                )
-            )
+        "find" => {
+            // Block any primary that executes a program, deletes files, or
+            // writes output to disk. `-execdir ... +` and `-ok` are the most
+            // common bypasses of the previous `" -exec "`/`" -delete"` substring
+            // checks.
+            const FIND_DESTRUCTIVE: &[&str] = &[
+                "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fprint0",
+                "-fls",
+            ];
+            for arg in args {
+                if FIND_DESTRUCTIVE.contains(arg) {
+                    return false;
+                }
+            }
+            true
         }
+        "git" => matches!(
+            args.first().copied(),
+            Some(
+                "status"
+                    | "diff"
+                    | "log"
+                    | "show"
+                    | "branch"
+                    | "rev-parse"
+                    | "grep"
+                    | "ls-files"
+                    | "remote"
+                    | "blame"
+                    | "describe"
+            )
+        ),
         _ => false,
     }
 }
@@ -757,6 +786,106 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_blocks_sed_in_place_edits_in_all_known_forms() {
+        let manager = PermissionManager::new(PermissionMode::Plan, temp_rules());
+
+        // Read-only invocations should still pass through plan mode.
+        for safe in [
+            "sed -n '1,10p' README.md",
+            "sed 's/foo/bar/' README.md",
+            "sed -nE '/foo/p' README.md",
+        ] {
+            assert_eq!(
+                manager.check(
+                    "Bash",
+                    &ToolInput {
+                        command: Some(safe),
+                        ..ToolInput::default()
+                    }
+                ),
+                PermissionDecision::Allow,
+                "expected `{safe}` to be allowed in plan mode"
+            );
+        }
+
+        // Each of these previously bypassed the `-i ` / `ends_with(\" -i\")`
+        // substring checks and would have permitted in-place edits.
+        for dangerous in [
+            "sed -i 's/foo/bar/' README.md",
+            "sed -i.bak 's/foo/bar/' README.md",
+            "sed -ibak 's/foo/bar/' README.md",
+            "sed --in-place 's/foo/bar/' README.md",
+            "sed --in-place=.bak 's/foo/bar/' README.md",
+            "sed -f script.sed README.md",
+            "sed --file=script.sed README.md",
+        ] {
+            assert_denied_with(
+                manager.check(
+                    "Bash",
+                    &ToolInput {
+                        command: Some(dangerous),
+                        ..ToolInput::default()
+                    },
+                ),
+                dangerous,
+            );
+        }
+    }
+
+    #[test]
+    fn plan_mode_blocks_find_destructive_primaries() {
+        let manager = PermissionManager::new(PermissionMode::Plan, temp_rules());
+
+        assert_eq!(
+            manager.check(
+                "Bash",
+                &ToolInput {
+                    command: Some("find . -name '*.rs'"),
+                    ..ToolInput::default()
+                }
+            ),
+            PermissionDecision::Allow
+        );
+
+        // `-execdir ... +` previously bypassed the `;` and `" -exec "` checks
+        // because there is no semicolon and the flag string differs by one
+        // character.
+        for dangerous in [
+            "find . -delete",
+            "find . -execdir rm {} +",
+            "find . -ok rm {} +",
+            "find . -okdir rm {} +",
+            "find . -fprint /tmp/out",
+            "find . -fprintf /tmp/out '%p\\n'",
+            "find . -fprint0 /tmp/out",
+            "find . -fls /tmp/out",
+        ] {
+            assert_denied_with(
+                manager.check(
+                    "Bash",
+                    &ToolInput {
+                        command: Some(dangerous),
+                        ..ToolInput::default()
+                    },
+                ),
+                dangerous,
+            );
+        }
+    }
+
+    #[test]
+    fn plan_mode_blocks_newline_injected_commands() {
+        let manager = PermissionManager::new(PermissionMode::Plan, temp_rules());
+        assert_denied(manager.check(
+            "Bash",
+            &ToolInput {
+                command: Some("ls\nrm -rf build"),
+                ..ToolInput::default()
+            },
+        ));
+    }
+
+    #[test]
     fn session_rules_override_default_prompting_but_not_deny_rules() {
         let mut manager = PermissionManager::new(PermissionMode::Default, temp_rules());
         assert_eq!(
@@ -874,5 +1003,13 @@ mod tests {
 
     fn assert_denied(decision: PermissionDecision) {
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
+    }
+
+    #[track_caller]
+    fn assert_denied_with(decision: PermissionDecision, context: &str) {
+        assert!(
+            matches!(decision, PermissionDecision::Deny { .. }),
+            "expected `{context}` to be denied, got {decision:?}"
+        );
     }
 }

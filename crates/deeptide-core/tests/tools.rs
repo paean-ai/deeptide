@@ -753,6 +753,21 @@ fn memory_write_tool_rejects_invalid_inputs() {
     );
     assert!(bad_scope.is_error);
     assert_eq!(bad_scope.content, "scope must be project or global");
+
+    let bad_type = MemoryWriteTool.call(
+        serde_json::json!({
+            "title": "Valid Title",
+            "body": "Valid durable memory body.",
+            "reason": "Useful later",
+            "type": "transient"
+        }),
+        &ToolContext::new("."),
+    );
+    assert!(bad_type.is_error);
+    assert_eq!(
+        bad_type.content,
+        "type must be user, feedback, project, or reference"
+    );
 }
 
 #[test]
@@ -906,6 +921,35 @@ fn plan_mode_tools_return_approval_flow_text() {
     assert!(!exit.is_error);
     assert!(exit.content.contains("Plan is ready for review"));
     assert!(exit.content.contains("- Bash: Run cargo test"));
+}
+
+#[test]
+fn exit_plan_mode_echoes_zero_cli_plan_metadata() {
+    let exit = ExitPlanModeTool.call(
+        serde_json::json!({
+            "plan": "1. Inspect code\n2. Run tests",
+            "planFilePath": "/tmp/plan.md",
+            "planWasEdited": true,
+            "allowedPrompts": [
+                {"tool": "Bash", "prompt": "Run cargo test"}
+            ]
+        }),
+        &ToolContext::new("."),
+    );
+
+    assert!(!exit.is_error);
+    assert!(exit.content.contains("Plan file: /tmp/plan.md"));
+    assert!(exit.content.contains("Plan was edited before approval."));
+    assert!(
+        exit.content
+            .contains("Plan:\n1. Inspect code\n2. Run tests")
+    );
+    assert!(exit.content.contains("- Bash: Run cargo test"));
+    assert!(
+        !exit
+            .content
+            .contains("The plan has been written to the plan file")
+    );
 }
 
 #[test]

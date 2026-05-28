@@ -3,7 +3,10 @@ use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentBackend, AgentRequest, AgentResponse, AgentUsage, MessageRole, ToolCall};
+use crate::{
+    AgentBackend, AgentRequest, AgentResponse, AgentUsage, ConversationMessage, MessageRole,
+    ToolCall, ToolResultBlock,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnthropicConfig {
@@ -74,13 +77,7 @@ impl AgentBackend for AnthropicBackend {
         let started = Instant::now();
         let body = build_messages_request(
             &self.config.model,
-            request.messages.iter().map(|message| WireMessage {
-                role: match message.role {
-                    MessageRole::User => "user",
-                    MessageRole::Assistant => "assistant",
-                },
-                content: vec![WireContentBlock::text(&message.content)],
-            }),
+            &request.messages,
             self.config.max_tokens,
         );
         let url = messages_url(&self.config.base_url);
@@ -114,22 +111,41 @@ impl AgentBackend for AnthropicBackend {
 struct MessagesRequest<'a> {
     model: &'a str,
     max_tokens: usize,
-    messages: Vec<WireMessage<'a>>,
+    messages: Vec<WireMessage>,
     tools: Vec<WireTool>,
     stream: bool,
 }
 
-#[derive(Debug, Serialize)]
-struct WireMessage<'a> {
-    role: &'a str,
-    content: Vec<WireContentBlock<'a>>,
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct WireMessage {
+    role: &'static str,
+    content: Vec<WireContentBlock>,
 }
 
-#[derive(Debug, Serialize)]
-struct WireContentBlock<'a> {
-    #[serde(rename = "type")]
-    kind: &'a str,
-    text: &'a str,
+/// Anthropic content block, serialised with `type` discriminator. Covers every
+/// kind we actually round-trip: free-form `text`, assistant-issued `tool_use`
+/// invocations, and the user-side `tool_result` blocks that answer them.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireContentBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(skip_serializing_if = "is_false")]
+        is_error: bool,
+    },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Serialize)]
@@ -139,23 +155,74 @@ struct WireTool {
     input_schema: serde_json::Value,
 }
 
-impl<'a> WireContentBlock<'a> {
-    fn text(text: &'a str) -> Self {
-        Self { kind: "text", text }
-    }
-}
-
 fn build_messages_request<'a>(
     model: &'a str,
-    messages: impl IntoIterator<Item = WireMessage<'a>>,
+    messages: &[ConversationMessage],
     max_tokens: usize,
 ) -> MessagesRequest<'a> {
     MessagesRequest {
         model,
         max_tokens,
-        messages: messages.into_iter().collect(),
+        messages: messages.iter().map(wire_message_from).collect(),
         tools: tool_schemas(),
         stream: false,
+    }
+}
+
+fn wire_message_from(message: &ConversationMessage) -> WireMessage {
+    let role: &'static str = match message.role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+    };
+
+    let mut blocks: Vec<WireContentBlock> = Vec::new();
+
+    if !message.content.is_empty() {
+        blocks.push(WireContentBlock::Text {
+            text: message.content.clone(),
+        });
+    }
+
+    // Assistant turns carry the tool_use blocks the model emitted. We append
+    // them after the text body so the order matches what the model produced
+    // and what Anthropic expects to see echoed back on the next turn.
+    for tool_call in &message.tool_calls {
+        blocks.push(WireContentBlock::ToolUse {
+            id: tool_call.id.clone(),
+            name: tool_call.name.clone(),
+            input: tool_call.input.clone(),
+        });
+    }
+
+    // User turns answering a tool batch carry one tool_result per executed
+    // tool, keyed by the matching tool_use_id. Anthropic rejects the request
+    // if any tool_use lacks a matching tool_result in the very next user
+    // message, so the agent loop must produce them in the same order.
+    for block in &message.tool_results {
+        blocks.push(tool_result_block(block));
+    }
+
+    // Anthropic requires every message to contain at least one content block.
+    // If a caller hands us a fully-empty message we emit a single-space text
+    // block so the request stays valid rather than failing with a cryptic
+    // `content: [] is too short` error.
+    if blocks.is_empty() {
+        blocks.push(WireContentBlock::Text {
+            text: " ".to_owned(),
+        });
+    }
+
+    WireMessage {
+        role,
+        content: blocks,
+    }
+}
+
+fn tool_result_block(block: &ToolResultBlock) -> WireContentBlock {
+    WireContentBlock::ToolResult {
+        tool_use_id: block.tool_use_id.clone(),
+        content: block.content.clone(),
+        is_error: block.is_error,
     }
 }
 
@@ -463,6 +530,18 @@ fn tool_schemas() -> Vec<WireTool> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "plan": {
+                        "type": "string",
+                        "description": "Optional plan content to present for review. Hosts may inject this when the plan was edited or stored outside the active transcript."
+                    },
+                    "planFilePath": {
+                        "type": "string",
+                        "description": "Optional path to the plan file presented to the user."
+                    },
+                    "planWasEdited": {
+                        "type": "boolean",
+                        "description": "Whether the plan was edited before approval."
+                    },
                     "allowedPrompts": {
                         "type": "array",
                         "description": "Categories of actions needed to implement the plan.",
@@ -1025,27 +1104,81 @@ struct ResponseUsage {
 }
 
 fn classify_error(status: u16, body: &str) -> String {
-    let message = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/message")
-                .or_else(|| value.pointer("/message"))
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-        })
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let message = parsed
+        .as_ref()
+        .and_then(error_message_from_json)
         .unwrap_or_else(|| body.trim().to_owned());
+    let error_type = parsed.as_ref().and_then(error_type_from_json);
+    let hint = api_error_hint(status, error_type);
 
     if message.is_empty() {
-        format!("API request failed with HTTP {status}")
+        format!("API request failed with HTTP {status}{hint}")
+    } else if let Some(error_type) = error_type {
+        format!("API request failed with HTTP {status} ({error_type}): {message}{hint}")
     } else {
-        format!("API request failed with HTTP {status}: {message}")
+        format!("API request failed with HTTP {status}: {message}{hint}")
+    }
+}
+
+fn error_message_from_json(value: &serde_json::Value) -> Option<String> {
+    value
+        .pointer("/error/message")
+        .or_else(|| value.pointer("/message"))
+        .or_else(|| value.pointer("/detail"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            value
+                .pointer("/errors/0/message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn error_type_from_json(value: &serde_json::Value) -> Option<&str> {
+    value
+        .pointer("/error/type")
+        .or_else(|| value.pointer("/type"))
+        .or_else(|| value.pointer("/errors/0/type"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|error_type| !error_type.is_empty())
+}
+
+fn api_error_hint(status: u16, error_type: Option<&str>) -> &'static str {
+    let Some(error_type) = error_type else {
+        return match status {
+            401 | 403 => " Check provider credentials and authentication mode.",
+            429 => " Retry after quota resets or reduce request rate.",
+            529 => " Retry later or switch to another available provider/model.",
+            _ => "",
+        };
+    };
+
+    match (status, error_type) {
+        (401 | 403, _) | (_, "authentication_error" | "permission_error") => {
+            " Check provider credentials and authentication mode."
+        }
+        (429, _) | (_, "rate_limit_error") => " Retry after quota resets or reduce request rate.",
+        (529, _) | (_, "overloaded_error") => {
+            " Retry later or switch to another available provider/model."
+        }
+        _ => "",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{WireMessage, build_messages_request, messages_url, parse_messages_response};
+    use super::{
+        WireContentBlock, build_messages_request, classify_error, messages_url,
+        parse_messages_response,
+    };
+    use crate::{ConversationMessage, ToolCall, ToolResultBlock};
     use std::time::Duration;
 
     #[test]
@@ -1127,13 +1260,41 @@ mod tests {
     }
 
     #[test]
+    fn classifies_api_errors_with_type_and_action_hint() {
+        let error = classify_error(
+            429,
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Quota exceeded"}}"#,
+        );
+
+        assert_eq!(
+            error,
+            "API request failed with HTTP 429 (rate_limit_error): Quota exceeded Retry after quota resets or reduce request rate."
+        );
+    }
+
+    #[test]
+    fn classifies_alternate_api_error_shapes() {
+        let auth = classify_error(
+            401,
+            r#"{"errors":[{"type":"authentication_error","message":"bad token"}]}"#,
+        );
+        assert_eq!(
+            auth,
+            "API request failed with HTTP 401 (authentication_error): bad token Check provider credentials and authentication mode."
+        );
+
+        let plain = classify_error(529, "upstream unavailable");
+        assert_eq!(
+            plain,
+            "API request failed with HTTP 529: upstream unavailable Retry later or switch to another available provider/model."
+        );
+    }
+
+    #[test]
     fn messages_request_declares_core_mutating_tool_schemas() {
         let request = build_messages_request(
             "test-model",
-            [WireMessage {
-                role: "user",
-                content: vec![super::WireContentBlock::text("write a file")],
-            }],
+            &[ConversationMessage::user("write a file")],
             100,
         );
 
@@ -1264,6 +1425,24 @@ mod tests {
             serde_json::json!(["title", "body", "reason"])
         );
 
+        let exit_plan_mode = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "ExitPlanMode")
+            .expect("ExitPlanMode tool schema should be declared");
+        assert_eq!(
+            exit_plan_mode.input_schema["properties"]["plan"]["type"],
+            serde_json::json!("string")
+        );
+        assert_eq!(
+            exit_plan_mode.input_schema["properties"]["planFilePath"]["type"],
+            serde_json::json!("string")
+        );
+        assert_eq!(
+            exit_plan_mode.input_schema["properties"]["planWasEdited"]["type"],
+            serde_json::json!("boolean")
+        );
+
         for name in [
             "Agent",
             "MCP",
@@ -1371,5 +1550,154 @@ mod tests {
             task_output.input_schema["required"],
             serde_json::json!(["task_id"])
         );
+    }
+
+    #[test]
+    fn assistant_tool_use_blocks_round_trip_through_wire_message() {
+        let assistant = ConversationMessage::assistant_with_tool_calls(
+            "I will inspect the file.",
+            vec![ToolCall::new(
+                "toolu_1",
+                "Read",
+                serde_json::json!({"file_path": "README.md", "limit": 5}),
+            )],
+        );
+
+        let request = build_messages_request("test-model", &[assistant], 100);
+        let wire = request
+            .messages
+            .first()
+            .expect("assistant message should be present");
+
+        assert_eq!(wire.role, "assistant");
+        assert_eq!(wire.content.len(), 2);
+
+        match &wire.content[0] {
+            WireContentBlock::Text { text } => assert_eq!(text, "I will inspect the file."),
+            other => panic!("expected leading text block, got {other:?}"),
+        }
+        match &wire.content[1] {
+            WireContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_1");
+                assert_eq!(name, "Read");
+                assert_eq!(input["file_path"], "README.md");
+                assert_eq!(input["limit"], 5);
+            }
+            other => panic!("expected tool_use block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_message_with_only_tool_call_omits_empty_text_block() {
+        let assistant = ConversationMessage::assistant_with_tool_calls(
+            "",
+            vec![ToolCall::new(
+                "toolu_silent",
+                "Read",
+                serde_json::json!({"file_path": "README.md"}),
+            )],
+        );
+
+        let request = build_messages_request("test-model", &[assistant], 100);
+        let wire = request.messages.first().expect("assistant message");
+
+        assert_eq!(wire.content.len(), 1);
+        assert!(matches!(wire.content[0], WireContentBlock::ToolUse { .. }));
+    }
+
+    #[test]
+    fn tool_result_user_message_serialises_as_tool_result_blocks() {
+        let user = ConversationMessage::tool_results(vec![
+            ToolResultBlock::new("toolu_1", "alpha\n", false),
+            ToolResultBlock::new("toolu_2", "boom", true),
+        ]);
+
+        let request = build_messages_request("test-model", &[user], 100);
+        let wire = request.messages.first().expect("user message");
+        assert_eq!(wire.role, "user");
+        assert_eq!(wire.content.len(), 2);
+
+        match &wire.content[0] {
+            WireContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "toolu_1");
+                assert_eq!(content, "alpha\n");
+                assert!(!*is_error);
+            }
+            other => panic!("expected tool_result block, got {other:?}"),
+        }
+
+        let serialised = serde_json::to_value(&wire.content[0]).expect("serialise");
+        // is_error is skipped when false to match Anthropic's wire shape.
+        assert!(serialised.get("is_error").is_none());
+
+        match &wire.content[1] {
+            WireContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "toolu_2");
+                assert_eq!(content, "boom");
+                assert!(*is_error);
+            }
+            other => panic!("expected tool_result block, got {other:?}"),
+        }
+
+        let error_serialised = serde_json::to_value(&wire.content[1]).expect("serialise");
+        assert_eq!(error_serialised["is_error"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn empty_message_payload_falls_back_to_single_space_text_block() {
+        let blank = ConversationMessage::assistant("");
+        let request = build_messages_request("test-model", &[blank], 100);
+        let wire = request.messages.first().expect("assistant message");
+        assert_eq!(wire.content.len(), 1);
+        match &wire.content[0] {
+            WireContentBlock::Text { text } => assert_eq!(text, " "),
+            other => panic!("expected fallback text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_conversation_round_trip_preserves_tool_use_and_tool_result_pairing() {
+        let messages = vec![
+            ConversationMessage::user("read notes"),
+            ConversationMessage::assistant_with_tool_calls(
+                "",
+                vec![ToolCall::new(
+                    "toolu_a",
+                    "Read",
+                    serde_json::json!({"file_path": "notes.md"}),
+                )],
+            ),
+            ConversationMessage::tool_results(vec![ToolResultBlock::new(
+                "toolu_a",
+                "file contents",
+                false,
+            )]),
+            ConversationMessage::assistant("done"),
+        ];
+
+        let request = build_messages_request("test-model", &messages, 100);
+        let roles: Vec<&str> = request.messages.iter().map(|msg| msg.role).collect();
+        assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
+
+        // The synthesised tool-result turn must reference the same tool_use_id
+        // that the preceding assistant turn declared. This is exactly the
+        // constraint Anthropic enforces server-side.
+        let assistant_call_id = match &request.messages[1].content[0] {
+            WireContentBlock::ToolUse { id, .. } => id.clone(),
+            other => panic!("expected tool_use in assistant turn, got {other:?}"),
+        };
+        let tool_result_id = match &request.messages[2].content[0] {
+            WireContentBlock::ToolResult { tool_use_id, .. } => tool_use_id.clone(),
+            other => panic!("expected tool_result in user turn, got {other:?}"),
+        };
+        assert_eq!(assistant_call_id, tool_result_id);
     }
 }
