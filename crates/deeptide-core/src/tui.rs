@@ -413,9 +413,12 @@ fn append_wrapped_segment(
 fn wrap_line_with_cursor(line: &str, width: usize, cursor_cell: usize) -> WrappedLine {
     if display_width(line) <= width {
         let cursor_col = cursor_cell.min(display_width(line));
+        let mut lines = vec![line.to_owned()];
+        let (cursor_row, cursor_col) =
+            normalize_cursor_position(&mut lines, width, cursor_cell, 0, cursor_col);
         return WrappedLine {
-            lines: vec![line.to_owned()],
-            cursor_row: 0,
+            lines,
+            cursor_row,
             cursor_col,
         };
     }
@@ -474,11 +477,31 @@ fn wrap_line_with_cursor(line: &str, width: usize, cursor_cell: usize) -> Wrappe
     let last_row = lines.len().saturating_sub(1);
     let fallback_col = lines.last().map(|line| display_width(line)).unwrap_or(0);
     let (cursor_row, cursor_col) = cursor_position.unwrap_or((last_row, fallback_col));
+    let (cursor_row, cursor_col) =
+        normalize_cursor_position(&mut lines, width, cursor_cell, cursor_row, cursor_col);
     WrappedLine {
         lines,
         cursor_row,
         cursor_col,
     }
+}
+
+fn normalize_cursor_position(
+    lines: &mut Vec<String>,
+    width: usize,
+    cursor_cell: usize,
+    cursor_row: usize,
+    cursor_col: usize,
+) -> (usize, usize) {
+    if cursor_cell == usize::MAX || cursor_col < width {
+        return (cursor_row, cursor_col);
+    }
+
+    let next_row = cursor_row + 1;
+    if next_row == lines.len() {
+        lines.push(String::new());
+    }
+    (next_row, 0)
 }
 
 fn pad_to_width(mut value: String, width: usize) -> String {
@@ -664,6 +687,57 @@ mod tests {
         );
         assert_eq!(layout.cursor_row, 1);
         assert_eq!(layout.cursor_col, 2);
+    }
+
+    #[test]
+    fn input_bar_moves_cursor_to_next_row_at_exact_width_boundary() {
+        let input = InputBar {
+            prompt: String::new(),
+            value: "abcdefghijkl".to_owned(),
+            cursor: 12,
+            hint: None,
+        };
+
+        let layout = input.layout(12);
+
+        assert_eq!(layout.lines, vec!["abcdefghijkl".to_owned(), String::new()]);
+        assert_eq!(layout.cursor_row, 1);
+        assert_eq!(layout.cursor_col, 0);
+    }
+
+    #[test]
+    fn input_bar_keeps_boundary_cursor_before_wrapped_suffix() {
+        let input = InputBar {
+            prompt: String::new(),
+            value: "abcdefghijklm".to_owned(),
+            cursor: 12,
+            hint: None,
+        };
+
+        let layout = input.layout(12);
+
+        assert_eq!(
+            layout.lines,
+            vec!["abcdefghijkl".to_owned(), "m".to_owned()]
+        );
+        assert_eq!(layout.cursor_row, 1);
+        assert_eq!(layout.cursor_col, 0);
+    }
+
+    #[test]
+    fn input_bar_moves_wide_text_cursor_to_next_row_at_boundary() {
+        let input = InputBar {
+            prompt: String::new(),
+            value: "你好世界测试".to_owned(),
+            cursor: 6,
+            hint: None,
+        };
+
+        let layout = input.layout(12);
+
+        assert_eq!(layout.lines, vec!["你好世界测试".to_owned(), String::new()]);
+        assert_eq!(layout.cursor_row, 1);
+        assert_eq!(layout.cursor_col, 0);
     }
 
     #[test]
