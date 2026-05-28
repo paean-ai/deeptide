@@ -1649,10 +1649,68 @@ fn api_error_hint(status: u16, error_type: Option<&str>) -> &'static str {
 mod tests {
     use super::{
         WireContentBlock, apply_thinking, build_messages_request, classify_error, messages_url,
-        parse_messages_response,
+        parse_messages_response, tool_schemas,
     };
     use crate::{ConversationMessage, ThinkingConfig, ToolCall, ToolChoice, ToolResultBlock};
     use std::time::Duration;
+
+    #[test]
+    fn registry_and_schemas_list_identical_tools() {
+        use std::collections::BTreeSet;
+        let registered: BTreeSet<&str> = crate::ToolRegistry::with_builtin_tools()
+            .names()
+            .into_iter()
+            .collect();
+        let advertised: BTreeSet<&str> = tool_schemas().iter().map(|tool| tool.name).collect();
+
+        // Every registered tool must be advertised to the model, and every
+        // advertised tool must be runnable — otherwise the model is offered a
+        // tool it cannot call, or a registered tool it is never told about.
+        let registered_only: Vec<&&str> = registered.difference(&advertised).collect();
+        let advertised_only: Vec<&&str> = advertised.difference(&registered).collect();
+        assert!(
+            registered_only.is_empty(),
+            "registered tools missing an API schema: {registered_only:?}"
+        );
+        assert!(
+            advertised_only.is_empty(),
+            "API schemas with no registered tool: {advertised_only:?}"
+        );
+    }
+
+    #[test]
+    fn tool_schemas_have_unique_names() {
+        use std::collections::BTreeSet;
+        let schemas = tool_schemas();
+        let unique: BTreeSet<&str> = schemas.iter().map(|tool| tool.name).collect();
+        assert_eq!(
+            unique.len(),
+            schemas.len(),
+            "duplicate tool name in API schemas"
+        );
+    }
+
+    #[test]
+    fn tool_schemas_are_well_formed() {
+        for tool in tool_schemas() {
+            assert!(!tool.name.trim().is_empty(), "tool has an empty name");
+            assert!(
+                !tool.description.trim().is_empty(),
+                "tool {} has no description",
+                tool.name
+            );
+            assert_eq!(
+                tool.input_schema["type"], "object",
+                "tool {} input_schema must be an object",
+                tool.name
+            );
+            assert!(
+                tool.input_schema.get("properties").is_some(),
+                "tool {} input_schema must declare properties",
+                tool.name
+            );
+        }
+    }
 
     #[test]
     fn messages_url_normalizes_trailing_slash() {
