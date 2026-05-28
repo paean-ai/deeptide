@@ -1,6 +1,8 @@
 use deeptide_core::{
-    AgentBackend, AgentRequest, AgentResponse, AgentUsage, ReplEvent, ReplSession, ToolCall,
+    AgentBackend, AgentRequest, AgentResponse, AgentUsage, PermissionManager, PermissionMode,
+    PermissionRules, ReplEvent, ReplSession, ToolCall,
 };
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn repl_routes_plain_input_to_agent_loop() {
@@ -118,6 +120,453 @@ fn repl_cost_command_uses_agent_loop_usage() {
 }
 
 #[test]
+fn repl_model_command_lists_current_model_and_aliases() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_model("deepseek-v4-flash");
+
+    let output = only_output(repl.submit("/model"));
+
+    assert!(output.contains("Current model: deepseek-v4-flash"));
+    assert!(output.contains("Aliases:"));
+    assert!(output.contains("deepseek-v4-pro <- pro, v4, v4-pro"));
+    assert!(output.contains("Usage: /model <name-or-alias>"));
+}
+
+#[test]
+fn repl_model_command_switches_model_and_resolves_aliases() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        only_output(repl.submit("/model flash")),
+        "Model: deepseek-v4-flash (alias flash)"
+    );
+    assert_eq!(repl.agent_loop().model(), "deepseek-v4-flash");
+
+    assert_eq!(
+        only_output(repl.submit("/m custom-model")),
+        "Model: custom-model"
+    );
+    assert_eq!(repl.agent_loop().model(), "custom-model");
+}
+
+#[test]
+fn repl_model_command_rejects_extra_arguments() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/model one two"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /model <model-name | flash | pro>"
+        ))]
+    );
+}
+
+#[test]
+fn repl_provider_command_reports_status_and_profiles() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    let status = only_output(repl.submit("/provider"));
+    assert!(status.contains("Current session provider profile: legacy"));
+    assert!(status.contains("ZERO_CLI_*"));
+
+    let listed = only_output(repl.submit("/profiles list"));
+    assert!(listed.contains("* legacy"));
+    assert!(listed.contains("deepseek  https://api.deepseek.com"));
+    assert!(listed.contains("paean  https://api.paean.ai"));
+}
+
+#[test]
+fn repl_provider_command_switches_builtin_profiles() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        only_output(repl.submit("/provider use paean-ai")),
+        "Active provider profile: paean (recorded for this REPL session; launch configuration controls the current model client)"
+    );
+    let status = only_output(repl.submit("/status"));
+    assert!(status.contains("Provider: paean"));
+
+    assert_eq!(
+        only_output(repl.submit("/provider use official")),
+        "Active provider profile: deepseek (recorded for this REPL session; launch configuration controls the current model client)"
+    );
+    let listed = only_output(repl.submit("/provider list"));
+    assert!(listed.contains("* deepseek"));
+}
+
+#[test]
+fn repl_provider_command_rejects_unknown_and_invalid_arguments() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/provider use"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /provider [list | use <name|deepseek|paean> | status]"
+        ))]
+    );
+    assert_eq!(
+        repl.submit("/provider use one two"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /provider use <name|deepseek|paean>"
+        ))]
+    );
+    assert_eq!(
+        repl.submit("/provider use unknown"),
+        vec![ReplEvent::Output(String::from(
+            "Unknown provider profile `unknown`. Use `/provider list`."
+        ))]
+    );
+}
+
+#[test]
+fn repl_status_command_reports_session_shape() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut repl = ReplSession::new(Box::new(StaticBackend))
+        .with_cwd(temp.path())
+        .with_model("deepseek-v4-flash")
+        .with_permission_mode(PermissionMode::Plan)
+        .with_max_turns(7);
+    let _ = repl.submit("hello");
+
+    let output = only_output(repl.submit("/status"));
+
+    assert!(output.contains("Deeptide session status"));
+    assert!(output.contains("Model:    deepseek-v4-flash"));
+    assert!(output.contains("+ dirs:   (none)"));
+    assert!(output.contains("Branch:   (no git)"));
+    assert!(output.contains("Provider: legacy"));
+    assert!(output.contains("Session:  (not persisted)"));
+    assert!(output.contains("Turns:    1 / 7"));
+    assert!(output.contains("Messages: 2"));
+    assert!(output.contains("Context:  ~"));
+    assert!(output.contains("Mode:     plan"));
+    assert!(output.contains("In/Out:   4 / 2"));
+    assert!(output.contains("Cache:    warming"));
+    assert!(output.contains("Cost:     $"));
+}
+
+#[test]
+fn repl_context_command_reports_loaded_context_shape() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agent_dir = temp.path().join(".deeptide").join("agents");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::write(agent_dir.join("reviewer.md"), "# Reviewer\n").expect("agent definition");
+
+    let mut repl = ReplSession::new(Box::new(StaticBackend))
+        .with_cwd(temp.path())
+        .with_model("deepseek-v4-flash-q4k")
+        .with_permission_mode(PermissionMode::AcceptEdits);
+    let _ = repl.submit("hello");
+
+    let output = only_output(repl.submit("/context"));
+
+    assert!(output.contains("Session context"));
+    assert!(output.contains(&format!("CWD:      {}", temp.path().display())));
+    assert!(output.contains("+ dirs:   (none)"));
+    assert!(output.contains("Memory:"));
+    assert!(output.contains("Agents:   reviewer"));
+    assert!(output.contains("Settings:"));
+    assert!(output.contains("runtime  deepseek-v4-flash-q4k"));
+    assert!(output.contains("mode     accept-edits"));
+    assert!(output.contains("Tools:"));
+    assert!(output.contains("Agent"));
+    assert!(output.contains("Window:"));
+    assert!(output.contains("/ 1,000,000)"));
+}
+
+#[test]
+fn repl_add_dir_lists_additional_context_dirs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let extra = temp.path().join("extra");
+    std::fs::create_dir(&extra).expect("extra dir");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    assert_eq!(
+        repl.submit("/add-dir"),
+        vec![ReplEvent::Output(String::from("No additional dirs."))]
+    );
+
+    assert_eq!(
+        only_output(repl.submit("/add-dir extra")),
+        format!("Added {}", extra.display())
+    );
+    assert_eq!(
+        only_output(repl.submit("/add_dir extra")),
+        format!("Added {}", extra.display())
+    );
+
+    let listed = only_output(repl.submit("/adddir"));
+    assert_eq!(listed, format!("  {}", extra.display()));
+
+    let status = only_output(repl.submit("/status"));
+    assert!(status.contains(&format!("+ dirs:   {}", extra.display())));
+    let context = only_output(repl.submit("/context"));
+    assert!(context.contains(&format!("+ dirs:   {}", extra.display())));
+}
+
+#[test]
+fn repl_add_dir_rejects_missing_and_invalid_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("file.txt"), "not a directory").expect("file");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    assert_eq!(
+        repl.submit("/add-dir one two"),
+        vec![ReplEvent::Output(String::from("Usage: /add-dir <path>"))]
+    );
+    assert_eq!(
+        repl.submit("/add-dir file.txt"),
+        vec![ReplEvent::Output(format!(
+            "Not a directory: {}",
+            temp.path().join("file.txt").display()
+        ))]
+    );
+}
+
+#[test]
+fn repl_retry_resubmits_last_user_prompt() {
+    let mut repl = ReplSession::new(Box::new(EchoUserBackend));
+
+    assert_eq!(
+        repl.submit("please check status"),
+        vec![ReplEvent::Output(String::from("echo: please check status"))]
+    );
+
+    let retry = repl.submit("/retry");
+
+    assert_eq!(
+        retry,
+        vec![
+            ReplEvent::Output(String::from("Retrying: please check status")),
+            ReplEvent::Output(String::from("echo: please check status")),
+        ]
+    );
+    assert_eq!(repl.agent_loop().messages().len(), 4);
+}
+
+#[test]
+fn repl_retry_reports_missing_prompt() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/retry"),
+        vec![ReplEvent::Output(String::from(
+            "No previous prompt to retry."
+        ))]
+    );
+}
+
+#[test]
+fn repl_copy_writes_last_assistant_reply() {
+    let copied = Arc::new(Mutex::new(Vec::new()));
+    let copied_for_writer = Arc::clone(&copied);
+    let mut repl =
+        ReplSession::new(Box::new(StaticBackend)).with_clipboard_writer(move |content| {
+            copied_for_writer
+                .lock()
+                .expect("clipboard capture lock")
+                .push(content.to_owned());
+            Ok(())
+        });
+
+    repl.submit("hello");
+    let output = only_output(repl.submit("/copy"));
+
+    assert_eq!(output, "Copied last reply to clipboard (15 chars, 1 line).");
+    assert_eq!(
+        copied.lock().expect("clipboard capture lock").as_slice(),
+        ["assistant reply"]
+    );
+}
+
+#[test]
+fn repl_copy_supports_yank_alias() {
+    let copied = Arc::new(Mutex::new(Vec::new()));
+    let copied_for_writer = Arc::clone(&copied);
+    let mut repl =
+        ReplSession::new(Box::new(StaticBackend)).with_clipboard_writer(move |content| {
+            copied_for_writer
+                .lock()
+                .expect("clipboard capture lock")
+                .push(content.to_owned());
+            Ok(())
+        });
+
+    repl.submit("hello");
+    let output = only_output(repl.submit("/yank"));
+
+    assert_eq!(output, "Copied last reply to clipboard (15 chars, 1 line).");
+    assert_eq!(
+        copied.lock().expect("clipboard capture lock").as_slice(),
+        ["assistant reply"]
+    );
+}
+
+#[test]
+fn repl_copy_reports_missing_reply() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_clipboard_writer(|_| {
+        panic!("clipboard writer should not be called without an assistant reply")
+    });
+
+    assert_eq!(
+        repl.submit("/copy"),
+        vec![ReplEvent::Output(String::from(
+            "No assistant reply yet to copy."
+        ))]
+    );
+}
+
+#[test]
+fn repl_copy_reports_clipboard_errors() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend))
+        .with_clipboard_writer(|_| Err(String::from("clipboard unavailable")));
+
+    repl.submit("hello");
+
+    assert_eq!(
+        repl.submit("/copy"),
+        vec![ReplEvent::Output(String::from(
+            "/copy: clipboard unavailable"
+        ))]
+    );
+}
+
+#[test]
+fn repl_export_writes_session_jsonl() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let export_path = temp.path().join("session.jsonl");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    repl.submit("hello");
+    let output = only_output(repl.submit(&format!("/export {}", export_path.display())));
+
+    assert_eq!(
+        output,
+        format!("Exported 2 messages -> {}", export_path.display())
+    );
+    let exported = std::fs::read_to_string(export_path).expect("exported transcript");
+    let lines = exported.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    let user: serde_json::Value = serde_json::from_str(lines[0]).expect("user json line");
+    let assistant: serde_json::Value = serde_json::from_str(lines[1]).expect("assistant json line");
+    assert_eq!(user["type"], "user");
+    assert_eq!(user["message"]["content"], "hello");
+    assert_eq!(assistant["type"], "assistant");
+    assert_eq!(assistant["message"]["content"], "assistant reply");
+}
+
+#[test]
+fn repl_export_rejects_extra_arguments() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/export one two"),
+        vec![ReplEvent::Output(String::from("Usage: /export [path]"))]
+    );
+}
+
+#[test]
+fn repl_diff_reports_empty_workspace_diff() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    git(temp.path(), ["init"]);
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    assert_eq!(
+        repl.submit("/diff"),
+        vec![ReplEvent::Output(String::from(
+            "No pending git diff in workspace."
+        ))]
+    );
+}
+
+#[test]
+fn repl_diff_reports_pending_workspace_diff() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    git(temp.path(), ["init"]);
+    std::fs::write(temp.path().join("notes.txt"), "before\n").expect("write initial file");
+    git(temp.path(), ["add", "notes.txt"]);
+    std::fs::write(temp.path().join("notes.txt"), "after\n").expect("modify tracked file");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    let output = only_output(repl.submit("/diff"));
+
+    assert!(output.starts_with("Pending workspace diff:\n"));
+    assert!(output.contains("diff --git a/notes.txt b/notes.txt"));
+    assert!(output.contains("-before"));
+    assert!(output.contains("+after"));
+}
+
+#[test]
+fn repl_branch_lists_creates_and_switches_branches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    git(temp.path(), ["init"]);
+    git(
+        temp.path(),
+        ["config", "user.email", "deeptide@example.invalid"],
+    );
+    git(temp.path(), ["config", "user.name", "Deeptide Tests"]);
+    std::fs::write(temp.path().join("notes.txt"), "hello\n").expect("write initial file");
+    git(temp.path(), ["add", "notes.txt"]);
+    git(temp.path(), ["commit", "-m", "initial"]);
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    let listed = only_output(repl.submit("/branch"));
+    assert!(listed.contains("*"));
+    assert!(listed.contains("master") || listed.contains("main"));
+
+    let created = only_output(repl.submit("/branch -b feature/test"));
+    assert!(created.contains("feature/test"));
+    assert_eq!(
+        git_stdout(temp.path(), ["branch", "--show-current"]),
+        "feature/test"
+    );
+
+    let default_branch = if listed.contains("master") {
+        "master"
+    } else {
+        "main"
+    };
+    let switched = only_output(repl.submit(&format!("/branch {default_branch}")));
+    assert!(switched.contains(default_branch));
+    assert_eq!(
+        git_stdout(temp.path(), ["branch", "--show-current"]),
+        default_branch
+    );
+}
+
+#[test]
+fn repl_branch_rejects_invalid_arguments() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/branch one two"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /branch [name | -b name]"
+        ))]
+    );
+    assert_eq!(
+        repl.submit("/branch -b"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /branch [name | -b name]"
+        ))]
+    );
+}
+
+#[test]
+fn repl_honors_max_turns_setting() {
+    let mut repl = ReplSession::new(Box::new(AlwaysToolBackend)).with_max_turns(1);
+
+    let events = repl.submit("keep going");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            ReplEvent::Output(output) if output == "Maximum turns reached."
+        )
+    }));
+    assert_eq!(repl.agent_loop().max_turns(), 1);
+}
+
+#[test]
 fn repl_clear_resets_agent_loop_state() {
     let mut repl = ReplSession::new(Box::new(StaticBackend));
     let _ = repl.submit("hello");
@@ -153,11 +602,82 @@ fn repl_write_command_writes_files() {
     );
 }
 
+#[test]
+fn repl_permission_command_lists_adds_and_removes_rules() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let rules_path = temp.path().join("permissions.json");
+    let permission_manager = PermissionManager::new(
+        PermissionMode::Default,
+        PermissionRules::load(Some(rules_path.clone())).expect("rules should load"),
+    );
+    let mut repl =
+        ReplSession::new(Box::new(StaticBackend)).with_permission_manager(permission_manager);
+
+    let empty = only_output(repl.submit("/permission"));
+    assert!(empty.contains("Permission rules:"));
+    assert!(empty.contains("  allow:\n    (none)"));
+    assert!(empty.contains("  deny:\n    (none)"));
+
+    assert_eq!(
+        only_output(repl.submit("/permission --allow Bash(cargo test*)")),
+        "+allow Bash(cargo test*)"
+    );
+    assert_eq!(
+        only_output(repl.submit("/permission --deny Write:secrets*")),
+        "+deny Write:secrets*"
+    );
+    assert_eq!(
+        only_output(repl.submit("/permission --allow npm:*")),
+        "+allow npm:*"
+    );
+
+    let listed = only_output(repl.submit("/permission"));
+    assert!(listed.contains("Bash(cargo test*)"));
+    assert!(listed.contains("Write(secrets*)"));
+    assert!(listed.contains("npm:*"));
+
+    assert_eq!(
+        only_output(repl.submit("/permission --remove cargo test*")),
+        "Removed cargo test*"
+    );
+    let after_remove = only_output(repl.submit("/permission"));
+    assert!(!after_remove.contains("Bash(cargo test*)"));
+    assert!(after_remove.contains("Write(secrets*)"));
+
+    let stored = std::fs::read_to_string(rules_path).expect("rules should be saved");
+    assert!(stored.contains("secrets*"));
+    assert!(!stored.contains("cargo test*"));
+}
+
 fn only_output(events: Vec<ReplEvent>) -> String {
     match events.as_slice() {
         [ReplEvent::Output(output)] => output.clone(),
         other => panic!("expected one output event, got {other:?}"),
     }
+}
+
+fn git<const N: usize>(cwd: &std::path::Path, args: [&str; N]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .status()
+        .expect("git command should start");
+    assert!(status.success(), "git command should succeed");
+}
+
+fn git_stdout<const N: usize>(cwd: &std::path::Path, args: [&str; N]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .expect("git command should start");
+    assert!(output.status.success(), "git command should succeed");
+    String::from_utf8(output.stdout)
+        .expect("git stdout should be utf8")
+        .trim()
+        .to_owned()
 }
 
 struct StaticBackend;
@@ -168,6 +688,37 @@ impl AgentBackend for StaticBackend {
             content: String::from("assistant reply"),
             usage: Some(AgentUsage::new(4, 2, 0, 0, 10)),
             tool_calls: Vec::new(),
+        })
+    }
+}
+
+struct EchoUserBackend;
+
+impl AgentBackend for EchoUserBackend {
+    fn respond(&mut self, request: AgentRequest) -> Result<AgentResponse, String> {
+        let prompt = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, deeptide_core::MessageRole::User))
+            .map(|message| message.content.as_str())
+            .unwrap_or_default();
+        Ok(AgentResponse::text(format!("echo: {prompt}")))
+    }
+}
+
+struct AlwaysToolBackend;
+
+impl AgentBackend for AlwaysToolBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        Ok(AgentResponse {
+            content: String::from("assistant with tool"),
+            usage: None,
+            tool_calls: vec![ToolCall::new(
+                "toolu_read",
+                "Read",
+                serde_json::json!({"file_path": "missing.txt"}),
+            )],
         })
     }
 }

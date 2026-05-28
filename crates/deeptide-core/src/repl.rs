@@ -4,8 +4,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, ClearCommand,
     CommandCompletionSource, CommandContext, CommandResult, CompactCommand, CostCommand,
-    HelpCommand, MemoryCommand, NewCommand, PermissionMode, RememberCommand, SlashCommand, Tool,
-    ToolContext, ToolRegistry, ToolResultSummaryFormatter, WriteTool,
+    CostTracker, HelpCommand, MemoryCommand, NewCommand, PermissionManager, PermissionMode,
+    PermissionRules, RememberCommand, Rule, SlashCommand, Tool, ToolContext, ToolRegistry,
+    ToolResultSummaryFormatter, WriteTool,
+    agent_loop::{ConversationMessage, MessageRole},
+    memory::MemorySystem,
+    tools::{ClipboardTool, model_context_window},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,11 +18,42 @@ pub enum ReplEvent {
     Exit,
 }
 
+type ClipboardWriter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderProfile {
+    Legacy,
+    DeepSeek,
+    Paean,
+}
+
+impl ProviderProfile {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "legacy" | "env" => Some(Self::Legacy),
+            "deepseek" | "official" | "direct" | "default" => Some(Self::DeepSeek),
+            "paean" | "paean-ai" | "multimodal" => Some(Self::Paean),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::DeepSeek => "deepseek",
+            Self::Paean => "paean",
+        }
+    }
+}
+
 pub struct ReplSession {
     agent_loop: AgentLoop,
     cost_display_enabled: Arc<AtomicBool>,
     tool_registry: ToolRegistry,
     tool_context: ToolContext,
+    clipboard_writer: ClipboardWriter,
+    additional_dirs: Vec<std::path::PathBuf>,
+    provider_profile: ProviderProfile,
 }
 
 impl ReplSession {
@@ -30,6 +65,9 @@ impl ReplSession {
             tool_context: ToolContext::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
+            clipboard_writer: Arc::new(write_to_system_clipboard),
+            additional_dirs: Vec::new(),
+            provider_profile: ProviderProfile::Legacy,
         }
     }
 
@@ -46,6 +84,32 @@ impl ReplSession {
 
     pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
         self.agent_loop = self.agent_loop.with_permission_mode(mode);
+        self
+    }
+
+    pub fn with_permission_manager(mut self, permission_manager: PermissionManager) -> Self {
+        self.agent_loop = self.agent_loop.with_permission_manager(permission_manager);
+        self
+    }
+
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.agent_loop = self.agent_loop.with_max_turns(max_turns);
+        self
+    }
+
+    pub fn with_subagent_backend_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static,
+    {
+        self.agent_loop = self.agent_loop.with_subagent_backend_factory(factory);
+        self
+    }
+
+    pub fn with_clipboard_writer<F>(mut self, writer: F) -> Self
+    where
+        F: Fn(&str) -> Result<(), String> + Send + Sync + 'static,
+    {
+        self.clipboard_writer = Arc::new(writer);
         self
     }
 
@@ -100,10 +164,21 @@ impl ReplSession {
             }
             "compact" | "compress" => CompactCommand.execute(args, &context),
             "cost" => CostCommand.execute(args, &context),
+            "model" | "m" => self.execute_model_command(args),
+            "provider" | "profiles" => self.execute_provider_command(args),
+            "status" => self.execute_status_command(args),
+            "context" | "ctx" => self.execute_context_command(args),
+            "retry" | "r" | "again" => return self.execute_retry_command(args),
+            "copy" | "yank" => self.execute_copy_command(args),
+            "export" => self.execute_export_command(args),
+            "diff" => self.execute_diff_command(args),
+            "branch" => self.execute_branch_command(args),
+            "add-dir" | "add_dir" | "adddir" => self.execute_add_dir_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
             "remember" => RememberCommand.execute(args, &context),
+            "permission" | "perm" | "permissions" => self.execute_permission_command(args),
             _ => CommandResult::Text(format!(
                 "Unknown command: /{name}\nType /help for the full list."
             )),
@@ -150,6 +225,274 @@ impl ReplSession {
             &self.tool_context,
         );
         CommandResult::Text(result.content)
+    }
+
+    fn execute_status_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /status"));
+        }
+
+        CommandResult::Text(render_status(
+            &self.agent_loop,
+            &self.tool_context.cwd,
+            &self.additional_dirs,
+            self.provider_profile,
+        ))
+    }
+
+    fn execute_provider_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() || trimmed == "status" {
+            return CommandResult::Text(render_provider_status(self.provider_profile));
+        }
+
+        if trimmed == "list" {
+            return CommandResult::Text(render_provider_list(self.provider_profile));
+        }
+
+        if let Some(raw) = trimmed.strip_prefix("use ") {
+            let raw = raw.trim();
+            if raw.is_empty() || raw.split_whitespace().count() > 1 {
+                return CommandResult::Text(String::from(
+                    "Usage: /provider use <name|deepseek|paean>",
+                ));
+            }
+            let Some(profile) = ProviderProfile::parse(raw) else {
+                return CommandResult::Text(format!(
+                    "Unknown provider profile `{raw}`. Use `/provider list`."
+                ));
+            };
+            self.provider_profile = profile;
+            return CommandResult::Text(format!(
+                "Active provider profile: {} (recorded for this REPL session; launch configuration controls the current model client)",
+                profile.name()
+            ));
+        }
+
+        CommandResult::Text(String::from(
+            "Usage: /provider [list | use <name|deepseek|paean> | status]",
+        ))
+    }
+
+    fn execute_model_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            return CommandResult::Text(render_model_status(self.agent_loop.model()));
+        }
+        if trimmed.split_whitespace().count() > 1 {
+            return CommandResult::Text(String::from("Usage: /model <model-name | flash | pro>"));
+        }
+
+        let resolved = resolve_model_alias(trimmed);
+        self.agent_loop.set_model(resolved.clone());
+        if resolved == trimmed {
+            CommandResult::Text(format!("Model: {resolved}"))
+        } else {
+            CommandResult::Text(format!("Model: {resolved} (alias {trimmed})"))
+        }
+    }
+
+    fn execute_retry_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        if !args.trim().is_empty() {
+            return vec![ReplEvent::Output(String::from("Usage: /retry"))];
+        }
+
+        let Some(prompt) = last_user_prompt(self.agent_loop.messages()) else {
+            return vec![ReplEvent::Output(String::from(
+                "No previous prompt to retry.",
+            ))];
+        };
+
+        let preview = truncate_chars(&prompt, 60);
+        let mut events = vec![ReplEvent::Output(format!("Retrying: {preview}"))];
+        events.extend(
+            self.agent_loop
+                .run(prompt)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    fn execute_context_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /context"));
+        }
+
+        CommandResult::Text(render_context(
+            &self.agent_loop,
+            &self.tool_context.cwd,
+            &self.additional_dirs,
+            self.tool_registry.names(),
+        ))
+    }
+
+    fn execute_copy_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /copy"));
+        }
+
+        let Some(reply) = last_assistant_reply(self.agent_loop.messages()) else {
+            return CommandResult::Text(String::from("No assistant reply yet to copy."));
+        };
+
+        if reply.is_empty() {
+            return CommandResult::Text(String::from(
+                "Last assistant turn had no text content (tool calls only).",
+            ));
+        }
+
+        match (self.clipboard_writer)(&reply) {
+            Ok(()) => CommandResult::Text(render_copy_summary(&reply)),
+            Err(error) => CommandResult::Text(format!("/copy: {error}")),
+        }
+    }
+
+    fn execute_export_command(&self, args: &str) -> CommandResult {
+        let path = match export_path(args, &self.tool_context.cwd) {
+            Ok(path) => path,
+            Err(message) => return CommandResult::Text(message),
+        };
+
+        let content = render_session_jsonl(self.agent_loop.messages());
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            return CommandResult::Text(format!(
+                "/export: failed to create {}: {error}",
+                parent.display()
+            ));
+        }
+
+        match std::fs::write(&path, content) {
+            Ok(()) => CommandResult::Text(format!(
+                "Exported {} messages -> {}",
+                self.agent_loop.messages().len(),
+                path.display()
+            )),
+            Err(error) => CommandResult::Text(format!(
+                "/export: failed to write {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
+    fn execute_diff_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /diff"));
+        }
+
+        CommandResult::Text(render_workspace_diff(&self.tool_context.cwd))
+    }
+
+    fn execute_branch_command(&self, args: &str) -> CommandResult {
+        match branch_args(args) {
+            Ok(BranchAction::List) => CommandResult::Text(render_git_command(
+                &self.tool_context.cwd,
+                ["branch"].as_slice(),
+                "(no branches)",
+            )),
+            Ok(BranchAction::Create(name)) => CommandResult::Text(render_git_command(
+                &self.tool_context.cwd,
+                ["checkout", "-b", name.as_str()].as_slice(),
+                "",
+            )),
+            Ok(BranchAction::Checkout(name)) => CommandResult::Text(render_git_command(
+                &self.tool_context.cwd,
+                ["checkout", name.as_str()].as_slice(),
+                "",
+            )),
+            Err(message) => CommandResult::Text(message),
+        }
+    }
+
+    fn execute_add_dir_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            return if self.additional_dirs.is_empty() {
+                CommandResult::Text(String::from("No additional dirs."))
+            } else {
+                CommandResult::Text(
+                    self.additional_dirs
+                        .iter()
+                        .map(|path| format!("  {}", path.display()))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            };
+        }
+
+        if trimmed.split_whitespace().count() > 1 {
+            return CommandResult::Text(String::from("Usage: /add-dir <path>"));
+        }
+
+        let path = resolve_session_dir(trimmed, &self.tool_context.cwd);
+        if !path.is_dir() {
+            return CommandResult::Text(format!("Not a directory: {}", path.display()));
+        }
+
+        if !self
+            .additional_dirs
+            .iter()
+            .any(|existing| existing == &path)
+        {
+            self.additional_dirs.push(path.clone());
+        }
+        CommandResult::Text(format!("Added {}", path.display()))
+    }
+
+    fn execute_permission_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            return CommandResult::Text(render_permission_rules(
+                self.agent_loop.permission_rules(),
+            ));
+        }
+
+        if let Some(raw) = trimmed.strip_prefix("--allow ") {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return CommandResult::Text(String::from(
+                    "Usage: /permission [--allow Tool(pattern) | --deny Tool(pattern) | --remove pattern]",
+                ));
+            }
+            let (tool, pattern) = parse_permission_rule_pattern(raw);
+            return match self.agent_loop.add_permission_rule(true, pattern, tool) {
+                Ok(()) => CommandResult::Text(format!("+allow {raw}")),
+                Err(error) => CommandResult::Text(format!("Failed: {error}")),
+            };
+        }
+
+        if let Some(raw) = trimmed.strip_prefix("--deny ") {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return CommandResult::Text(String::from(
+                    "Usage: /permission [--allow Tool(pattern) | --deny Tool(pattern) | --remove pattern]",
+                ));
+            }
+            let (tool, pattern) = parse_permission_rule_pattern(raw);
+            return match self.agent_loop.add_permission_rule(false, pattern, tool) {
+                Ok(()) => CommandResult::Text(format!("+deny {raw}")),
+                Err(error) => CommandResult::Text(format!("Failed: {error}")),
+            };
+        }
+
+        if let Some(raw) = trimmed.strip_prefix("--remove ") {
+            let pattern = raw.trim();
+            if pattern.is_empty() {
+                return CommandResult::Text(String::from(
+                    "Usage: /permission [--allow Tool(pattern) | --deny Tool(pattern) | --remove pattern]",
+                ));
+            }
+            return match self.agent_loop.remove_permission_rule(pattern) {
+                Ok(()) => CommandResult::Text(format!("Removed {pattern}")),
+                Err(error) => CommandResult::Text(format!("Failed: {error}")),
+            };
+        }
+
+        CommandResult::Text(String::from(
+            "Usage: /permission [--allow Tool(pattern) | --deny Tool(pattern) | --remove pattern]",
+        ))
     }
 
     fn command_context(&self) -> CommandContext {
@@ -249,6 +592,66 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
         CommandCompletionSource::from_command(&CompactCommand),
         CommandCompletionSource::from_command(&CostCommand),
         CommandCompletionSource::new(
+            "provider",
+            ["profiles"],
+            "Show or switch named provider profiles",
+            "/provider [list | use <name|deepseek|paean> | status]",
+        ),
+        CommandCompletionSource::new(
+            "model",
+            ["m"],
+            "Switch the AI model at runtime",
+            "/model <model-name | flash | pro>",
+        ),
+        CommandCompletionSource::new(
+            "status",
+            Vec::<&str>::new(),
+            "Show session status: model, cwd, turns, tokens, cost",
+            "/status",
+        ),
+        CommandCompletionSource::new(
+            "context",
+            ["ctx"],
+            "Inspect what is loaded into the session",
+            "/context",
+        ),
+        CommandCompletionSource::new(
+            "retry",
+            ["r", "again"],
+            "Re-submit the last user prompt",
+            "/retry",
+        ),
+        CommandCompletionSource::new(
+            "copy",
+            ["yank"],
+            "Copy the last assistant reply to the clipboard",
+            "/copy",
+        ),
+        CommandCompletionSource::new(
+            "export",
+            Vec::<&str>::new(),
+            "Export session transcript to JSONL",
+            "/export [path]",
+        ),
+        CommandCompletionSource::new(
+            "diff",
+            Vec::<&str>::new(),
+            "Show pending workspace git diff",
+            "/diff",
+        ),
+        CommandCompletionSource::new(
+            "branch",
+            Vec::<&str>::new(),
+            "List git branches; optionally checkout/create",
+            "/branch [name | -b name]",
+        ),
+        CommandCompletionSource::new(
+            "add-dir",
+            ["add_dir", "adddir"],
+            "Add an additional directory to the session context",
+            "/add-dir <path>",
+        ),
+        CommandCompletionSource::new(
             "read",
             Vec::<&str>::new(),
             "Read a text file with optional line range",
@@ -262,7 +665,608 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
         ),
         CommandCompletionSource::from_command(&MemoryCommand),
         CommandCompletionSource::from_command(&RememberCommand),
+        CommandCompletionSource::new(
+            "permission",
+            ["perm", "permissions"],
+            "List or modify permission rules",
+            "/permission [--allow Pattern | --deny Pattern | --remove pattern]",
+        ),
     ]
+}
+
+fn render_status(
+    agent_loop: &AgentLoop,
+    cwd: &std::path::Path,
+    additional_dirs: &[std::path::PathBuf],
+    provider_profile: ProviderProfile,
+) -> String {
+    let summary = agent_loop.cost_tracker().summary();
+    let cache = summary.cache_health();
+    let context_tokens = estimate_repl_context_tokens(agent_loop.messages());
+    let branch = git_branch(cwd).unwrap_or_else(|| String::from("(no git)"));
+    let cache_summary = render_cache_health(&cache);
+
+    let mut lines = vec![
+        String::from("Deeptide session status"),
+        format!("  Model:    {}", agent_loop.model()),
+        format!("  CWD:      {}", cwd.display()),
+        format!("  + dirs:   {}", render_additional_dirs(additional_dirs)),
+        format!("  Branch:   {branch}"),
+        format!("  Provider: {}", provider_profile.name()),
+        String::from("  Session:  (not persisted)"),
+        format!(
+            "  Turns:    {} / {}",
+            summary.turns.len(),
+            agent_loop.max_turns()
+        ),
+        format!("  Messages: {}", agent_loop.messages().len()),
+        format!(
+            "  Context:  ~{} tokens",
+            CostTracker::format_tokens(context_tokens)
+        ),
+        format!("  Mode:     {}", agent_loop.permission_mode().label()),
+        format!(
+            "  In/Out:   {} / {}",
+            CostTracker::format_tokens(summary.total_input),
+            CostTracker::format_tokens(summary.total_output)
+        ),
+        format!("  Cache:    {cache_summary}"),
+    ];
+
+    if let Some(diagnostic) = cache.diagnostic() {
+        lines.push(format!("  Cache note: {diagnostic}"));
+    }
+
+    lines.push(format!(
+        "  Cost:     {}",
+        CostTracker::format_usd(summary.total_cost_usd)
+    ));
+
+    lines.join("\n")
+}
+
+fn render_context(
+    agent_loop: &AgentLoop,
+    cwd: &std::path::Path,
+    additional_dirs: &[std::path::PathBuf],
+    tool_names: Vec<&str>,
+) -> String {
+    let context_tokens = estimate_repl_context_tokens(agent_loop.messages());
+    let context_window = model_context_window(agent_loop.model()) as usize;
+    let percent = (context_tokens * 100)
+        .checked_div(context_window)
+        .unwrap_or(0);
+    let bar_width = 20usize;
+    let filled = (bar_width * context_tokens)
+        .checked_div(context_window)
+        .unwrap_or(0)
+        .min(bar_width);
+    let bar = format!(
+        "{}{}",
+        "#".repeat(filled),
+        "-".repeat(bar_width.saturating_sub(filled))
+    );
+
+    let project_memory = MemorySystem::project_memory_index(cwd);
+    let global_memory = MemorySystem::global_memory_index();
+    let agents = discover_agent_names(cwd);
+    let tool_preview = tool_names
+        .iter()
+        .take(10)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tool_suffix = if tool_names.len() > 10 { ", ..." } else { "" };
+
+    let mut lines = vec![
+        String::from("Session context"),
+        format!("  CWD:      {}", cwd.display()),
+        format!("  + dirs:   {}", render_additional_dirs(additional_dirs)),
+        String::from("  Memory:"),
+        format!(
+            "    {} {}",
+            exists_mark(&project_memory),
+            project_memory.display()
+        ),
+        format!(
+            "    {} {}",
+            exists_mark(&global_memory),
+            global_memory.display()
+        ),
+        format!(
+            "  Agents:   {}",
+            if agents.is_empty() {
+                String::from("(none)")
+            } else {
+                agents.join(", ")
+            }
+        ),
+        String::from("  Settings:"),
+        format!("    runtime  {}", agent_loop.model()),
+        format!("    mode     {}", agent_loop.permission_mode().label()),
+        format!(
+            "  Tools:    {} - {tool_preview}{tool_suffix}",
+            tool_names.len()
+        ),
+        format!(
+            "  Window:   {bar} {percent}%  ({} / {})",
+            CostTracker::format_tokens(context_tokens),
+            CostTracker::format_tokens(context_window)
+        ),
+    ];
+
+    let suggestions = context_suggestions(context_tokens, context_window);
+    if !suggestions.is_empty() {
+        lines.push(String::new());
+        lines.push(String::from("Suggestions"));
+        lines.extend(
+            suggestions
+                .into_iter()
+                .map(|suggestion| format!("  {suggestion}")),
+        );
+    }
+
+    lines.join("\n")
+}
+
+fn exists_mark(path: &std::path::Path) -> &'static str {
+    if path.exists() { "*" } else { "o" }
+}
+
+fn context_suggestions(context_tokens: usize, context_window: usize) -> Vec<String> {
+    if context_window == 0 {
+        return Vec::new();
+    }
+    let percent = (context_tokens * 100) / context_window;
+    if percent >= 80 {
+        vec![format!(
+            "Context is {percent}% full - run /compact before starting a large edit."
+        )]
+    } else if percent >= 60 {
+        vec![format!(
+            "Context is {percent}% full - consider /status or /compact after the next large tool result."
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
+fn discover_agent_names(cwd: &std::path::Path) -> Vec<String> {
+    let mut dirs = vec![
+        MemorySystem::tide_config_dir()
+            .join("projects")
+            .join(MemorySystem::project_slug(cwd))
+            .join("agents"),
+        MemorySystem::tide_config_dir().join("agents"),
+        cwd.join(".deeptide").join("agents"),
+    ];
+    if let Some(home) = home_dir() {
+        dirs.push(home.join(".deeptide").join("agents"));
+    }
+
+    let mut names = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                names.push(stem.to_owned());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}
+
+fn resolve_session_dir(raw: &str, cwd: &std::path::Path) -> std::path::PathBuf {
+    let expanded = if raw == "~" {
+        home_dir().unwrap_or_else(|| std::path::PathBuf::from(raw))
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| std::path::PathBuf::from(raw))
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    }
+}
+
+fn render_additional_dirs(additional_dirs: &[std::path::PathBuf]) -> String {
+    if additional_dirs.is_empty() {
+        String::from("(none)")
+    } else {
+        additional_dirs
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn render_model_status(current_model: &str) -> String {
+    let mut lines = vec![
+        format!("Current model: {current_model}"),
+        String::new(),
+        String::from("Aliases:"),
+    ];
+    lines.extend(model_alias_summary().into_iter().map(String::from));
+    lines.push(String::new());
+    lines.push(String::from(
+        "Usage: /model <name-or-alias>  (e.g. /model flash, /model pro)",
+    ));
+    lines.join("\n")
+}
+
+fn render_provider_status(active: ProviderProfile) -> String {
+    let mut lines = vec![
+        format!("Current session provider profile: {}", active.name()),
+        String::from("Provider selection is recorded in this REPL session."),
+    ];
+    if active == ProviderProfile::Legacy {
+        lines.push(String::from(
+            "Effective cloud settings still follow launch-time DEEPTIDE_*, ZERO_CLI_*, and ANTHROPIC_* environment resolution.",
+        ));
+    } else {
+        lines.push(String::from(
+            "The existing model client was created at launch; restart or relaunch with matching provider settings to change HTTP connection details.",
+        ));
+    }
+    lines.push(String::from(
+        "Use /provider list to inspect built-in profiles.",
+    ));
+    lines.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+fn render_provider_list(active: ProviderProfile) -> String {
+    let mut lines = vec![String::from("Provider profiles:")];
+    for (profile, base_url, note) in [
+        (
+            ProviderProfile::DeepSeek,
+            "https://api.deepseek.com",
+            "built-in DeepSeek official endpoint",
+        ),
+        (
+            ProviderProfile::Paean,
+            "https://api.paean.ai",
+            "built-in Paean AI gateway",
+        ),
+        (
+            ProviderProfile::Legacy,
+            "(launch environment)",
+            "DEEPTIDE_*, ZERO_CLI_*, and ANTHROPIC_* resolution",
+        ),
+    ] {
+        let mark = if profile == active { "*" } else { " " };
+        lines.push(format!(" {mark} {}  {base_url} - {note}", profile.name()));
+    }
+    lines.join("\n")
+}
+
+fn resolve_model_alias(name: &str) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "pro" | "v4-pro" | "v4" => String::from("deepseek-v4-pro"),
+        "flash" | "fast" | "v4-flash" => String::from("deepseek-v4-flash"),
+        "flash-q4" | "flash-q4k" | "v4-flash-q4" | "v4-flash-q4k" => {
+            String::from("deepseek-v4-flash-q4k")
+        }
+        _ => name.to_owned(),
+    }
+}
+
+fn model_alias_summary() -> Vec<&'static str> {
+    vec![
+        "  deepseek-v4-flash <- fast, flash, v4-flash",
+        "  deepseek-v4-flash-q4k <- flash-q4, flash-q4k, v4-flash-q4, v4-flash-q4k",
+        "  deepseek-v4-pro <- pro, v4, v4-pro",
+    ]
+}
+
+fn render_cache_health(cache: &crate::CacheHealth) -> String {
+    let created = CostTracker::format_tokens(cache.total_create_tokens);
+    let read = CostTracker::format_tokens(cache.total_read_tokens);
+    match cache.hit_rate_percent {
+        Some(hit_rate) => {
+            let recent = cache
+                .recent_hit_rate_percent
+                .map(|rate| format!(" · recent {rate}% hit"))
+                .unwrap_or_default();
+            format!(
+                "{created} created, {read} read · {hit_rate}% hit{recent} · {}",
+                cache.label()
+            )
+        }
+        None => format!("{} · no cache telemetry yet", cache.label()),
+    }
+}
+
+fn estimate_repl_context_tokens(messages: &[crate::ConversationMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| message.content.chars().count().div_ceil(4) + 4)
+        .sum()
+}
+
+fn git_branch(cwd: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(cwd)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!branch.is_empty()).then_some(branch)
+}
+
+fn last_user_prompt(messages: &[ConversationMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+        .map(|message| message.content.trim().to_owned())
+        .filter(|content| !content.is_empty())
+}
+
+fn last_assistant_reply(messages: &[ConversationMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::Assistant)
+        .map(|message| message.content.trim().to_owned())
+}
+
+fn render_copy_summary(content: &str) -> String {
+    let chars = content.chars().count();
+    let lines = content.split('\n').count();
+    let char_label = if chars == 1 { "char" } else { "chars" };
+    let line_label = if lines == 1 { "line" } else { "lines" };
+    format!("Copied last reply to clipboard ({chars} {char_label}, {lines} {line_label}).")
+}
+
+fn write_to_system_clipboard(content: &str) -> Result<(), String> {
+    let context =
+        ToolContext::new(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    let result = ClipboardTool.call(
+        serde_json::json!({
+            "operation": "write",
+            "content": content,
+        }),
+        &context,
+    );
+    if result.is_error {
+        Err(result.content)
+    } else {
+        Ok(())
+    }
+}
+
+fn export_path(args: &str, cwd: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let trimmed = args.trim();
+    if trimmed.split_whitespace().count() > 1 {
+        return Err(String::from("Usage: /export [path]"));
+    }
+
+    let raw = if trimmed.is_empty() {
+        std::env::temp_dir().join("deeptide-session.jsonl")
+    } else if trimmed == "~" {
+        home_dir().ok_or_else(|| String::from("/export: could not resolve home directory"))?
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        home_dir()
+            .ok_or_else(|| String::from("/export: could not resolve home directory"))?
+            .join(rest)
+    } else {
+        std::path::PathBuf::from(trimmed)
+    };
+
+    if raw.is_absolute() {
+        Ok(raw)
+    } else {
+        Ok(cwd.join(raw))
+    }
+}
+
+fn render_session_jsonl(messages: &[ConversationMessage]) -> String {
+    let mut lines = messages
+        .iter()
+        .map(|message| {
+            let role = match message.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+            };
+            serde_json::json!({
+                "type": role,
+                "message": {
+                    "role": role,
+                    "content": message.content,
+                },
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    lines.push('\n');
+    lines
+}
+
+fn render_workspace_diff(cwd: &std::path::Path) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["diff", "--"])
+        .output();
+
+    let Ok(output) = output else {
+        return String::from("/diff: failed to run git diff");
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if stderr.is_empty() {
+            return format!("/diff: git diff exited with status {}", output.status);
+        }
+        return format!("/diff: {stderr}");
+    }
+
+    let diff = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_owned();
+    if diff.is_empty() {
+        String::from("No pending git diff in workspace.")
+    } else {
+        format!("Pending workspace diff:\n{diff}")
+    }
+}
+
+enum BranchAction {
+    List,
+    Create(String),
+    Checkout(String),
+}
+
+fn branch_args(args: &str) -> Result<BranchAction, String> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return Ok(BranchAction::List);
+    }
+
+    if trimmed == "-b" {
+        return Err(String::from("Usage: /branch [name | -b name]"));
+    }
+
+    if let Some(raw) = trimmed.strip_prefix("-b ") {
+        let name = raw.trim();
+        if name.is_empty() || name.split_whitespace().count() > 1 {
+            return Err(String::from("Usage: /branch [name | -b name]"));
+        }
+        return Ok(BranchAction::Create(name.to_owned()));
+    }
+
+    if trimmed.split_whitespace().count() > 1 {
+        return Err(String::from("Usage: /branch [name | -b name]"));
+    }
+
+    Ok(BranchAction::Checkout(trimmed.to_owned()))
+}
+
+fn render_git_command(cwd: &std::path::Path, args: &[&str], empty_message: &str) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output();
+
+    let Ok(output) = output else {
+        return String::from("git: failed to run git");
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .trim_end()
+        .to_owned();
+    let combined = match (stdout.is_empty(), stderr.is_empty()) {
+        (false, false) => format!("{stdout}\n{stderr}"),
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (true, true) => String::new(),
+    };
+
+    if combined.is_empty() {
+        empty_message.to_owned()
+    } else {
+        combined
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+fn render_permission_rules(rules: &PermissionRules) -> String {
+    let mut lines = vec![String::from("Permission rules:"), String::from("  allow:")];
+    append_permission_rules(&mut lines, rules.allow_list());
+    if !rules.session_allow_list().is_empty() {
+        lines.push(String::from("  session allow:"));
+        append_permission_rules(&mut lines, rules.session_allow_list());
+    }
+    lines.push(String::from("  deny:"));
+    append_permission_rules(&mut lines, rules.deny_list());
+    if !rules.session_deny_list().is_empty() {
+        lines.push(String::from("  session deny:"));
+        append_permission_rules(&mut lines, rules.session_deny_list());
+    }
+    lines.join("\n")
+}
+
+fn append_permission_rules(lines: &mut Vec<String>, rules: &[Rule]) {
+    if rules.is_empty() {
+        lines.push(String::from("    (none)"));
+        return;
+    }
+    for rule in rules {
+        lines.push(format!("    {}", format_permission_rule(rule)));
+    }
+}
+
+fn format_permission_rule(rule: &Rule) -> String {
+    rule.tool
+        .as_ref()
+        .map(|tool| format!("{tool}({})", rule.pattern))
+        .unwrap_or_else(|| rule.pattern.clone())
+}
+
+fn parse_permission_rule_pattern(raw: &str) -> (Option<String>, String) {
+    if let Some(open_index) = raw.find('(')
+        && raw.ends_with(')')
+    {
+        let tool = raw[..open_index].trim();
+        let pattern = raw[open_index + 1..raw.len() - 1].trim();
+        if !tool.is_empty() && !pattern.is_empty() {
+            return (Some(tool.to_owned()), pattern.to_owned());
+        }
+    }
+
+    if let Some((tool, pattern)) = raw.split_once(':') {
+        let tool = tool.trim();
+        let pattern = pattern.trim();
+        if !tool.is_empty()
+            && !pattern.is_empty()
+            && tool
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_uppercase())
+        {
+            return (Some(tool.to_owned()), pattern.to_owned());
+        }
+    }
+
+    (None, raw.to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

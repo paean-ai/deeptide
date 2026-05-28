@@ -321,6 +321,24 @@ impl PermissionManager {
         &self.rules
     }
 
+    pub fn add_rule(
+        &mut self,
+        allowed: bool,
+        pattern: impl Into<String>,
+        tool: Option<String>,
+    ) -> io::Result<()> {
+        if allowed {
+            self.rules.add_allow(pattern, tool)
+        } else {
+            self.rules.add_deny(pattern, tool)
+        }
+    }
+
+    pub fn remove_rule(&mut self, pattern: &str) -> io::Result<()> {
+        self.rules.remove_allow(pattern)?;
+        self.rules.remove_deny(pattern)
+    }
+
     pub fn check_json(
         &self,
         tool_name: &str,

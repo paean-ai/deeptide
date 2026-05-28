@@ -9,6 +9,16 @@ use deeptide_core::{
     LocalEchoBackend, MarkdownRenderer, ReplEvent, ReplSession,
 };
 
+const DEFAULT_MODEL: &str = "deepseek-v4-pro";
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+
+struct ConfiguredBackend {
+    backend: Box<dyn AgentBackend>,
+    model: String,
+    is_configured: bool,
+    subagent_config: Option<AnthropicConfig>,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 enum InputFormat {
     Text,
@@ -58,14 +68,10 @@ struct Cli {
     )]
     permission_mode: String,
 
-    #[arg(long, env = "DEEPTIDE_MODEL", default_value = "deepseek-v4-pro")]
+    #[arg(long, env = "DEEPTIDE_MODEL", default_value = DEFAULT_MODEL)]
     model: String,
 
-    #[arg(
-        long,
-        env = "DEEPTIDE_BASE_URL",
-        default_value = "https://api.anthropic.com"
-    )]
+    #[arg(long, env = "DEEPTIDE_BASE_URL", default_value = DEFAULT_BASE_URL)]
     base_url: String,
 
     #[arg(long, env = "DEEPTIDE_API_KEY", hide_env_values = true)]
@@ -73,6 +79,14 @@ struct Cli {
 
     #[arg(long, default_value_t = 4096)]
     max_output_tokens: usize,
+
+    #[arg(
+        long,
+        env = "DEEPTIDE_MAX_TURNS",
+        default_value_t = 25,
+        help = "Safety cap on agentic turns per prompt."
+    )]
+    max_turns: usize,
 }
 
 fn main() {
@@ -171,10 +185,13 @@ fn collect_prompt(cli: &Cli, stdin: Option<&str>) -> Result<String, String> {
 fn run_interactive(cli: &Cli, permission_mode: PermissionMode) -> Result<(), String> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let (backend, model, is_configured) = configured_backend(cli)?;
-    let mut repl = ReplSession::new(backend)
-        .with_model(model)
-        .with_permission_mode(permission_mode);
+    let configured = configured_backend(cli)?;
+    let is_configured = configured.is_configured;
+    let mut repl = ReplSession::new(configured.backend)
+        .with_model(configured.model)
+        .with_permission_mode(permission_mode)
+        .with_max_turns(cli.max_turns)
+        .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
     writeln!(stdout, "{}", repl.banner()).map_err(|error| error.to_string())?;
     writeln!(
@@ -233,6 +250,7 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
                 "session_id": cli.session_id,
                 "permission_mode": permission_mode.label(),
                 "model": cli.model,
+                "max_turns": cli.max_turns,
             });
             println!(
                 "{}",
@@ -255,6 +273,7 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
                     "session_id": cli.session_id,
                     "permission_mode": permission_mode.label(),
                     "model": cli.model,
+                    "max_turns": cli.max_turns,
                 }))
                 .map_err(|error| error.to_string())?
             );
@@ -265,10 +284,12 @@ fn emit_output(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resu
 }
 
 fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Result<String, String> {
-    let (backend, model, _) = configured_backend(cli)?;
-    let mut loop_ = AgentLoop::new(backend)
-        .with_model(model)
-        .with_permission_mode(permission_mode);
+    let configured = configured_backend(cli)?;
+    let mut loop_ = AgentLoop::new(configured.backend)
+        .with_model(configured.model)
+        .with_permission_mode(permission_mode)
+        .with_max_turns(cli.max_turns)
+        .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
     let events = loop_.run(prompt);
     let mut assistant = None;
@@ -289,24 +310,102 @@ fn run_prompt(cli: &Cli, prompt: &str, permission_mode: PermissionMode) -> Resul
     assistant.ok_or_else(|| String::from("model returned no assistant message"))
 }
 
-fn configured_backend(cli: &Cli) -> Result<(Box<dyn AgentBackend>, String, bool), String> {
-    let api_key = cli
-        .api_key
-        .clone()
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
-    let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) else {
-        return Ok((
-            Box::<LocalEchoBackend>::default(),
-            String::from("unconfigured"),
-            false,
-        ));
+fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
+    let credential = effective_credential(cli);
+    let Some(credential) = credential else {
+        return Ok(ConfiguredBackend {
+            backend: Box::<LocalEchoBackend>::default(),
+            model: String::from("unconfigured"),
+            is_configured: false,
+            subagent_config: None,
+        });
     };
 
-    let base_url = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| cli.base_url.clone());
-    let mut config = AnthropicConfig::new(base_url, api_key, cli.model.clone());
+    let base_url = effective_base_url(cli);
+    let model = effective_model(cli);
+    let mut config = match credential {
+        CloudCredential::ApiKey(api_key) => AnthropicConfig::new(base_url, api_key, model.clone()),
+        CloudCredential::BearerToken(token) => {
+            AnthropicConfig::new_with_bearer_token(base_url, token, model.clone())
+        }
+    };
     config.max_tokens = cli.max_output_tokens;
-    let backend = AnthropicBackend::new(config)?;
-    Ok((Box::new(backend), cli.model.clone(), true))
+    let backend = AnthropicBackend::new(config.clone())?;
+    Ok(ConfiguredBackend {
+        backend: Box::new(backend),
+        model,
+        is_configured: true,
+        subagent_config: Some(config),
+    })
+}
+
+enum CloudCredential {
+    ApiKey(String),
+    BearerToken(String),
+}
+
+fn effective_credential(cli: &Cli) -> Option<CloudCredential> {
+    let api_key = cli.api_key.clone().or_else(|| {
+        env_first_non_empty(&["ZERO_API_KEY", "ZERO_CLI_API_KEY", "ANTHROPIC_API_KEY"])
+    });
+    if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
+        return Some(CloudCredential::ApiKey(api_key));
+    }
+
+    if has_provider_base_url(cli) {
+        return env_first_non_empty(&["ZERO_CLI_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"])
+            .map(CloudCredential::BearerToken);
+    }
+
+    None
+}
+
+fn subagent_backend_factory(
+    config: Option<AnthropicConfig>,
+) -> impl Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static {
+    move |model| {
+        let Some(mut config) = config.clone() else {
+            return Box::<LocalEchoBackend>::default();
+        };
+        config.model = model.to_owned();
+        match AnthropicBackend::new(config) {
+            Ok(backend) => Box::new(backend),
+            Err(_) => Box::<LocalEchoBackend>::default(),
+        }
+    }
+}
+
+fn effective_base_url(cli: &Cli) -> String {
+    if cli.base_url != DEFAULT_BASE_URL {
+        return cli.base_url.clone();
+    }
+
+    env_first_non_empty(&["ZERO_CLI_BASE_URL", "ZERO_API_BASE", "ANTHROPIC_BASE_URL"])
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned())
+}
+
+fn has_provider_base_url(cli: &Cli) -> bool {
+    cli.base_url != DEFAULT_BASE_URL
+        || env_first_non_empty(&["ZERO_CLI_BASE_URL", "ZERO_API_BASE", "ANTHROPIC_BASE_URL"])
+            .is_some()
+}
+
+fn effective_model(cli: &Cli) -> String {
+    if cli.model != DEFAULT_MODEL {
+        return cli.model.clone();
+    }
+
+    env_first_non_empty(&["ZERO_CLI_MODEL", "ANTHROPIC_MODEL"])
+        .unwrap_or_else(|| DEFAULT_MODEL.to_owned())
+}
+
+fn env_first_non_empty(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn read_stdin_if_needed(cli: &Cli) -> Result<Option<String>, String> {
@@ -351,8 +450,13 @@ impl EnumValue for OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, InputFormat, OutputFormat, collect_prompt, normalize_embedded_mode, validate_formats,
+        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, collect_prompt,
+        configured_backend, effective_base_url, effective_model, normalize_embedded_mode,
+        validate_formats,
     };
+    use clap::Parser;
+    use deeptide_core::AnthropicAuthMode;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn sample_cli() -> Cli {
         Cli {
@@ -368,6 +472,34 @@ mod tests {
             base_url: "https://api.anthropic.com".to_owned(),
             api_key: None,
             max_output_tokens: 4096,
+            max_turns: 25,
+        }
+    }
+
+    fn env_guard() -> MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn clear_api_env() {
+        unsafe {
+            for name in [
+                "ZERO_API_KEY",
+                "ZERO_CLI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "ZERO_CLI_BASE_URL",
+                "ZERO_API_BASE",
+                "ANTHROPIC_BASE_URL",
+                "ZERO_CLI_AUTH_TOKEN",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ZERO_CLI_MODEL",
+                "ANTHROPIC_MODEL",
+            ] {
+                std::env::remove_var(name);
+            }
         }
     }
 
@@ -438,5 +570,106 @@ mod tests {
         .unwrap_or_else(|error| panic!("stream-json prompt should parse: {error}"));
 
         assert_eq!(prompt, "first\n\nsecond");
+    }
+
+    #[test]
+    fn parses_max_turns_option() {
+        let cli = Cli::try_parse_from(["deeptide", "--max-turns", "7", "--print", "-p", "hello"])
+            .expect("max turns option should parse");
+
+        assert_eq!(cli.max_turns, 7);
+    }
+
+    #[test]
+    fn zero_cli_api_env_takes_priority_for_cloud_backend() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "anthropic-key");
+            std::env::set_var("ZERO_CLI_API_KEY", "zero-cli-key");
+            std::env::set_var("ZERO_CLI_BASE_URL", "https://zero.example.test");
+            std::env::set_var("ZERO_CLI_MODEL", "zero-model");
+        }
+
+        let cli = sample_cli();
+        let configured = configured_backend(&cli).expect("configured backend");
+
+        assert!(configured.is_configured);
+        let subagent_config = configured.subagent_config.expect("subagent config");
+        assert_eq!(configured.model, "zero-model");
+        assert_eq!(subagent_config.model, "zero-model");
+        assert_eq!(subagent_config.base_url, "https://zero.example.test");
+        assert_eq!(subagent_config.api_key, "zero-cli-key");
+        assert_eq!(subagent_config.auth_mode, AnthropicAuthMode::ApiKey);
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn zero_cli_auth_token_uses_bearer_auth_with_provider_base_url() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ZERO_CLI_AUTH_TOKEN", "provider-token");
+            std::env::set_var("ZERO_CLI_BASE_URL", "https://provider.example.test");
+        }
+
+        let cli = sample_cli();
+        let configured = configured_backend(&cli).expect("configured backend");
+
+        assert!(configured.is_configured);
+        let subagent_config = configured.subagent_config.expect("subagent config");
+        assert_eq!(subagent_config.api_key, "provider-token");
+        assert_eq!(subagent_config.base_url, "https://provider.example.test");
+        assert_eq!(subagent_config.auth_mode, AnthropicAuthMode::BearerToken);
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn zero_cli_auth_token_without_provider_base_url_falls_back_to_local() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ZERO_CLI_AUTH_TOKEN", "provider-token");
+        }
+
+        let cli = sample_cli();
+        let configured = configured_backend(&cli).expect("configured backend");
+
+        assert!(!configured.is_configured);
+        assert!(configured.subagent_config.is_none());
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn explicit_deeptide_options_still_override_zero_cli_env() {
+        let _guard = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("ZERO_CLI_BASE_URL", "https://zero.example.test");
+            std::env::set_var("ZERO_CLI_MODEL", "zero-model");
+        }
+        let mut cli = sample_cli();
+        cli.base_url = "https://deeptide.example.test".to_owned();
+        cli.model = "deeptide-model".to_owned();
+
+        assert_eq!(effective_base_url(&cli), "https://deeptide.example.test");
+        assert_eq!(effective_model(&cli), "deeptide-model");
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn defaults_apply_when_no_compatible_api_env_is_set() {
+        let _guard = env_guard();
+        clear_api_env();
+        let cli = sample_cli();
+
+        assert_eq!(effective_base_url(&cli), DEFAULT_BASE_URL);
+        assert_eq!(effective_model(&cli), DEFAULT_MODEL);
+
+        clear_api_env();
     }
 }
