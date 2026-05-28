@@ -820,6 +820,9 @@ pub(crate) struct AgentDefinition {
     pub(crate) is_read_only: bool,
     pub(crate) allowed_tools: Option<&'static [&'static str]>,
     pub(crate) disallowed_tools: &'static [&'static str],
+    /// Role instructions sent as the sub-agent's system prompt, mirroring the
+    /// Swift `AgentDefinition.systemPrompt`.
+    pub(crate) system_prompt: &'static str,
 }
 
 impl AgentDefinition {
@@ -837,6 +840,7 @@ impl AgentDefinition {
                 is_read_only: false,
                 allowed_tools: None,
                 disallowed_tools: &["Agent", "EnterPlanMode", "ExitPlanMode", "MemoryWrite"],
+                system_prompt: "You are a general-purpose sub-agent. Your task is to complete the user's request efficiently and accurately. You have access to the full set of tools and should use them as needed.\n\nGuidelines:\n- Break down complex tasks into clear steps\n- Use the best tool for each step (Read, Grep, Glob, Bash, etc.)\n- Be thorough — leave nothing assumed or unchecked\n- Return a clear, complete answer when done\n- If the task requires writing code, do so carefully and completely\n\nWhen finished, provide a concise summary of what you found or accomplished.",
             },
             Self {
                 kind: "Explore",
@@ -862,6 +866,7 @@ impl AgentDefinition {
                     "TaskOutput",
                 ]),
                 disallowed_tools: &["Agent", "EnterPlanMode", "ExitPlanMode"],
+                system_prompt: "You are a codebase exploration specialist. Your CRITICAL role:\n- SEARCH, READ, and ANALYZE code — NEVER modify it\n- You are in READ-ONLY MODE — no edits, no writes, no Bash, no shell\n- Use Glob for file patterns, Grep for content search, Read for file contents\n- Be fast and thorough — find what's needed quickly\n\nWhen you find relevant code, report:\n- Exact file paths and line numbers\n- Function/class signatures\n- Key implementation details\n- How the code connects to the broader architecture\n\nYou CANNOT: write files, edit files, run terminal commands, or create new code.\nYou CAN: read files, search for patterns, use LSP for symbols, and fetch docs via WebFetch when needed. WebSearch is available only when configured.",
             },
             Self {
                 kind: "Plan",
@@ -877,6 +882,7 @@ impl AgentDefinition {
                     "MemoryWrite",
                     "TaskStop",
                 ],
+                system_prompt: "You are a software architect and planning specialist. Your role:\n- EXPLORE the codebase to understand existing architecture\n- DESIGN implementation approaches for the given task\n- IDENTIFY all files, components, and patterns involved\n- CONSIDER trade-offs between different approaches\n- OUTPUT a detailed, actionable implementation plan\n\nYour plan should include:\n1. Understanding: what exists now and how it works\n2. Approach: step-by-step implementation strategy\n3. Files: every file that needs to be created or modified\n4. Dependencies: what must be done before what\n5. Risks: potential issues and how to mitigate them\n\nYou CANNOT: write code, edit files, or make any changes.\nYou CAN: explore the codebase thoroughly using Read, Grep, Glob, and Bash (git log/show/diff only).",
             },
         ]
     }
@@ -900,6 +906,19 @@ impl AgentDefinition {
                 self.disallowed_tools.join(", ")
             )
         }
+    }
+
+    /// Assemble the sub-agent's full system prompt: the role instructions plus
+    /// the working context (cwd, model, turn budget). Mirrors Swift's
+    /// `fullSystemPrompt` assembly in `AgentTool.runSubagent`.
+    pub(crate) fn full_system_prompt(&self, cwd: &Path, model: &str) -> String {
+        format!(
+            "{}\n\nYou are working in: {}\nModel: {}\nMax turns for this sub-task: {}",
+            self.system_prompt,
+            cwd.display(),
+            model,
+            self.max_turns
+        )
     }
 }
 
@@ -10999,5 +11018,41 @@ mod clipboard_tests {
         assert!(rendered.contains("html: true"));
         assert!(rendered.contains("rtf: true"));
         assert!(rendered.contains("image: 120x80"));
+    }
+}
+
+#[cfg(test)]
+mod agent_definition_tests {
+    use super::AgentDefinition;
+    use std::path::Path;
+
+    #[test]
+    fn every_agent_definition_has_a_role_system_prompt() {
+        for kind in AgentDefinition::all_types() {
+            let definition = AgentDefinition::find(kind).expect("definition exists");
+            assert!(
+                !definition.system_prompt.trim().is_empty(),
+                "{kind} should carry a role system prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn full_system_prompt_includes_role_and_working_context() {
+        let definition = AgentDefinition::find("Explore").expect("Explore definition");
+        // The Explore role is read-only; its prompt must say so.
+        assert!(definition.system_prompt.contains("READ-ONLY"));
+
+        let prompt = definition.full_system_prompt(Path::new("/tmp/project"), "claude-test");
+        assert!(prompt.contains("READ-ONLY"), "role text is preserved");
+        assert!(
+            prompt.contains("/tmp/project"),
+            "working directory is included"
+        );
+        assert!(prompt.contains("claude-test"), "model is included");
+        assert!(
+            prompt.contains(&definition.max_turns.to_string()),
+            "turn budget is included"
+        );
     }
 }
