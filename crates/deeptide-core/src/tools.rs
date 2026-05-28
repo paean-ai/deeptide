@@ -9214,7 +9214,7 @@ impl Tool for TaskOutputTool {
                 serde_json::json!({
                     "retrieval_status": "not_ready",
                     "task": null,
-                    "note": format!("no task with id {task_id} (TaskStorage tracks the agent's todo list; background output capture is not yet implemented)")
+                    "note": format!("no todo task with id {task_id}. TaskStorage tracks the agent's todo list. For background shell output use BashOutput with the shell_id from Bash run_in_background=true."),
                 })
                 .to_string(),
             );
