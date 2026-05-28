@@ -1345,16 +1345,42 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "Bash",
-            description: "Execute a single-line shell command in the current workspace. Prefer Read/Edit/Write/Glob/Grep for file work; use Bash for builds, tests, git, package managers, and shell-only operations.",
+            description: "Execute a single-line shell command in the current workspace. Prefer Read/Edit/Write/Glob/Grep for file work; use Bash for builds, tests, git, package managers, and shell-only operations. With run_in_background=true the command is parked in the background and you must later read its output with BashOutput or stop it with KillBash.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Single-line shell command to execute."},
                     "timeout": {"type": "integer", "description": "Optional timeout in milliseconds, maximum 600000."},
                     "description": {"type": "string", "description": "Short description of what the command does."},
-                    "run_in_background": {"type": "boolean", "description": "Start command and return immediately."}
+                    "run_in_background": {"type": "boolean", "description": "Start command and return immediately; output is captured and readable via BashOutput. Returns a shell_id for later BashOutput/KillBash calls."}
                 },
                 "required": ["command"]
+            }),
+            cache_control: None,
+        },
+        WireTool {
+            name: "BashOutput",
+            description: "Read accumulated stdout/stderr of a background Bash invocation by shell_id. Use stdout_cursor/stderr_cursor from a previous BashOutput response to fetch only new output and avoid re-reading what you already saw.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "shell_id": {"type": "string", "description": "The shell_id returned by Bash with run_in_background=true."},
+                    "stdout_cursor": {"type": "integer", "description": "Optional: return only stdout lines produced after this cursor. Pass back the stdout_cursor from your previous BashOutput response."},
+                    "stderr_cursor": {"type": "integer", "description": "Optional: same as stdout_cursor but for stderr."}
+                },
+                "required": ["shell_id"]
+            }),
+            cache_control: None,
+        },
+        WireTool {
+            name: "KillBash",
+            description: "SIGKILL a background Bash invocation by shell_id. Returns its final accumulated output. Idempotent — calling on an already-exited shell returns its recorded exit information without error.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "shell_id": {"type": "string", "description": "The shell_id returned by Bash with run_in_background=true."}
+                },
+                "required": ["shell_id"]
             }),
             cache_control: None,
         },

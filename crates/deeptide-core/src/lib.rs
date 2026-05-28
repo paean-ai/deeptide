@@ -1,5 +1,6 @@
 pub mod agent_loop;
 pub mod api;
+pub mod background_shell;
 pub mod commands;
 pub mod completion;
 pub mod config;

@@ -130,6 +130,8 @@ impl ToolRegistry {
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
         registry.register(Box::<BashTool>::default());
+        registry.register(Box::<BashOutputTool>::default());
+        registry.register(Box::<KillBashTool>::default());
         registry.register(Box::<MonitorTool>::default());
         registry.register(Box::<TodoWriteTool>::default());
         registry.register(Box::<TaskCreateTool>::default());
@@ -8782,6 +8784,118 @@ impl Tool for BashTool {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+pub struct BashOutputTool;
+
+impl Tool for BashOutputTool {
+    fn name(&self) -> &'static str {
+        "BashOutput"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read the accumulated stdout/stderr of a background Bash invocation. \
+         Pass shell_id from the original Bash run_in_background response. \
+         Optional stdout_cursor/stderr_cursor return only lines produced after the given counter."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(shell_id) = input.get("shell_id").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("shell_id is required");
+        };
+        let shell_id = shell_id.trim();
+        if shell_id.is_empty() {
+            return ToolResult::error("shell_id is required");
+        }
+        let since_stdout = input
+            .get("stdout_cursor")
+            .and_then(serde_json::Value::as_u64);
+        let since_stderr = input
+            .get("stderr_cursor")
+            .and_then(serde_json::Value::as_u64);
+
+        match crate::background_shell::read_output(shell_id, since_stdout, since_stderr) {
+            Ok(snapshot) => ToolResult::text(render_background_snapshot(&snapshot)),
+            Err(error) => ToolResult::error(error),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct KillBashTool;
+
+impl Tool for KillBashTool {
+    fn name(&self) -> &'static str {
+        "KillBash"
+    }
+
+    fn description(&self) -> &'static str {
+        "Send SIGKILL to a background Bash invocation registered by Bash run_in_background. \
+         Returns the final accumulated output. Idempotent — calling on an already-exited shell returns its recorded exit."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let Some(shell_id) = input.get("shell_id").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error("shell_id is required");
+        };
+        let shell_id = shell_id.trim();
+        if shell_id.is_empty() {
+            return ToolResult::error("shell_id is required");
+        }
+        match crate::background_shell::stop(shell_id) {
+            Ok(snapshot) => ToolResult::text(render_background_snapshot(&snapshot)),
+            Err(error) => ToolResult::error(error),
+        }
+    }
+}
+
+fn render_background_snapshot(snapshot: &crate::background_shell::BackgroundOutputSnapshot) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "shell_id={} running={} elapsed={}s",
+        snapshot.shell_id, snapshot.running, snapshot.elapsed_seconds
+    ));
+    if let Some(code) = snapshot.exit_code {
+        out.push_str(&format!(" exit_code={code}"));
+    }
+    out.push('\n');
+    out.push_str(&format!(
+        "stdout_cursor={} stderr_cursor={}",
+        snapshot.stdout_cursor, snapshot.stderr_cursor
+    ));
+    if snapshot.stdout_truncated || snapshot.stderr_truncated {
+        out.push_str(" (truncated)");
+    }
+    out.push('\n');
+    out.push_str(&format!("command: {}\n", snapshot.command));
+    out.push_str("--- stdout ---\n");
+    if snapshot.stdout.is_empty() {
+        out.push_str("(no new lines)\n");
+    } else {
+        out.push_str(&snapshot.stdout);
+        if !snapshot.stdout.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push_str("--- stderr ---\n");
+    if snapshot.stderr.is_empty() {
+        out.push_str("(no new lines)\n");
+    } else {
+        out.push_str(&snapshot.stderr);
+        if !snapshot.stderr.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+#[derive(Debug, Default, Clone, Copy)]
 pub struct MonitorTool;
 
 impl Tool for MonitorTool {
@@ -9784,21 +9898,19 @@ fn execute_shell_command(command: &str, context: &ToolContext, timeout: Duration
 }
 
 fn start_background_command(command: &str, context: &ToolContext) -> ToolResult {
-    match shell_command(command)
-        .current_dir(&context.cwd)
-        .env_remove("TIDE_API_KEY")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("ZERO_CLI_API_KEY")
-        .env_remove("ZERO_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(_child) => ToolResult::text(format!(
-            "Command started in background: `{}`",
-            truncate_chars(command, 100)
-        )),
+    match crate::background_shell::spawn(command, &context.cwd) {
+        Ok(spawned) => {
+            let pid_note = spawned
+                .pid
+                .map(|pid| format!(", pid={pid}"))
+                .unwrap_or_default();
+            ToolResult::text(format!(
+                "Background shell started: shell_id={}{pid_note}. Use BashOutput {{\"shell_id\":\"{}\"}} to read its stdout/stderr or KillBash to stop it.\nCommand: {}",
+                spawned.shell_id,
+                spawned.shell_id,
+                truncate_chars(command, 100)
+            ))
+        }
         Err(error) => ToolResult::error(format!("Failed to execute command: {error}")),
     }
 }
