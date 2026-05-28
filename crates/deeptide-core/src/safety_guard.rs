@@ -328,8 +328,7 @@ impl Auditor for ShellAuditor {
         // into a shell interpreter — Warn rather than Block because the
         // pattern is also used (less wisely) by legitimate installers.
         const REMOTE_FETCHERS: &[&str] = &["curl", "wget", "fetch", "http", "https"];
-        const SHELL_INTERPRETERS: &[&str] =
-            &["sh", "bash", "zsh", "fish", "ksh", "dash", "ash"];
+        const SHELL_INTERPRETERS: &[&str] = &["sh", "bash", "zsh", "fish", "ksh", "dash", "ash"];
 
         let pipe_segments: Vec<&str> = lowered.split('|').collect();
         if pipe_segments.len() >= 2 {

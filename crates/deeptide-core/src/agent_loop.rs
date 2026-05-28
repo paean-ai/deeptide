@@ -385,6 +385,17 @@ impl AgentLoop {
         self.current_run_step = 0;
     }
 
+    /// Replace the conversation history with the supplied messages.
+    ///
+    /// Used by `/resume` to restore a previously saved session transcript.
+    /// Resets the cost tracker and turn counter since the historical costs are
+    /// no longer tracked in memory.
+    pub fn restore_messages(&mut self, messages: Vec<ConversationMessage>) {
+        self.messages = messages;
+        self.cost_tracker.reset();
+        self.current_run_step = 0;
+    }
+
     pub fn messages(&self) -> &[ConversationMessage] {
         &self.messages
     }

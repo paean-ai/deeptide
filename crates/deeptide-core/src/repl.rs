@@ -9,6 +9,7 @@ use crate::{
     ToolResultSummaryFormatter, WriteTool,
     agent_loop::{ConversationMessage, MessageRole},
     memory::MemorySystem,
+    session::{SessionStore, new_session_id},
     tools::{ClipboardTool, model_context_window},
     tui::{StatusLine, StatusSegment},
 };
@@ -56,6 +57,9 @@ pub struct ReplSession {
     additional_dirs: Vec<std::path::PathBuf>,
     provider_profile: ProviderProfile,
     debug_enabled: bool,
+    active_goal: Option<String>,
+    session_id: String,
+    session_started_at: String,
 }
 
 impl ReplSession {
@@ -71,6 +75,11 @@ impl ReplSession {
             additional_dirs: Vec::new(),
             provider_profile: ProviderProfile::Legacy,
             debug_enabled: false,
+            active_goal: None,
+            session_id: new_session_id(),
+            session_started_at: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z")),
         }
     }
 
@@ -126,11 +135,24 @@ impl ReplSession {
             return self.execute_command(command_line);
         }
 
-        self.agent_loop
+        let events: Vec<ReplEvent> = self
+            .agent_loop
             .run(trimmed)
             .into_iter()
             .filter_map(agent_event_to_repl_event)
-            .collect()
+            .collect();
+        self.autosave_session();
+        events
+    }
+
+    fn autosave_session(&self) {
+        SessionStore::save(
+            &self.tool_context.cwd,
+            &self.session_id,
+            self.agent_loop.model(),
+            &self.session_started_at,
+            self.agent_loop.messages(),
+        );
     }
 
     pub fn banner(&self) -> String {
@@ -219,6 +241,15 @@ impl ReplSession {
             "memory" | "mem" => MemoryCommand.execute(args, &context),
             "remember" => RememberCommand.execute(args, &context),
             "permission" | "perm" | "permissions" => self.execute_permission_command(args),
+            "commit" => return self.execute_commit_command(args),
+            "review" => return self.execute_review_command(args),
+            "simplify" => return self.execute_simplify_command(args),
+            "skills" | "skill" => self.execute_skills_command(args),
+            "reminder" | "anchor" | "reorient" => return self.execute_reminder_command(args),
+            "dream" => return self.execute_dream_command(args),
+            "cron" => self.execute_cron_command(args),
+            "goal" | "objective" => return self.execute_goal_command(args),
+            "cache" | "kvcache" | "manifest" => self.execute_cache_command(args),
             _ => CommandResult::Text(format!(
                 "Unknown command: /{name}\nType /help for the full list."
             )),
@@ -277,6 +308,7 @@ impl ReplSession {
             &self.tool_context.cwd,
             &self.additional_dirs,
             self.provider_profile,
+            &self.session_id,
         ))
     }
 
@@ -384,23 +416,68 @@ impl ReplSession {
             return CommandResult::Text(String::from("Usage: /sessions [filter]"));
         }
 
-        CommandResult::Text(String::from(
-            "No persisted sessions are available in the Rust REPL yet. Use /export [path] to save the current transcript.",
-        ))
+        let entries = SessionStore::list(&self.tool_context.cwd);
+        if entries.is_empty() {
+            return CommandResult::Text(String::from(
+                "No saved sessions for this project. Sessions are saved automatically on each turn.",
+            ));
+        }
+
+        let filter = args.trim().to_ascii_lowercase();
+        let shown: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                filter.is_empty()
+                    || e.session_id.contains(&filter)
+                    || e.preview.to_ascii_lowercase().contains(&filter)
+            })
+            .take(20)
+            .collect();
+
+        if shown.is_empty() {
+            return CommandResult::Text(format!("No sessions match filter: {filter}"));
+        }
+
+        let mut lines = vec![format!("Sessions ({} saved):", shown.len())];
+        for entry in &shown {
+            let project = std::path::Path::new(&entry.cwd)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&entry.cwd);
+            let preview = if entry.preview.is_empty() {
+                "(empty)"
+            } else {
+                &entry.preview
+            };
+            lines.push(format!(
+                "  {}  {}  \"{}\"  ({} messages)",
+                entry.session_id, project, preview, entry.message_count
+            ));
+        }
+        lines.push(String::new());
+        lines.push(String::from("Use /resume <session-id> to restore."));
+        CommandResult::Text(lines.join("\n"))
     }
 
-    fn execute_resume_command(&self, args: &str) -> CommandResult {
+    fn execute_resume_command(&mut self, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.split_whitespace().count() > 1 {
             return CommandResult::Text(String::from("Usage: /resume [session-id]"));
         }
 
         if trimmed.is_empty() {
-            CommandResult::Text(String::from("No sessions to resume in this project."))
-        } else {
-            CommandResult::Text(format!(
-                "Session not found: {trimmed}. Persisted session restore is not available in the Rust REPL yet."
-            ))
+            return self.execute_sessions_command("");
+        }
+
+        match SessionStore::load(&self.tool_context.cwd, trimmed) {
+            Ok(messages) => {
+                let count = messages.len();
+                self.agent_loop.restore_messages(messages);
+                CommandResult::Text(format!(
+                    "Resumed session {trimmed}: loaded {count} messages into context."
+                ))
+            }
+            Err(e) => CommandResult::Text(format!("Cannot resume: {e}")),
         }
     }
 
@@ -773,10 +850,389 @@ impl ReplSession {
         ))
     }
 
+    fn execute_commit_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let result = self.tool_registry.call(
+            "Skill",
+            serde_json::json!({"skill": "commit", "args": args}),
+            &self.tool_context,
+        );
+        if result.is_error {
+            return vec![ReplEvent::Output(format!("/commit: {}", result.content))];
+        }
+        let mut events = vec![ReplEvent::Output(String::from(
+            "Dispatching commit skill to the model.",
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&result.content)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    fn execute_review_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        if args.trim().is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "Usage: /review <pr-number-or-url>",
+            ))];
+        }
+        let result = self.tool_registry.call(
+            "Skill",
+            serde_json::json!({"skill": "review-pr", "args": args}),
+            &self.tool_context,
+        );
+        if result.is_error {
+            return vec![ReplEvent::Output(format!("/review: {}", result.content))];
+        }
+        let mut events = vec![ReplEvent::Output(String::from(
+            "Dispatching review-pr skill to the model.",
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&result.content)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    fn execute_simplify_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let result = self.tool_registry.call(
+            "Skill",
+            serde_json::json!({"skill": "simplify", "args": args}),
+            &self.tool_context,
+        );
+        if result.is_error {
+            return vec![ReplEvent::Output(format!("/simplify: {}", result.content))];
+        }
+        let mut events = vec![ReplEvent::Output(String::from(
+            "Dispatching simplify skill to the model.",
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&result.content)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    fn execute_skills_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /skills"));
+        }
+        let direct: &[(&str, &str, &str)] = &[
+            (
+                "commit",
+                "/commit",
+                "Stage changes, draft message, and commit",
+            ),
+            ("review-pr", "/review", "Review a GitHub pull request"),
+            (
+                "simplify",
+                "/simplify",
+                "Review changed code for quality and efficiency",
+            ),
+        ];
+        let model_only: &[(&str, &str)] = &[
+            ("init", "Bootstrap project memory and write TIDE.md"),
+            ("batch", "Plan and execute large parallelizable changes"),
+            ("publish", "Publish a static frontend on clide.app"),
+            ("update-config", "Configure Deeptide CLI settings"),
+        ];
+        let total = direct.len() + model_only.len();
+        let mut lines = vec![
+            String::new(),
+            format!("Built-in skills ({total}):"),
+            String::new(),
+        ];
+        for (name, cmd, desc) in direct {
+            lines.push(format!("  {name:<20} {desc}"));
+            lines.push(format!("  {:<20} trigger: {cmd}", ""));
+        }
+        for (name, desc) in model_only {
+            lines.push(format!("  {name:<20} {desc}"));
+            lines.push(format!("  {:<20} ask in prose, or use the Skill tool", ""));
+        }
+        lines.push(String::new());
+        lines.push(String::from(
+            "Skills expand to a structured prompt the model executes. $ARGUMENTS is replaced with the command tail.",
+        ));
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    fn execute_reminder_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let sub = args.trim().to_ascii_lowercase();
+        let text = self.build_reminder_text();
+        match sub.as_str() {
+            "" | "send" | "now" => {
+                let mut events = vec![ReplEvent::Output(String::from(
+                    "Queued a short state reminder for the next model turn.",
+                ))];
+                events.extend(
+                    self.agent_loop
+                        .run(&text)
+                        .into_iter()
+                        .filter_map(agent_event_to_repl_event),
+                );
+                events
+            }
+            "show" | "print" => vec![ReplEvent::Output(text)],
+            _ => vec![ReplEvent::Output(String::from(
+                "Usage: /reminder [show|send]",
+            ))],
+        }
+    }
+
+    fn build_reminder_text(&self) -> String {
+        let cwd = self.tool_context.cwd.display().to_string();
+        let model = self.agent_loop.model().to_owned();
+        let tool_names = self.tool_registry.names();
+        let preferred = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite"];
+        let available: std::collections::HashSet<&str> = tool_names.iter().copied().collect();
+        let listed: Vec<&str> = preferred
+            .iter()
+            .copied()
+            .filter(|t| available.contains(t))
+            .collect();
+        let tools = if listed.is_empty() {
+            preferred.join(", ")
+        } else {
+            listed.join(", ")
+        };
+        format!(
+            "<system-reminder>\n\
+            You are Deeptide, a coding agent.\n\
+            cwd: {cwd}\n\
+            model: {model}\n\
+            You can inspect and modify this workspace through tool calls. Do not claim you cannot access local files.\n\
+            Core tools available: {tools}.\n\
+            For file questions, call Read/Glob/Grep/Bash as needed. For requested file edits, call Write/Edit instead of printing large code blocks.\n\
+            Continue the user's active coding task from the transcript; do not invent unrelated goals or identities.\n\
+            </system-reminder>\n\
+            Reply briefly that you are re-oriented, then proceed with the user's next instruction."
+        )
+    }
+
+    fn execute_dream_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let sub = args.trim().to_ascii_lowercase();
+        match sub.as_str() {
+            "run" | "now" | "" => {
+                let cwd = self.tool_context.cwd.display().to_string();
+                let prompt = format!(
+                    "[dream manual run — execute once, do NOT create cron jobs or loops]\n\n\
+                    You are running Deeptide's local dream consolidation pass for workspace:\n\
+                    {cwd}\n\n\
+                    Goal:\n\
+                    - Review recent useful session history.\n\
+                    - Extract durable project facts, decisions, preferences, recurring constraints, and unresolved follow-ups.\n\
+                    - Save or update concise long-term memory in `.deeptide/MEMORY.md` or project memory files.\n\
+                    - Merge duplicate or stale entries instead of appending noise.\n\n\
+                    Rules:\n\
+                    - Execute exactly once.\n\
+                    - Do not edit system prompts, settings, cron jobs, or provider configuration.\n\
+                    - Do not add memories that are generic, obvious, temporary, secret, or unsupported by session history.\n\
+                    - Keep memory files compact and human-readable."
+                );
+                let mut events = vec![ReplEvent::Output(String::from(
+                    "Queued one dream consolidation run.",
+                ))];
+                events.extend(
+                    self.agent_loop
+                        .run(&prompt)
+                        .into_iter()
+                        .filter_map(agent_event_to_repl_event),
+                );
+                events
+            }
+            "status" | "list" => vec![ReplEvent::Output(String::from(
+                "No dream loop is active. Use `/dream run` to consolidate session history once.",
+            ))],
+            "start" | "on" | "enable" => vec![ReplEvent::Output(String::from(
+                "Persistent dream loop is not available in the Rust REPL yet. Use `/dream run` to consolidate once.",
+            ))],
+            "stop" | "off" | "disable" | "cancel" => {
+                vec![ReplEvent::Output(String::from("No dream loop is active."))]
+            }
+            _ => vec![ReplEvent::Output(String::from(
+                "Usage: /dream [run | status]",
+            ))],
+        }
+    }
+
+    fn execute_goal_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let trimmed = args.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        match lower.as_str() {
+            "" | "status" | "show" => match &self.active_goal {
+                None => vec![ReplEvent::Output(String::from(
+                    "No active goal. Use /goal <target> to start one for this session.",
+                ))],
+                Some(goal) => vec![ReplEvent::Output(format!("Active goal:\n  {goal}"))],
+            },
+            "clear" | "stop" | "cancel" | "remove" => {
+                self.active_goal = None;
+                vec![ReplEvent::Output(String::from("Cleared active goal."))]
+            }
+            _ => {
+                self.active_goal = Some(trimmed.to_owned());
+                let prompt = build_goal_initial_prompt(trimmed);
+                let mut events = vec![ReplEvent::Output(String::from(
+                    "Goal set for this session.",
+                ))];
+                events.extend(self.run_goal_loop(&prompt));
+                events
+            }
+        }
+    }
+
+    fn run_goal_loop(&mut self, initial_prompt: &str) -> Vec<ReplEvent> {
+        let mut all_events = Vec::new();
+        let mut prompt = initial_prompt.to_owned();
+
+        for turn in 0..MAX_GOAL_CONTINUATION_TURNS {
+            let turn_events: Vec<ReplEvent> = self
+                .agent_loop
+                .run(&prompt)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event)
+                .collect();
+            all_events.extend(turn_events);
+
+            let status = last_assistant_reply(self.agent_loop.messages())
+                .and_then(|reply| parse_goal_status(&reply));
+            match status {
+                Some(GoalStatus::Achieved) => {
+                    self.active_goal = None;
+                    all_events.push(ReplEvent::Output(String::from("Goal achieved.")));
+                    return all_events;
+                }
+                Some(GoalStatus::Continue) => {
+                    if let Some(goal) = self.active_goal.clone() {
+                        prompt = build_goal_continuation_prompt(&goal);
+                    } else {
+                        return all_events;
+                    }
+                }
+                None => return all_events,
+            }
+
+            if turn + 1 == MAX_GOAL_CONTINUATION_TURNS {
+                all_events.push(ReplEvent::Output(format!(
+                    "Goal reached the continuation limit ({MAX_GOAL_CONTINUATION_TURNS} turns). \
+                    Use /goal status to check the active goal or continue manually."
+                )));
+            }
+        }
+        all_events
+    }
+
+    fn execute_cache_command(&self, args: &str) -> CommandResult {
+        let raw = args.trim();
+        let limit = if raw.is_empty() {
+            8usize
+        } else {
+            match raw.parse::<usize>() {
+                Ok(n) => n.clamp(1, 50),
+                Err(_) => return CommandResult::Text(String::from("Usage: /cache [limit]")),
+            }
+        };
+
+        let summary = self.agent_loop.cost_tracker().summary();
+        if summary.turns.is_empty() {
+            return CommandResult::Text(String::from(
+                "No cache diagnostics yet. Run at least one agent turn to see cache telemetry.",
+            ));
+        }
+
+        let all_turns = &summary.turns;
+        let shown: Vec<_> = all_turns.iter().rev().take(limit).collect();
+        let shown: Vec<_> = shown.into_iter().rev().collect();
+
+        let mut lines = vec![
+            format!(
+                "Cache diagnostics ({} of {} turn(s)):",
+                shown.len(),
+                all_turns.len()
+            ),
+            String::from("  turn   in       out     cache+    cache-r  cost"),
+        ];
+        for turn in &shown {
+            let cache_note = if turn.cache_read + turn.cache_create > 0 {
+                let total = turn.cache_read + turn.cache_create;
+                let pct = (turn.cache_read * 100).checked_div(total).unwrap_or(0);
+                format!(" ({pct}% hit)")
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "  {:<5}  {:<7}  {:<6}  {:<8}  {:<7}  {}{}",
+                turn.turn,
+                CostTracker::format_tokens(turn.input_tokens),
+                CostTracker::format_tokens(turn.output_tokens),
+                CostTracker::format_tokens(turn.cache_create),
+                CostTracker::format_tokens(turn.cache_read),
+                CostTracker::format_usd(turn.cost_usd),
+                cache_note,
+            ));
+        }
+
+        lines.push(String::new());
+        let health = summary.cache_health();
+        if let Some(hit_rate) = health.hit_rate_percent {
+            let recent = health
+                .recent_hit_rate_percent
+                .map(|r| format!(" · recent {r}% hit"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "Overall: {} created, {} read · {hit_rate}% hit{recent} · {}",
+                CostTracker::format_tokens(health.total_create_tokens),
+                CostTracker::format_tokens(health.total_read_tokens),
+                health.label()
+            ));
+        } else {
+            lines.push(format!(
+                "Overall: {} · no cache telemetry yet",
+                health.label()
+            ));
+        }
+
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    fn execute_cron_command(&self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+        let sub = parts.first().copied().unwrap_or("").to_ascii_lowercase();
+        match sub.as_str() {
+            "" | "list" | "ls" => {
+                let result =
+                    self.tool_registry
+                        .call("CronList", serde_json::json!({}), &self.tool_context);
+                CommandResult::Text(result.content)
+            }
+            "delete" | "rm" | "remove" => {
+                let id = parts.get(1).copied().unwrap_or("");
+                if id.is_empty() {
+                    return CommandResult::Text(String::from("Usage: /cron delete <id>"));
+                }
+                let result = self.tool_registry.call(
+                    "CronDelete",
+                    serde_json::json!({"id": id}),
+                    &self.tool_context,
+                );
+                CommandResult::Text(result.content)
+            }
+            _ => CommandResult::Text(String::from("Usage: /cron [list | delete <id>]")),
+        }
+    }
+
     fn command_context(&self) -> CommandContext {
         let cost_display_enabled = Arc::clone(&self.cost_display_enabled);
         let set_cost_display_enabled = Arc::clone(&self.cost_display_enabled);
         let summary = self.agent_loop.cost_tracker().summary();
+        let cwd = self.tool_context.cwd.clone();
 
         CommandContext::builder()
             .clear_conversation(|| Some(String::new()))
@@ -787,8 +1243,61 @@ impl ReplSession {
             .set_cost_display_enabled(move |enabled| {
                 set_cost_display_enabled.store(enabled, Ordering::SeqCst);
             })
+            .cwd(move || cwd.clone())
             .build()
     }
+}
+
+const MAX_GOAL_CONTINUATION_TURNS: usize = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoalStatus {
+    Achieved,
+    Continue,
+}
+
+fn parse_goal_status(text: &str) -> Option<GoalStatus> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("goal_status: achieved") {
+        Some(GoalStatus::Achieved)
+    } else if lower.contains("goal_status: continue") {
+        Some(GoalStatus::Continue)
+    } else {
+        None
+    }
+}
+
+fn build_goal_initial_prompt(goal: &str) -> String {
+    format!(
+        "[deeptide-goal]\n\
+        Goal:\n\
+        {goal}\n\n\
+        Work autonomously toward this goal. If the goal is already fully achieved, say so briefly \
+        and end your final answer with exactly:\n\
+        GOAL_STATUS: achieved\n\n\
+        If more work is still needed after this turn, do the next useful work now and end your \
+        final answer with exactly:\n\
+        GOAL_STATUS: continue\n\n\
+        Do not create cron jobs, recurring jobs, background loops, or a new persistent goal. \
+        This goal exists only in the current Deeptide TUI session.\n\
+        [/deeptide-goal]"
+    )
+}
+
+fn build_goal_continuation_prompt(goal: &str) -> String {
+    format!(
+        "[deeptide-goal-continue]\n\
+        Continue working toward the active goal:\n\
+        {goal}\n\n\
+        Review the current session history and workspace state. If the goal is fully achieved now, \
+        stop and end your final answer with exactly:\n\
+        GOAL_STATUS: achieved\n\n\
+        If it is not fully achieved, perform the next useful work now and end your final answer \
+        with exactly:\n\
+        GOAL_STATUS: continue\n\n\
+        Do not create cron jobs, recurring jobs, background loops, or a new persistent goal.\n\
+        [/deeptide-goal-continue]"
+    )
 }
 
 fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
@@ -1028,6 +1537,60 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "List or modify permission rules",
             "/permission [--allow Pattern | --deny Pattern | --remove pattern]",
         ),
+        CommandCompletionSource::new(
+            "commit",
+            Vec::<&str>::new(),
+            "Run the commit skill (stage changes, draft message, commit)",
+            "/commit [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "review",
+            Vec::<&str>::new(),
+            "Run the review-pr skill on a GitHub PR",
+            "/review <pr-number-or-url>",
+        ),
+        CommandCompletionSource::new(
+            "simplify",
+            Vec::<&str>::new(),
+            "Review changed code for reuse, quality, and efficiency",
+            "/simplify [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "skills",
+            ["skill"],
+            "List available built-in skills",
+            "/skills",
+        ),
+        CommandCompletionSource::new(
+            "reminder",
+            ["anchor", "reorient"],
+            "Re-anchor the agent's cwd/model/tool state",
+            "/reminder [show|send]",
+        ),
+        CommandCompletionSource::new(
+            "dream",
+            Vec::<&str>::new(),
+            "Consolidate session history into local long-term memory",
+            "/dream [run | status]",
+        ),
+        CommandCompletionSource::new(
+            "cron",
+            Vec::<&str>::new(),
+            "Manage scheduled cron jobs",
+            "/cron [list | delete <id>]",
+        ),
+        CommandCompletionSource::new(
+            "goal",
+            ["objective"],
+            "Run an autonomous agent goal loop until achieved",
+            "/goal [status | clear | <goal text>]",
+        ),
+        CommandCompletionSource::new(
+            "cache",
+            ["kvcache", "manifest"],
+            "Show recent prompt-cache diagnostics for this session",
+            "/cache [limit]",
+        ),
     ]
 }
 
@@ -1112,6 +1675,7 @@ fn render_status(
     cwd: &std::path::Path,
     additional_dirs: &[std::path::PathBuf],
     provider_profile: ProviderProfile,
+    session_id: &str,
 ) -> String {
     let summary = agent_loop.cost_tracker().summary();
     let cache = summary.cache_health();
@@ -1126,7 +1690,7 @@ fn render_status(
         format!("  + dirs:   {}", render_additional_dirs(additional_dirs)),
         format!("  Branch:   {branch}"),
         format!("  Provider: {}", provider_profile.name()),
-        String::from("  Session:  (not persisted)"),
+        format!("  Session:  {session_id}"),
         format!(
             "  Turns:    {} / {}",
             summary.turns.len(),

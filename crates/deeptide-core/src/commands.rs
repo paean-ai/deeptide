@@ -991,7 +991,7 @@ fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
         (
             "Core",
             &[
-                "help", "exit", "clear", "compact", "status", "cost", "reminder",
+                "help", "exit", "clear", "compact", "status", "cost", "reminder", "goal",
             ],
         ),
         ("Model", &["model", "provider", "fast", "tps"]),
@@ -1003,11 +1003,16 @@ fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
         ("Permissions", &["permission"]),
         ("Hooks", &["hooks"]),
         ("Cron", &["cron"]),
-        ("Files", &["diff", "add-dir", "open", "context", "init"]),
+        (
+            "Files",
+            &[
+                "diff", "add-dir", "open", "context", "init", "read", "write",
+            ],
+        ),
         ("Git", &["branch", "commit"]),
         ("Review", &["review"]),
-        ("Skills", &["skills", "simplify", "publish"]),
-        ("Config", &["config", "doctor", "update"]),
+        ("Skills", &["skills", "simplify"]),
+        ("Config", &["config", "doctor", "update", "cache"]),
         ("UX", &["keybindings", "debug", "vim"]),
     ]
 }
