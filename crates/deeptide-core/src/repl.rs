@@ -26,6 +26,7 @@ pub struct ReplSession {
     tool_registry: ToolRegistry,
     tool_context: ToolContext,
     clipboard_writer: ClipboardWriter,
+    additional_dirs: Vec<std::path::PathBuf>,
 }
 
 impl ReplSession {
@@ -38,6 +39,7 @@ impl ReplSession {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
             clipboard_writer: Arc::new(write_to_system_clipboard),
+            additional_dirs: Vec::new(),
         }
     }
 
@@ -141,6 +143,7 @@ impl ReplSession {
             "export" => self.execute_export_command(args),
             "diff" => self.execute_diff_command(args),
             "branch" => self.execute_branch_command(args),
+            "add-dir" | "add_dir" | "adddir" => self.execute_add_dir_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
@@ -199,7 +202,11 @@ impl ReplSession {
             return CommandResult::Text(String::from("Usage: /status"));
         }
 
-        CommandResult::Text(render_status(&self.agent_loop, &self.tool_context.cwd))
+        CommandResult::Text(render_status(
+            &self.agent_loop,
+            &self.tool_context.cwd,
+            &self.additional_dirs,
+        ))
     }
 
     fn execute_retry_command(&mut self, args: &str) -> Vec<ReplEvent> {
@@ -232,6 +239,7 @@ impl ReplSession {
         CommandResult::Text(render_context(
             &self.agent_loop,
             &self.tool_context.cwd,
+            &self.additional_dirs,
             self.tool_registry.names(),
         ))
     }
@@ -313,6 +321,41 @@ impl ReplSession {
             )),
             Err(message) => CommandResult::Text(message),
         }
+    }
+
+    fn execute_add_dir_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            return if self.additional_dirs.is_empty() {
+                CommandResult::Text(String::from("No additional dirs."))
+            } else {
+                CommandResult::Text(
+                    self.additional_dirs
+                        .iter()
+                        .map(|path| format!("  {}", path.display()))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            };
+        }
+
+        if trimmed.split_whitespace().count() > 1 {
+            return CommandResult::Text(String::from("Usage: /add-dir <path>"));
+        }
+
+        let path = resolve_session_dir(trimmed, &self.tool_context.cwd);
+        if !path.is_dir() {
+            return CommandResult::Text(format!("Not a directory: {}", path.display()));
+        }
+
+        if !self
+            .additional_dirs
+            .iter()
+            .any(|existing| existing == &path)
+        {
+            self.additional_dirs.push(path.clone());
+        }
+        CommandResult::Text(format!("Added {}", path.display()))
     }
 
     fn execute_permission_command(&mut self, args: &str) -> CommandResult {
@@ -508,6 +551,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "/branch [name | -b name]",
         ),
         CommandCompletionSource::new(
+            "add-dir",
+            ["add_dir", "adddir"],
+            "Add an additional directory to the session context",
+            "/add-dir <path>",
+        ),
+        CommandCompletionSource::new(
             "read",
             Vec::<&str>::new(),
             "Read a text file with optional line range",
@@ -530,7 +579,11 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
     ]
 }
 
-fn render_status(agent_loop: &AgentLoop, cwd: &std::path::Path) -> String {
+fn render_status(
+    agent_loop: &AgentLoop,
+    cwd: &std::path::Path,
+    additional_dirs: &[std::path::PathBuf],
+) -> String {
     let summary = agent_loop.cost_tracker().summary();
     let cache = summary.cache_health();
     let context_tokens = estimate_repl_context_tokens(agent_loop.messages());
@@ -541,6 +594,7 @@ fn render_status(agent_loop: &AgentLoop, cwd: &std::path::Path) -> String {
         String::from("Deeptide session status"),
         format!("  Model:    {}", agent_loop.model()),
         format!("  CWD:      {}", cwd.display()),
+        format!("  + dirs:   {}", render_additional_dirs(additional_dirs)),
         format!("  Branch:   {branch}"),
         String::from("  Session:  (not persisted)"),
         format!(
@@ -574,7 +628,12 @@ fn render_status(agent_loop: &AgentLoop, cwd: &std::path::Path) -> String {
     lines.join("\n")
 }
 
-fn render_context(agent_loop: &AgentLoop, cwd: &std::path::Path, tool_names: Vec<&str>) -> String {
+fn render_context(
+    agent_loop: &AgentLoop,
+    cwd: &std::path::Path,
+    additional_dirs: &[std::path::PathBuf],
+    tool_names: Vec<&str>,
+) -> String {
     let context_tokens = estimate_repl_context_tokens(agent_loop.messages());
     let context_window = model_context_window(agent_loop.model()) as usize;
     let percent = (context_tokens * 100)
@@ -605,7 +664,7 @@ fn render_context(agent_loop: &AgentLoop, cwd: &std::path::Path, tool_names: Vec
     let mut lines = vec![
         String::from("Session context"),
         format!("  CWD:      {}", cwd.display()),
-        String::from("  + dirs:   (none)"),
+        format!("  + dirs:   {}", render_additional_dirs(additional_dirs)),
         String::from("  Memory:"),
         format!(
             "    {} {}",
@@ -712,6 +771,36 @@ fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)
+}
+
+fn resolve_session_dir(raw: &str, cwd: &std::path::Path) -> std::path::PathBuf {
+    let expanded = if raw == "~" {
+        home_dir().unwrap_or_else(|| std::path::PathBuf::from(raw))
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| std::path::PathBuf::from(raw))
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    }
+}
+
+fn render_additional_dirs(additional_dirs: &[std::path::PathBuf]) -> String {
+    if additional_dirs.is_empty() {
+        String::from("(none)")
+    } else {
+        additional_dirs
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn render_cache_health(cache: &crate::CacheHealth) -> String {

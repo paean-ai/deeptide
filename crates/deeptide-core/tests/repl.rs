@@ -133,6 +133,7 @@ fn repl_status_command_reports_session_shape() {
 
     assert!(output.contains("Deeptide session status"));
     assert!(output.contains("Model:    deepseek-v4-flash"));
+    assert!(output.contains("+ dirs:   (none)"));
     assert!(output.contains("Branch:   (no git)"));
     assert!(output.contains("Session:  (not persisted)"));
     assert!(output.contains("Turns:    1 / 7"));
@@ -171,6 +172,55 @@ fn repl_context_command_reports_loaded_context_shape() {
     assert!(output.contains("Agent"));
     assert!(output.contains("Window:"));
     assert!(output.contains("/ 1,000,000)"));
+}
+
+#[test]
+fn repl_add_dir_lists_additional_context_dirs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let extra = temp.path().join("extra");
+    std::fs::create_dir(&extra).expect("extra dir");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    assert_eq!(
+        repl.submit("/add-dir"),
+        vec![ReplEvent::Output(String::from("No additional dirs."))]
+    );
+
+    assert_eq!(
+        only_output(repl.submit("/add-dir extra")),
+        format!("Added {}", extra.display())
+    );
+    assert_eq!(
+        only_output(repl.submit("/add_dir extra")),
+        format!("Added {}", extra.display())
+    );
+
+    let listed = only_output(repl.submit("/adddir"));
+    assert_eq!(listed, format!("  {}", extra.display()));
+
+    let status = only_output(repl.submit("/status"));
+    assert!(status.contains(&format!("+ dirs:   {}", extra.display())));
+    let context = only_output(repl.submit("/context"));
+    assert!(context.contains(&format!("+ dirs:   {}", extra.display())));
+}
+
+#[test]
+fn repl_add_dir_rejects_missing_and_invalid_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("file.txt"), "not a directory").expect("file");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    assert_eq!(
+        repl.submit("/add-dir one two"),
+        vec![ReplEvent::Output(String::from("Usage: /add-dir <path>"))]
+    );
+    assert_eq!(
+        repl.submit("/add-dir file.txt"),
+        vec![ReplEvent::Output(format!(
+            "Not a directory: {}",
+            temp.path().join("file.txt").display()
+        ))]
+    );
 }
 
 #[test]
