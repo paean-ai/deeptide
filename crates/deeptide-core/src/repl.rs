@@ -586,22 +586,109 @@ impl ReplSession {
     }
 
     fn execute_config_command(&self, args: &str) -> CommandResult {
-        match args.trim() {
-            "" | "show" => CommandResult::Text(render_config_overview(&self.tool_context.cwd)),
-            _ => CommandResult::Text(String::from(
-                "Usage: /config [show]\nSetting values from the Rust REPL is not available yet; edit the displayed settings files directly.",
-            )),
+        use crate::config::{ConfigScope, ConfigStore};
+
+        let trimmed = args.trim();
+        if trimmed.is_empty() || trimmed == "show" {
+            return CommandResult::Text(ConfigStore::show(&self.tool_context.cwd));
         }
+
+        // /config set key=value [--project | --local]
+        if let Some(rest) = trimmed.strip_prefix("set ") {
+            let rest = rest.trim();
+            let (rest, scope) = if let Some(r) = rest.strip_suffix("--project") {
+                (r.trim(), ConfigScope::Project)
+            } else if let Some(r) = rest.strip_suffix("--local") {
+                (r.trim(), ConfigScope::Local)
+            } else {
+                (rest, ConfigScope::Global)
+            };
+
+            let Some((key, value)) = rest.split_once('=') else {
+                return CommandResult::Text(String::from(
+                    "Usage: /config set key=value [--project | --local]",
+                ));
+            };
+            let (key, value) = (key.trim(), value.trim());
+            let path = ConfigStore::scope_path(scope, &self.tool_context.cwd);
+            return match ConfigStore::set_value(key, value, &path) {
+                Ok(()) => CommandResult::Text(format!("Set {key}={value} in {}", path.display())),
+                Err(e) => CommandResult::Text(format!("Error: {e}")),
+            };
+        }
+
+        // /config unset key [--project | --local]
+        if let Some(rest) = trimmed.strip_prefix("unset ") {
+            let rest = rest.trim();
+            let (key, scope) = if let Some(k) = rest.strip_suffix("--project") {
+                (k.trim(), ConfigScope::Project)
+            } else if let Some(k) = rest.strip_suffix("--local") {
+                (k.trim(), ConfigScope::Local)
+            } else {
+                (rest, ConfigScope::Global)
+            };
+            let path = ConfigStore::scope_path(scope, &self.tool_context.cwd);
+            return match ConfigStore::unset_value(key, &path) {
+                Ok(()) => CommandResult::Text(format!("Removed {key} from {}", path.display())),
+                Err(e) => CommandResult::Text(format!("Error: {e}")),
+            };
+        }
+
+        CommandResult::Text(String::from(
+            "Usage: /config [show | set key=value [--project|--local] | unset key [--project|--local]]",
+        ))
     }
 
     fn execute_hooks_command(&self, args: &str) -> CommandResult {
+        use crate::config::ConfigStore;
+
         if !args.trim().is_empty() {
             return CommandResult::Text(String::from("Usage: /hooks"));
         }
 
-        CommandResult::Text(String::from(
-            "No hooks configured. Add a `hooks` block to settings.json when Rust config persistence lands.",
-        ))
+        let hooks = ConfigStore::load(&self.tool_context.cwd).hooks;
+        let Some(hooks) = hooks else {
+            return CommandResult::Text(String::from(
+                "No hooks configured in settings.json. Add a `hooks` block to enable pre/post-tool hooks.",
+            ));
+        };
+
+        let mut lines = vec![String::from("Configured hooks:")];
+        let mut add = |event: &str, entries: &[crate::config::HookEntry]| {
+            for h in entries {
+                if h.is_disabled() {
+                    continue;
+                }
+                let name = h.name.as_deref().unwrap_or("(unnamed)");
+                lines.push(format!(
+                    "  {event:<18} {name:<20} matcher={} timeout={}ms",
+                    h.matcher,
+                    h.effective_timeout_ms()
+                ));
+                lines.push(format!("    command: {}", h.command));
+            }
+        };
+
+        if let Some(ref v) = hooks.pre_tool_use {
+            add("PreToolUse", v);
+        }
+        if let Some(ref v) = hooks.post_tool_use {
+            add("PostToolUse", v);
+        }
+        if let Some(ref v) = hooks.user_prompt_submit {
+            add("UserPromptSubmit", v);
+        }
+        if let Some(ref v) = hooks.session_start {
+            add("SessionStart", v);
+        }
+        if let Some(ref v) = hooks.session_end {
+            add("SessionEnd", v);
+        }
+
+        if lines.len() == 1 {
+            lines.push(String::from("  (all hooks are disabled)"));
+        }
+        CommandResult::Text(lines.join("\n"))
     }
 
     fn execute_init_command(&self, args: &str) -> CommandResult {
@@ -1714,44 +1801,6 @@ fn find_executable(command: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn render_config_overview(cwd: &std::path::Path) -> String {
-    let mut lines = vec![String::from("Settings files:")];
-    for (label, path) in candidate_config_files(cwd) {
-        let status = if path.exists() { "present" } else { "missing" };
-        lines.push(format!("  {label:<8} {status:<7} {}", path.display()));
-    }
-    lines.push(String::new());
-    lines.push(String::from(
-        "Rust config editing is intentionally read-only for now; align cloud API behavior with zero-cli launch environment variables.",
-    ));
-    lines.join("\n")
-}
-
-fn candidate_config_files(cwd: &std::path::Path) -> Vec<(&'static str, std::path::PathBuf)> {
-    let mut files = vec![
-        ("project", cwd.join(".deeptide").join("settings.json")),
-        ("local", cwd.join(".deeptide").join("settings.local.json")),
-    ];
-    if let Some(home) = repl_home_dir() {
-        files.push((
-            "global",
-            home.join(".config").join("tide").join("settings.json"),
-        ));
-    }
-    files
-}
-
-fn repl_home_dir() -> Option<std::path::PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(std::path::PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(std::path::PathBuf::from)
-    }
 }
 
 fn render_status(

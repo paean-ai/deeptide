@@ -2,6 +2,7 @@ pub mod agent_loop;
 pub mod api;
 pub mod commands;
 pub mod completion;
+pub mod config;
 pub mod context_window;
 pub mod cost;
 pub mod embedded_protocol;
@@ -30,6 +31,10 @@ pub use commands::{
 pub use completion::{
     CommandCompletionCandidate, CommandCompletionResult, CommandCompletionSource, CompletionEngine,
     Replacement,
+};
+pub use config::{
+    ConfigData, ConfigScope, ConfigStore, HookEntry, McpServerConfig, SettingsHooks,
+    SettingsPermissions, SettingsRule,
 };
 pub use context_window::{
     CompressionReport, ContextWindowConfig, ContextWindowManager, HeuristicSummarizer, Summarizer,
