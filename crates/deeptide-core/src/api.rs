@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentBackend, AgentRequest, AgentResponse, AgentUsage, ConversationMessage, MessageRole,
-    StreamingHandler, ToolCall, ToolResultBlock,
-    streaming::parse_streaming_response,
+    StreamingHandler, ToolCall, ToolResultBlock, streaming::parse_streaming_response,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

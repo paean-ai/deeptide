@@ -597,7 +597,9 @@ mod tests {
 
         // Observed handler events: MessageStart, TextBlockStart, 2x TextDelta,
         // BlockStop, MessageDelta, MessageStop.
-        let observed = observed.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let observed = observed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let kinds: Vec<&str> = observed
             .iter()
             .map(|event| match event {
