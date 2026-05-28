@@ -407,9 +407,8 @@ enum CloudCredential {
 /// but reporting it here gives clearer error semantics for typo-ed paths.
 fn resolve_system_prompt(cli: &Cli) -> Result<Option<String>, String> {
     if let Some(path) = cli.system_prompt_file.as_ref() {
-        let content = std::fs::read_to_string(path).map_err(|error| {
-            format!("--system-prompt-file {}: {error}", path.display())
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|error| format!("--system-prompt-file {}: {error}", path.display()))?;
         if content.trim().is_empty() {
             return Ok(None);
         }
@@ -819,8 +818,9 @@ mod tests {
     #[test]
     fn system_prompt_file_missing_path_returns_clear_error() {
         let mut cli = sample_cli();
-        cli.system_prompt_file =
-            Some(std::path::PathBuf::from("/nonexistent/deeptide-system-prompt.txt"));
+        cli.system_prompt_file = Some(std::path::PathBuf::from(
+            "/nonexistent/deeptide-system-prompt.txt",
+        ));
         let err = super::resolve_system_prompt(&cli).expect_err("missing path should error");
         assert!(
             err.contains("--system-prompt-file"),

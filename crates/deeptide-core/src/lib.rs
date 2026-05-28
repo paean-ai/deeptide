@@ -8,6 +8,7 @@ pub mod embedded_protocol;
 pub mod markdown;
 pub mod memory;
 pub mod permissions;
+pub mod prompt;
 pub mod repl;
 pub mod safety_guard;
 pub mod session;
@@ -39,6 +40,7 @@ pub use permissions::{
     PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
     ToolInput,
 };
+pub use prompt::build_system_prompt;
 pub use repl::{ReplEvent, ReplSession};
 pub use safety_guard::{
     AuditInput, AuditReport, Auditor, CodeAuditor, Finding, SafetyGuard, ShellAuditor, Verdict,

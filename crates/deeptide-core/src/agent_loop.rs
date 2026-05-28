@@ -103,6 +103,10 @@ pub struct AgentRequest {
     pub model: String,
     pub step: usize,
     pub max_turns: usize,
+    /// Optional system prompt sent on every request.  Empty string is treated
+    /// as absent so callers can pass an empty string without sending a blank
+    /// system field to the API.
+    pub system: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +211,7 @@ pub struct AgentLoop {
     tool_context: ToolContext,
     permission_manager: PermissionManager,
     subagent_backend_factory: Option<SubAgentBackendFactory>,
+    system_prompt: Option<String>,
 }
 
 impl AgentLoop {
@@ -225,6 +230,7 @@ impl AgentLoop {
             ),
             permission_manager: PermissionManager::new(PermissionMode::Default, rules),
             subagent_backend_factory: None,
+            system_prompt: None,
         }
     }
 
@@ -265,6 +271,20 @@ impl AgentLoop {
         self
     }
 
+    /// Set or replace the system prompt sent on every API request.
+    ///
+    /// An empty string clears the system prompt.
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        let s = prompt.into();
+        self.system_prompt = if s.is_empty() { None } else { Some(s) };
+        self
+    }
+
+    /// Return the current system prompt, if any.
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
+
     pub fn run(&mut self, user_input: impl Into<String>) -> Vec<AgentLoopEvent> {
         let user_message = ConversationMessage::user(user_input);
         self.current_run_step = 0;
@@ -286,6 +306,7 @@ impl AgentLoop {
                 model: self.model.clone(),
                 step: self.current_run_step,
                 max_turns: self.max_turns,
+                system: self.system_prompt.clone(),
             };
 
             match self.backend.respond(request) {

@@ -9,6 +9,7 @@ use crate::{
     ToolResultSummaryFormatter, WriteTool,
     agent_loop::{ConversationMessage, MessageRole},
     memory::MemorySystem,
+    prompt::build_system_prompt,
     session::{SessionStore, new_session_id},
     tools::{ClipboardTool, model_context_window},
     tui::{StatusLine, StatusSegment},
@@ -64,13 +65,13 @@ pub struct ReplSession {
 
 impl ReplSession {
     pub fn new(backend: Box<dyn AgentBackend>) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let system_prompt = build_system_prompt(&cwd);
         Self {
-            agent_loop: AgentLoop::new(backend),
+            agent_loop: AgentLoop::new(backend).with_system_prompt(system_prompt),
             cost_display_enabled: Arc::new(AtomicBool::new(false)),
             tool_registry: ToolRegistry::with_builtin_tools(),
-            tool_context: ToolContext::new(
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            ),
+            tool_context: ToolContext::new(cwd),
             clipboard_writer: Arc::new(write_to_system_clipboard),
             additional_dirs: Vec::new(),
             provider_profile: ProviderProfile::Legacy,
@@ -90,7 +91,11 @@ impl ReplSession {
 
     pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
         self.tool_context = ToolContext::new(cwd);
-        self.agent_loop = self.agent_loop.with_cwd(self.tool_context.cwd.clone());
+        let system_prompt = build_system_prompt(&self.tool_context.cwd);
+        self.agent_loop = self
+            .agent_loop
+            .with_cwd(self.tool_context.cwd.clone())
+            .with_system_prompt(system_prompt);
         self
     }
 
@@ -235,7 +240,7 @@ impl ReplSession {
             "hooks" => self.execute_hooks_command(args),
             "init" => self.execute_init_command(args),
             "update" | "upgrade" => self.execute_update_command(args),
-            "vim" | "edit" | "e" | "compose" => self.execute_vim_command(args),
+            "vim" | "edit" | "e" | "compose" => return self.execute_vim_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
@@ -619,14 +624,65 @@ impl ReplSession {
         ))
     }
 
-    fn execute_vim_command(&self, args: &str) -> CommandResult {
+    fn execute_vim_command(&mut self, args: &str) -> Vec<ReplEvent> {
         if !args.trim().is_empty() {
-            return CommandResult::Text(String::from("Usage: /vim"));
+            return vec![ReplEvent::Output(String::from("Usage: /vim"))];
         }
 
-        CommandResult::Text(String::from(
-            "Editor composition is not available in the Rust REPL yet. Use your editor to draft text, then paste it at the prompt.",
-        ))
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| default_editor());
+
+        let tmp_path = vim_temp_path();
+        if let Err(error) = std::fs::write(&tmp_path, b"") {
+            return vec![ReplEvent::Output(format!(
+                "/vim: cannot create temp file {}: {error}",
+                tmp_path.display()
+            ))];
+        }
+
+        let status = std::process::Command::new(&editor).arg(&tmp_path).status();
+        let content = std::fs::read_to_string(&tmp_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&tmp_path);
+
+        match status {
+            Err(error) => {
+                return vec![ReplEvent::Output(format!(
+                    "/vim: cannot launch '{editor}': {error}\n\
+                    Set $EDITOR or $VISUAL to your preferred editor."
+                ))];
+            }
+            Ok(status) if !status.success() => {
+                let code = status
+                    .code()
+                    .map_or_else(|| String::from("signal"), |c| c.to_string());
+                return vec![ReplEvent::Output(format!(
+                    "/vim: editor exited with status {code}; discarding content."
+                ))];
+            }
+            Ok(_) => {}
+        }
+
+        let composed = content.trim().to_owned();
+        if composed.is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "/vim: empty content, nothing submitted.",
+            ))];
+        }
+
+        let char_count = composed.chars().count();
+        let line_count = composed.lines().count();
+        let mut events = vec![ReplEvent::Output(format!(
+            "Submitting composed text ({char_count} chars, {line_count} lines)."
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&composed)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        self.autosave_session();
+        events
     }
 
     fn execute_model_command(&mut self, args: &str) -> CommandResult {
@@ -1249,6 +1305,25 @@ impl ReplSession {
 }
 
 const MAX_GOAL_CONTINUATION_TURNS: usize = 20;
+
+fn default_editor() -> String {
+    // On Windows, default to notepad when no $EDITOR is set.
+    #[cfg(windows)]
+    {
+        String::from("notepad")
+    }
+    #[cfg(not(windows))]
+    {
+        String::from("vim")
+    }
+}
+
+fn vim_temp_path() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("deeptide-compose-{n}.md"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GoalStatus {

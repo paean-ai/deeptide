@@ -125,11 +125,22 @@ impl AnthropicBackend {
 impl AgentBackend for AnthropicBackend {
     fn respond(&mut self, request: AgentRequest) -> Result<AgentResponse, String> {
         let started = Instant::now();
+        // AgentRequest::system overrides AnthropicConfig::system_prompt when set,
+        // allowing per-session prompts (built from CWD) to take precedence over
+        // the static prompt injected via CLI flags.
+        // AgentRequest::system overrides AnthropicConfig::system_prompt when set,
+        // allowing per-session prompts (built from CWD) to take precedence over
+        // the static prompt injected via CLI flags.
+        let effective_system = request
+            .system
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or(self.config.system_prompt.as_deref());
         let body = build_messages_request(
             &self.config.model,
             &request.messages,
             self.config.max_tokens,
-            self.config.system_prompt.as_deref(),
+            effective_system,
             &self.config.tool_choice,
             self.config.enable_prompt_caching,
         );
@@ -284,9 +295,7 @@ fn build_messages_request<'a>(
     // unconditionally when caching is enabled keeps the prefix bytes stable
     // turn-to-turn — the #1 thing that breaks prompt caching is moving the
     // marker around between requests.
-    if enable_prompt_caching
-        && let Some(last) = tools.last_mut()
-    {
+    if enable_prompt_caching && let Some(last) = tools.last_mut() {
         last.cache_control = Some(WireCacheControl::ephemeral());
     }
 
@@ -1833,14 +1842,8 @@ mod tests {
             ToolResultBlock::new("toolu_2", "boom", true),
         ]);
 
-        let request = build_messages_request(
-            "test-model",
-            &[user],
-            100,
-            None,
-            &ToolChoice::Auto,
-            false,
-        );
+        let request =
+            build_messages_request("test-model", &[user], 100, None, &ToolChoice::Auto, false);
         let wire = request.messages.first().expect("user message");
         assert_eq!(wire.role, "user");
         assert_eq!(wire.content.len(), 2);
@@ -1882,14 +1885,8 @@ mod tests {
     #[test]
     fn empty_message_payload_falls_back_to_single_space_text_block() {
         let blank = ConversationMessage::assistant("");
-        let request = build_messages_request(
-            "test-model",
-            &[blank],
-            100,
-            None,
-            &ToolChoice::Auto,
-            false,
-        );
+        let request =
+            build_messages_request("test-model", &[blank], 100, None, &ToolChoice::Auto, false);
         let wire = request.messages.first().expect("assistant message");
         assert_eq!(wire.content.len(), 1);
         match &wire.content[0] {
@@ -1918,14 +1915,8 @@ mod tests {
             ConversationMessage::assistant("done"),
         ];
 
-        let request = build_messages_request(
-            "test-model",
-            &messages,
-            100,
-            None,
-            &ToolChoice::Auto,
-            false,
-        );
+        let request =
+            build_messages_request("test-model", &messages, 100, None, &ToolChoice::Auto, false);
         let roles: Vec<&str> = request.messages.iter().map(|msg| msg.role).collect();
         assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
 
@@ -2071,8 +2062,8 @@ mod tests {
     #[test]
     fn anthropic_config_with_system_prompt_trims_blank() {
         use crate::AnthropicConfig;
-        let cfg = AnthropicConfig::new("https://example.test", "key", "model")
-            .with_system_prompt("   ");
+        let cfg =
+            AnthropicConfig::new("https://example.test", "key", "model").with_system_prompt("   ");
         assert!(cfg.system_prompt.is_none());
 
         let cfg = AnthropicConfig::new("https://example.test", "key", "model")
