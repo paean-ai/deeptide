@@ -511,6 +511,9 @@ impl AgentLoop {
                 if tool_call.name == "Snip" {
                     return self.execute_snip_tool_call(tool_call);
                 }
+                if tool_call.name == "Brief" {
+                    return self.execute_brief_tool_call(tool_call);
+                }
                 self.tool_registry.call(
                     &tool_call.name,
                     tool_call.input.clone(),
@@ -633,6 +636,20 @@ impl AgentLoop {
         if !result.is_error {
             let keep_last = snip_keep_last(&tool_call.input);
             self.trim_messages_for_snip(keep_last);
+        }
+        result
+    }
+
+    /// Handle a model-issued `Brief` call: surface the tool's message, then
+    /// actually fold older turns into a rolling summary (the tool alone cannot
+    /// reach the transcript, so without this the "compaction triggered" reply
+    /// would be a no-op). Mirrors the `Snip` side-effect pattern.
+    fn execute_brief_tool_call(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
+        let result =
+            self.tool_registry
+                .call(&tool_call.name, tool_call.input.clone(), &self.tool_context);
+        if !result.is_error {
+            self.compact();
         }
         result
     }

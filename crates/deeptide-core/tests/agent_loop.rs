@@ -291,6 +291,36 @@ fn agent_loop_binds_context_state_to_ctx_inspect_tool() {
 }
 
 #[test]
+fn agent_loop_brief_tool_compacts_active_message_history() {
+    let mut loop_ = AgentLoop::new(Box::new(BriefCallingBackend::default())).with_max_turns(5);
+
+    let _ = loop_.run("first");
+    let _ = loop_.run("second");
+    let _ = loop_.run("third");
+    let before = loop_.messages().len();
+    let events = loop_.run("fourth");
+
+    // The Brief tool result is surfaced to the model.
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult { tool_call, is_error: false, .. }
+                if tool_call.name == "Brief"
+        )
+    }));
+    // Older turns were actually folded into a rolling summary (not just claimed).
+    assert!(
+        loop_.messages()[0].content.starts_with("[context-summary]"),
+        "Brief should prepend a context summary, got: {:?}",
+        loop_.messages()[0].content
+    );
+    assert!(
+        loop_.messages().len() < before + 3,
+        "Brief should reduce the transcript rather than only grow it"
+    );
+}
+
+#[test]
 fn agent_loop_snip_tool_trims_active_message_history() {
     let mut loop_ = AgentLoop::new(Box::new(SnipCallingBackend::default())).with_max_turns(3);
 
@@ -570,6 +600,28 @@ impl AgentBackend for CtxInspectCallingBackend {
             })
         } else {
             Ok(AgentResponse::text("done after context inspection"))
+        }
+    }
+}
+
+#[derive(Default)]
+struct BriefCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for BriefCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        // After three plain turns (six messages, beyond the default window),
+        // request a Brief compaction.
+        if self.calls == 4 {
+            Ok(AgentResponse {
+                content: String::from("Context is getting long; compacting."),
+                usage: None,
+                tool_calls: vec![ToolCall::new("toolu_brief", "Brief", serde_json::json!({}))],
+            })
+        } else {
+            Ok(AgentResponse::text(format!("turn {}", self.calls)))
         }
     }
 }
