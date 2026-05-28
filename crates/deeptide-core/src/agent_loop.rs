@@ -316,6 +316,22 @@ impl AgentLoop {
     }
 
     pub fn run(&mut self, user_input: impl Into<String>) -> Vec<AgentLoopEvent> {
+        let user_input = user_input.into();
+
+        // UserPromptSubmit hooks fire before the prompt is processed. They are
+        // observational (the result is discarded), matching the Swift
+        // implementation; the prompt text is passed as the hook input.
+        if self
+            .hooks
+            .has_hooks(crate::hooks::HookEvent::UserPromptSubmit)
+        {
+            let _ = self.hooks.run(
+                crate::hooks::HookEvent::UserPromptSubmit,
+                None,
+                Some(&user_input),
+            );
+        }
+
         let user_message = ConversationMessage::user(user_input);
         self.current_run_step = 0;
         self.messages.push(user_message.clone());
