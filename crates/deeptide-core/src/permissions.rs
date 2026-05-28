@@ -453,6 +453,8 @@ fn is_read_only(tool_name: &str) -> bool {
             | "MacLog"
             | "MacDiagnose"
             | "ReviewArtifact"
+            // Reads buffered output of a background Bash invocation; no side effects.
+            | "BashOutput"
     )
 }
 
@@ -478,6 +480,8 @@ fn is_denied_in_plan_mode(tool_name: &str) -> bool {
             | "Publish"
             | "RemoteTrigger"
             | "PushNotification"
+            // SIGKILLs a background process — a side effect, blocked while planning.
+            | "KillBash"
     )
 }
 
@@ -606,6 +610,8 @@ fn is_destructive(tool_name: &str) -> bool {
             | "Publish"
             | "RemoteTrigger"
             | "PushNotification"
+            // Terminating a process is impactful enough to confirm by default.
+            | "KillBash"
     )
 }
 
@@ -734,6 +740,32 @@ mod tests {
                 PermissionDecision::Allow
             );
         }
+    }
+
+    #[test]
+    fn background_shell_tools_permission_classification() {
+        // BashOutput / KillBash are Claude-Code-style additions (no Swift
+        // counterpart), classified by behavior: reading buffered output is
+        // read-only, while SIGKILLing a process is a side effect.
+        let default_mgr = PermissionManager::new(PermissionMode::Default, temp_rules());
+        assert_eq!(
+            default_mgr.check("BashOutput", &sample_input("BashOutput")),
+            PermissionDecision::Allow,
+            "BashOutput only reads buffered output — allow without prompting"
+        );
+        assert_eq!(
+            default_mgr.check("KillBash", &sample_input("KillBash")),
+            PermissionDecision::Ask,
+            "KillBash terminates a process — confirm by default"
+        );
+
+        let plan_mgr = PermissionManager::new(PermissionMode::Plan, temp_rules());
+        assert_eq!(
+            plan_mgr.check("BashOutput", &sample_input("BashOutput")),
+            PermissionDecision::Allow,
+            "reading output is safe while planning"
+        );
+        assert_denied(plan_mgr.check("KillBash", &sample_input("KillBash")));
     }
 
     #[test]
