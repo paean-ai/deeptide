@@ -182,6 +182,14 @@ impl ReplSession {
             "keybindings" | "keys" => self.execute_keybindings_command(args),
             "sessions" | "session" => self.execute_sessions_command(args),
             "resume" | "load" | "restore" => self.execute_resume_command(args),
+            "open" => self.execute_open_command(args),
+            "paste" | "p" => self.execute_paste_command(args),
+            "doctor" => self.execute_doctor_command(args),
+            "config" => self.execute_config_command(args),
+            "hooks" => self.execute_hooks_command(args),
+            "init" => self.execute_init_command(args),
+            "update" | "upgrade" => self.execute_update_command(args),
+            "vim" | "edit" | "e" | "compose" => self.execute_vim_command(args),
             "read" => self.execute_read_command(args),
             "write" => self.execute_write_command(args),
             "memory" | "mem" => MemoryCommand.execute(args, &context),
@@ -370,6 +378,154 @@ impl ReplSession {
                 "Session not found: {trimmed}. Persisted session restore is not available in the Rust REPL yet."
             ))
         }
+    }
+
+    fn execute_open_command(&self, args: &str) -> CommandResult {
+        let raw = unquote_path(args.trim());
+        if raw.is_empty() || raw.split_whitespace().count() > 1 && !args.trim().starts_with('"') {
+            return CommandResult::Text(String::from("Usage: /open <path>"));
+        }
+
+        let path = self.tool_context.resolve_path(&raw);
+        if !path.exists() {
+            return CommandResult::Text(format!("File does not exist: {}", path.display()));
+        }
+
+        CommandResult::Text(format!(
+            "{} is not classified as sensitive in the Rust build; normal tools can already read it.",
+            path.display()
+        ))
+    }
+
+    fn execute_paste_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /paste"));
+        }
+
+        let result =
+            ClipboardTool.call(serde_json::json!({"operation": "read"}), &self.tool_context);
+        if result.is_error {
+            return CommandResult::Text(format!("/paste: {}", result.content));
+        }
+
+        let content = result.content.trim();
+        if content.is_empty() || content == "[Clipboard is empty]" {
+            return CommandResult::Text(String::from(
+                "/paste: clipboard has no text content. Image prefill is not available in the Rust REPL yet.",
+            ));
+        }
+
+        CommandResult::Text(format!(
+            "Clipboard text:\n{content}\n\nPaste this into the prompt or use the Clipboard tool from the agent loop."
+        ))
+    }
+
+    fn execute_doctor_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /doctor"));
+        }
+
+        let env = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        let has_api_key = [
+            "DEEPSEEK_API_KEY",
+            "ZERO_CLI_API_KEY",
+            "ZERO_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ]
+        .iter()
+        .any(|key| env.get(*key).is_some_and(|value| !value.is_empty()));
+        let base_url = env
+            .get("DEEPSEEK_BASE_URL")
+            .or_else(|| env.get("ZERO_CLI_BASE_URL"))
+            .or_else(|| env.get("ANTHROPIC_BASE_URL"))
+            .map(String::as_str)
+            .unwrap_or("https://api.deepseek.com/anthropic");
+
+        let mut lines = vec![String::from("Deeptide doctor")];
+        lines.push(render_doctor_check(
+            "API key",
+            if has_api_key { "set" } else { "missing" },
+            has_api_key,
+        ));
+        lines.push(render_doctor_check("Base URL", base_url, true));
+        for command in ["git", "rg", "bash"] {
+            let path = find_executable(command);
+            lines.push(render_doctor_check(
+                command,
+                path.as_deref().unwrap_or("not found"),
+                path.is_some(),
+            ));
+        }
+        lines.push(String::new());
+        lines.push(format!(
+            "Tools: {} registered",
+            self.tool_registry.names().len()
+        ));
+        lines.push(format!(
+            "Commands: {} registered",
+            repl_command_sources().len()
+        ));
+        lines.push(format!("CWD: {}", self.tool_context.cwd.display()));
+
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    fn execute_config_command(&self, args: &str) -> CommandResult {
+        match args.trim() {
+            "" | "show" => CommandResult::Text(render_config_overview(&self.tool_context.cwd)),
+            _ => CommandResult::Text(String::from(
+                "Usage: /config [show]\nSetting values from the Rust REPL is not available yet; edit the displayed settings files directly.",
+            )),
+        }
+    }
+
+    fn execute_hooks_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /hooks"));
+        }
+
+        CommandResult::Text(String::from(
+            "No hooks configured. Add a `hooks` block to settings.json when Rust config persistence lands.",
+        ))
+    }
+
+    fn execute_init_command(&self, args: &str) -> CommandResult {
+        let extra = args.trim();
+        let mut lines = vec![
+            String::from("Project bootstrap is model-driven in Deeptide."),
+            String::from(
+                "Rust REPL can already inspect the workspace with /context, /memory, /read, /grep, and /glob-backed tools.",
+            ),
+            String::from(
+                "Ask the agent to create or refresh TIDE.md after it scans the repository.",
+            ),
+        ];
+        if !extra.is_empty() {
+            lines.push(format!("Extra context: {extra}"));
+        }
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    fn execute_update_command(&self, args: &str) -> CommandResult {
+        let parts = args.split_whitespace().collect::<Vec<_>>();
+        let allowed = ["--check", "--force"];
+        if parts.iter().any(|part| !allowed.contains(part)) {
+            return CommandResult::Text(String::from("Usage: /update [--check | --force]"));
+        }
+
+        CommandResult::Text(String::from(
+            "Update checks are not available in the Rust REPL yet. Run the packaged installer or Swift `tide update` command from your shell.",
+        ))
+    }
+
+    fn execute_vim_command(&self, args: &str) -> CommandResult {
+        if !args.trim().is_empty() {
+            return CommandResult::Text(String::from("Usage: /vim"));
+        }
+
+        CommandResult::Text(String::from(
+            "Editor composition is not available in the Rust REPL yet. Use your editor to draft text, then paste it at the prompt.",
+        ))
     }
 
     fn execute_model_command(&mut self, args: &str) -> CommandResult {
@@ -781,6 +937,54 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "/resume [session-id]",
         ),
         CommandCompletionSource::new(
+            "open",
+            Vec::<&str>::new(),
+            "Allow a sensitive file to be read this session",
+            "/open <path>",
+        ),
+        CommandCompletionSource::new(
+            "paste",
+            ["p"],
+            "Attach or read clipboard content for the next prompt",
+            "/paste",
+        ),
+        CommandCompletionSource::new(
+            "doctor",
+            Vec::<&str>::new(),
+            "Diagnose installation and environment",
+            "/doctor",
+        ),
+        CommandCompletionSource::new(
+            "config",
+            Vec::<&str>::new(),
+            "Show merged settings",
+            "/config [show]",
+        ),
+        CommandCompletionSource::new(
+            "hooks",
+            Vec::<&str>::new(),
+            "List configured hooks",
+            "/hooks",
+        ),
+        CommandCompletionSource::new(
+            "init",
+            Vec::<&str>::new(),
+            "Bootstrap project memory and guide files",
+            "/init [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "update",
+            ["upgrade"],
+            "Update deeptide to the latest published version",
+            "/update [--check | --force]",
+        ),
+        CommandCompletionSource::new(
+            "vim",
+            ["edit", "e", "compose"],
+            "Open $EDITOR for the next prompt",
+            "/vim",
+        ),
+        CommandCompletionSource::new(
             "read",
             Vec::<&str>::new(),
             "Read a text file with optional line range",
@@ -801,6 +1005,82 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "/permission [--allow Pattern | --deny Pattern | --remove pattern]",
         ),
     ]
+}
+
+fn unquote_path(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        trimmed[1..trimmed.len() - 1].to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn render_doctor_check(label: &str, value: &str, ok: bool) -> String {
+    let mark = if ok { "ok" } else { "missing" };
+    format!("  {mark:<7} {label:<9} {value}")
+}
+
+fn find_executable(command: &str) -> Option<String> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return Some(candidate.display().to_string());
+        }
+
+        #[cfg(windows)]
+        {
+            for extension in ["exe", "cmd", "bat"] {
+                let candidate = dir.join(format!("{command}.{extension}"));
+                if candidate.is_file() {
+                    return Some(candidate.display().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn render_config_overview(cwd: &std::path::Path) -> String {
+    let mut lines = vec![String::from("Settings files:")];
+    for (label, path) in candidate_config_files(cwd) {
+        let status = if path.exists() { "present" } else { "missing" };
+        lines.push(format!("  {label:<8} {status:<7} {}", path.display()));
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "Rust config editing is intentionally read-only for now; align cloud API behavior with zero-cli launch environment variables.",
+    ));
+    lines.join("\n")
+}
+
+fn candidate_config_files(cwd: &std::path::Path) -> Vec<(&'static str, std::path::PathBuf)> {
+    let mut files = vec![
+        ("project", cwd.join(".deeptide").join("settings.json")),
+        ("local", cwd.join(".deeptide").join("settings.local.json")),
+    ];
+    if let Some(home) = repl_home_dir() {
+        files.push((
+            "global",
+            home.join(".config").join("tide").join("settings.json"),
+        ));
+    }
+    files
+}
+
+fn repl_home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(std::path::PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(std::path::PathBuf::from)
+    }
 }
 
 fn render_status(

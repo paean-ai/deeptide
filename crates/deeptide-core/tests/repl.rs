@@ -284,6 +284,80 @@ fn repl_tps_command_matches_swift_flags_with_empty_rust_store() {
 }
 
 #[test]
+fn repl_swift_parity_support_commands_are_available() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "hello\n").expect("fixture");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    let help = only_output(repl.submit("/help"));
+    for command in [
+        "/open", "/paste", "/doctor", "/config", "/hooks", "/init", "/update", "/vim",
+    ] {
+        assert!(help.contains(command), "help should list {command}");
+    }
+
+    assert_eq!(
+        only_output(repl.submit("/open missing.txt")),
+        format!(
+            "File does not exist: {}",
+            temp.path().join("missing.txt").display()
+        )
+    );
+    assert_eq!(
+        only_output(repl.submit("/open notes.txt")),
+        format!(
+            "{} is not classified as sensitive in the Rust build; normal tools can already read it.",
+            temp.path().join("notes.txt").display()
+        )
+    );
+
+    let doctor = only_output(repl.submit("/doctor"));
+    assert!(doctor.contains("Deeptide doctor"));
+    assert!(doctor.contains("Tools:"));
+    assert!(doctor.contains("Commands:"));
+
+    let config = only_output(repl.submit("/config"));
+    assert!(config.contains("Settings files:"));
+    assert!(config.contains("zero-cli launch environment variables"));
+
+    assert_eq!(
+        only_output(repl.submit("/hooks")),
+        "No hooks configured. Add a `hooks` block to settings.json when Rust config persistence lands."
+    );
+    assert!(only_output(repl.submit("/init")).contains("Project bootstrap is model-driven"));
+    assert!(
+        only_output(repl.submit("/update --check")).contains("Update checks are not available")
+    );
+    assert!(only_output(repl.submit("/vim")).contains("Editor composition is not available"));
+}
+
+#[test]
+fn repl_support_commands_validate_usage() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    assert_eq!(
+        repl.submit("/doctor now"),
+        vec![ReplEvent::Output(String::from("Usage: /doctor"))]
+    );
+    assert_eq!(
+        repl.submit("/paste now"),
+        vec![ReplEvent::Output(String::from("Usage: /paste"))]
+    );
+    assert_eq!(
+        repl.submit("/config set model=foo"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /config [show]\nSetting values from the Rust REPL is not available yet; edit the displayed settings files directly."
+        ))]
+    );
+    assert_eq!(
+        repl.submit("/update --unknown"),
+        vec![ReplEvent::Output(String::from(
+            "Usage: /update [--check | --force]"
+        ))]
+    );
+}
+
+#[test]
 fn repl_status_command_reports_session_shape() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut repl = ReplSession::new(Box::new(StaticBackend))
