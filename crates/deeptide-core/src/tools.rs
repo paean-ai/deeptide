@@ -399,7 +399,8 @@ impl Tool for GrepTool {
         let output_mode = input
             .get("output_mode")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("files_with_matches");
+            .unwrap_or("files_with_matches")
+            .to_owned();
         let head_limit = input
             .get("head_limit")
             .and_then(serde_json::Value::as_u64)
@@ -415,15 +416,47 @@ impl Tool for GrepTool {
             .and_then(serde_json::Value::as_str)
             .map(GlobMatcher::new);
 
-        grep_path(
-            &base,
-            &base,
-            &regex,
+        // Context lines: -C/context set both sides; -B/-A set each side. A
+        // present -C/context overrides -B/-A, matching the Swift GrepTool.
+        let grep_u64 = |key: &str| input.get(key).and_then(serde_json::Value::as_u64);
+        let context = grep_u64("-C").or_else(|| grep_u64("context"));
+        let before = context
+            .or_else(|| grep_u64("-B"))
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
+        let after = context
+            .or_else(|| grep_u64("-A"))
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
+        let line_numbers = input
+            .get("-n")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+
+        let type_extensions = match input.get("type").and_then(serde_json::Value::as_str) {
+            Some(name) if !name.trim().is_empty() => match file_type_extensions(name.trim()) {
+                Some(extensions) => Some(
+                    extensions
+                        .iter()
+                        .map(|ext| (*ext).to_owned())
+                        .collect::<Vec<_>>(),
+                ),
+                None => return ToolResult::error(format!("Unknown file type: {}", name.trim())),
+            },
+            _ => None,
+        };
+
+        let options = GrepOptions {
             output_mode,
-            glob.as_ref(),
             head_limit,
             offset,
-        )
+            before,
+            after,
+            line_numbers,
+            type_extensions,
+        };
+
+        grep_path(&base, &base, &regex, glob.as_ref(), &options)
     }
 }
 
@@ -10299,42 +10332,92 @@ fn normalize_quotes(content: &str) -> String {
         .replace(['\u{2018}', '\u{2019}'], "'")
 }
 
+/// Search options resolved from the `Grep` tool input.
+struct GrepOptions {
+    output_mode: String,
+    head_limit: usize,
+    offset: usize,
+    /// Context lines before each match (content mode only).
+    before: usize,
+    /// Context lines after each match (content mode only).
+    after: usize,
+    /// Whether to prefix content lines with their line number.
+    line_numbers: bool,
+    /// When `Some`, only files with one of these (lowercase, dotless)
+    /// extensions are searched. Resolved from the `type` parameter.
+    type_extensions: Option<Vec<String>>,
+}
+
+impl GrepOptions {
+    fn is_content_mode(&self) -> bool {
+        self.output_mode == "content"
+    }
+
+    /// Whether `path` passes the `type` filter (always true when no filter set).
+    fn matches_type(&self, path: &Path) -> bool {
+        let Some(extensions) = &self.type_extensions else {
+            return true;
+        };
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some(ext) => {
+                let ext = ext.to_ascii_lowercase();
+                extensions.iter().any(|candidate| candidate == &ext)
+            }
+            None => false,
+        }
+    }
+}
+
+/// Map a `type` name to the file extensions it covers. Mirrors the common
+/// ripgrep `--type` definitions Swift relies on. Returns `None` for unknown
+/// types so the tool can report an error like ripgrep does.
+fn file_type_extensions(name: &str) -> Option<&'static [&'static str]> {
+    let extensions: &'static [&'static str] = match name.to_ascii_lowercase().as_str() {
+        "rust" | "rs" => &["rs"],
+        "js" | "javascript" => &["js", "jsx", "mjs", "cjs"],
+        "ts" | "typescript" => &["ts", "tsx", "mts", "cts"],
+        "py" | "python" => &["py", "pyi"],
+        "go" => &["go"],
+        "swift" => &["swift"],
+        "java" => &["java"],
+        "kotlin" | "kt" => &["kt", "kts"],
+        "c" => &["c", "h"],
+        "cpp" | "c++" | "cxx" => &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
+        "rb" | "ruby" => &["rb"],
+        "php" => &["php"],
+        "html" => &["html", "htm"],
+        "css" => &["css"],
+        "json" => &["json"],
+        "md" | "markdown" => &["md", "markdown"],
+        "sh" | "shell" | "bash" => &["sh", "bash"],
+        "yaml" | "yml" => &["yaml", "yml"],
+        "toml" => &["toml"],
+        _ => return None,
+    };
+    Some(extensions)
+}
+
 fn grep_path(
     base: &Path,
     path: &Path,
     regex: &regex::Regex,
-    output_mode: &str,
     glob: Option<&GlobMatcher>,
-    head_limit: usize,
-    offset: usize,
+    options: &GrepOptions,
 ) -> ToolResult {
     if path.is_file() {
         // Don't surface matching lines from a sensitive file (e.g. `.env`)
         // unless it has been explicitly opened — return as if it had no matches.
-        if !crate::sensitive_file::is_allowed(path) {
-            return render_grep_output(
-                output_mode,
-                BTreeMap::new(),
-                Vec::new(),
-                head_limit,
-                offset,
-                base,
-            );
+        // The `type` filter is likewise honoured for a single explicit file.
+        if !crate::sensitive_file::is_allowed(path) || !options.matches_type(path) {
+            return render_grep_output(options, BTreeMap::new(), Vec::new(), base);
         }
-        return grep_file(
-            path.parent().unwrap_or(base),
-            path,
-            regex,
-            output_mode,
-            head_limit,
-            offset,
-        );
+        return grep_file(path.parent().unwrap_or(base), path, regex, options);
     }
     if !path.is_dir() {
         return ToolResult::error(format!("Path does not exist: {}", path.display()));
     }
 
-    let collect_limit = collect_limit(head_limit, offset);
+    let collect_limit = collect_limit(options.head_limit, options.offset);
     let mut matching_files = BTreeMap::<String, usize>::new();
     let mut content_matches = Vec::new();
     collect_files(path, path, &mut |relative, full_path| {
@@ -10348,92 +10431,128 @@ fn grep_path(
         {
             return true;
         }
-        match grep_file_matches(path, full_path, regex) {
-            Ok(matches) if !matches.is_empty() => {
-                let relative = relative.to_string_lossy().replace('\\', "/");
-                matching_files.insert(relative.clone(), matches.len());
-                for (line_number, line) in matches {
-                    content_matches.push(format!("{relative}:{line_number}:{line}"));
-                }
-            }
-            Ok(_) => {}
-            Err(_) => {}
+        if !options.matches_type(full_path) {
+            return true;
+        }
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if let Ok((count, lines)) = process_grep_file(&relative, full_path, regex, options)
+            && count > 0
+        {
+            matching_files.insert(relative, count);
+            content_matches.extend(lines);
         }
         matching_files.len().max(content_matches.len()) < collect_limit
     });
 
-    render_grep_output(
-        output_mode,
-        matching_files,
-        content_matches,
-        head_limit,
-        offset,
-        base,
-    )
+    render_grep_output(options, matching_files, content_matches, base)
 }
 
-fn grep_file(
-    base: &Path,
-    path: &Path,
-    regex: &regex::Regex,
-    output_mode: &str,
-    head_limit: usize,
-    offset: usize,
-) -> ToolResult {
-    match grep_file_matches(base, path, regex) {
-        Ok(matches) => {
-            let relative = path
-                .strip_prefix(base)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .replace('\\', "/");
+fn grep_file(base: &Path, path: &Path, regex: &regex::Regex, options: &GrepOptions) -> ToolResult {
+    let relative = path
+        .strip_prefix(base)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    match process_grep_file(&relative, path, regex, options) {
+        Ok((count, lines)) => {
             let mut matching_files = BTreeMap::new();
-            let mut content_matches = Vec::new();
-            if !matches.is_empty() {
-                matching_files.insert(relative.clone(), matches.len());
-                for (line_number, line) in matches {
-                    content_matches.push(format!("{relative}:{line_number}:{line}"));
-                }
+            if count > 0 {
+                matching_files.insert(relative, count);
             }
-            render_grep_output(
-                output_mode,
-                matching_files,
-                content_matches,
-                head_limit,
-                offset,
-                base,
-            )
+            render_grep_output(options, matching_files, lines, base)
         }
         Err(error) => ToolResult::error(format!("Failed to search {}: {error}", path.display())),
     }
 }
 
-fn grep_file_matches(
-    base: &Path,
+/// Read `path`, returning the number of matching lines and — in content mode —
+/// the formatted output lines (matches plus any requested context).
+fn process_grep_file(
+    relative: &str,
     path: &Path,
     regex: &regex::Regex,
-) -> io::Result<Vec<(usize, String)>> {
+    options: &GrepOptions,
+) -> io::Result<(usize, Vec<String>)> {
     let file = fs::File::open(path)?;
-    let mut matches = Vec::new();
-    for (index, line) in io::BufReader::new(file).lines().enumerate() {
-        let line = line?;
-        if regex.is_match(&line) {
-            matches.push((index + 1, line));
+    let mut all_lines = Vec::new();
+    for line in io::BufReader::new(file).lines() {
+        all_lines.push(line?);
+    }
+    let match_indices: Vec<usize> = all_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| regex.is_match(line))
+        .map(|(index, _)| index)
+        .collect();
+    if match_indices.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    let lines = if options.is_content_mode() {
+        format_grep_content(relative, &all_lines, &match_indices, options)
+    } else {
+        Vec::new()
+    };
+    Ok((match_indices.len(), lines))
+}
+
+/// Format content-mode output: matching lines as `path:line:text`, context
+/// lines as `path-line-text`, with `--` separators between non-contiguous
+/// groups (ripgrep convention). `--` separators are only emitted when context
+/// is requested.
+fn format_grep_content(
+    relative: &str,
+    all_lines: &[String],
+    match_indices: &[usize],
+    options: &GrepOptions,
+) -> Vec<String> {
+    let context_mode = options.before > 0 || options.after > 0;
+    let match_set: std::collections::HashSet<usize> = match_indices.iter().copied().collect();
+
+    let mut to_emit: Vec<usize> = Vec::new();
+    let last_index = all_lines.len().saturating_sub(1);
+    for &index in match_indices {
+        let start = index.saturating_sub(options.before);
+        let end = index.saturating_add(options.after).min(last_index);
+        for i in start..=end {
+            to_emit.push(i);
         }
     }
-    let _ = base;
-    Ok(matches)
+    to_emit.sort_unstable();
+    to_emit.dedup();
+
+    let mut out = Vec::with_capacity(to_emit.len());
+    let mut previous: Option<usize> = None;
+    for &index in &to_emit {
+        if context_mode
+            && let Some(prev) = previous
+            && index > prev + 1
+        {
+            out.push(String::from("--"));
+        }
+        let separator = if match_set.contains(&index) { ':' } else { '-' };
+        if options.line_numbers {
+            out.push(format!(
+                "{relative}{separator}{}{separator}{}",
+                index + 1,
+                all_lines[index]
+            ));
+        } else {
+            out.push(format!("{relative}{separator}{}", all_lines[index]));
+        }
+        previous = Some(index);
+    }
+    out
 }
 
 fn render_grep_output(
-    output_mode: &str,
+    options: &GrepOptions,
     matching_files: BTreeMap<String, usize>,
     content_matches: Vec<String>,
-    head_limit: usize,
-    offset: usize,
     _base: &Path,
 ) -> ToolResult {
-    match output_mode {
+    let head_limit = options.head_limit;
+    let offset = options.offset;
+    match options.output_mode.as_str() {
         "content" => {
             let (lines, truncated) = page_lines(content_matches, head_limit, offset);
             if lines.is_empty() {

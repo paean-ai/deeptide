@@ -2223,6 +2223,129 @@ fn grep_tool_content_mode_includes_line_numbers() {
 }
 
 #[test]
+fn grep_tool_content_mode_shows_context_lines() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("notes.txt"),
+        "one\ntwo\nMATCH\nfour\nfive\n",
+    )
+    .expect("write");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({
+            "pattern": "MATCH",
+            "path": "notes.txt",
+            "output_mode": "content",
+            "-C": 1
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    // The match uses a ':' separator; context lines use '-'.
+    assert!(
+        result.content.contains("notes.txt:3:MATCH"),
+        "match line: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("notes.txt-2-two"),
+        "before-context: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("notes.txt-4-four"),
+        "after-context: {}",
+        result.content
+    );
+    // Lines outside the 1-line window are excluded.
+    assert!(!result.content.contains("one"));
+    assert!(!result.content.contains("five"));
+}
+
+#[test]
+fn grep_tool_before_and_after_context_are_independent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("notes.txt"),
+        "one\ntwo\nMATCH\nfour\nfive\n",
+    )
+    .expect("write");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({
+            "pattern": "MATCH",
+            "path": "notes.txt",
+            "output_mode": "content",
+            "-B": 2,
+            "-A": 0
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("notes.txt-1-one"));
+    assert!(result.content.contains("notes.txt-2-two"));
+    assert!(result.content.contains("notes.txt:3:MATCH"));
+    assert!(!result.content.contains("four"));
+}
+
+#[test]
+fn grep_tool_line_numbers_can_be_disabled() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\n").expect("write");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({
+            "pattern": "alpha",
+            "path": "notes.txt",
+            "output_mode": "content",
+            "-n": false
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("notes.txt:alpha"));
+    assert!(!result.content.contains("notes.txt:1:alpha"));
+}
+
+#[test]
+fn grep_tool_type_filter_restricts_to_matching_extensions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("keep.rs"), "needle here\n").expect("write rs");
+    std::fs::write(temp.path().join("skip.txt"), "needle here\n").expect("write txt");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({"pattern": "needle", "type": "rust"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("keep.rs"));
+    assert!(!result.content.contains("skip.txt"));
+}
+
+#[test]
+fn grep_tool_unknown_type_reports_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("a.rs"), "x\n").expect("write");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "Grep",
+        serde_json::json!({"pattern": "x", "type": "nonsense"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("Unknown file type"));
+}
+
+#[test]
 fn grep_tool_applies_offset_after_head_limit_for_pagination() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(
