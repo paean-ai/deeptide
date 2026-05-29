@@ -57,7 +57,7 @@ pub use permissions::{
     ToolInput,
 };
 pub use prompt::build_system_prompt;
-pub use repl::{ReplEvent, ReplSession};
+pub use repl::{ReplEvent, ReplSession, SystemMessage};
 pub use routing::{EscalationPolicy, Route, RoutingBackend};
 pub use safety_guard::{
     AuditInput, AuditReport, Auditor, CodeAuditor, Finding, SafetyGuard, ShellAuditor, Verdict,
