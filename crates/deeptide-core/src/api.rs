@@ -1079,7 +1079,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "LSP",
-            description: "Code intelligence through a local Language Server Protocol server.",
+            description: "Code intelligence via the Language Server Protocol.\n\nOperations:\n- goToDefinition - jump to where a symbol is defined (needs line + character)\n- findReferences - find all usages of a symbol across the codebase (needs line + character)\n- hover - type signature and doc comment at a position (needs line + character)\n- documentSymbol - list all functions, classes, and structs in a file (needs line only)\n\nParameters:\n- file_path - source file path; relative paths resolve against the current workspace\n- line - 1-based line number, as shown in editors\n- character - 1-based column offset, required for goToDefinition, findReferences, and hover\n- operation - one of the four operations above\n\nPrefer LSP over Grep for symbol navigation when you need an exact definition location (not just name matches), all references, type information without reading whole files, or a quick outline of a file's symbols.\n\nResolves a language server by file type: sourcekit-lsp for Swift/Objective-C/C/C++, pyright for Python, typescript-language-server for JS/TS, rust-analyzer for Rust, gopls for Go. Install the appropriate language server; the tool returns a clear error if none is found on PATH.\n\nTip: use documentSymbol first to understand a file's structure, then goToDefinition/findReferences on specific symbols.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1424,7 +1424,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "Monitor",
-            description: "Run a long command and return recent stdout/stderr after a timeout or regex match. Use for logs, watchers, and dev servers.",
+            description: "Runs a long-running shell command and returns its recent output after a timeout or regex match.\n- command: shell command to run (required).\n- max_seconds: how long to monitor before returning (default 30, clamped to 5..300).\n- until: optional regular expression; return early when a stdout line matches.\n- Use this for log tailing, dev servers, and file watchers - situations where Bash's buffer-then-return model would block too long.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1799,6 +1799,9 @@ mod tests {
         assert!(describe("ReadFiles").contains("Up to 50 files per call"));
         assert!(describe("WebFetch").contains("final URL after redirects"));
         assert!(describe("WebSearch").contains("allowed_domains and blocked_domains"));
+        assert!(describe("LSP").contains("documentSymbol"));
+        assert!(describe("LSP").contains("rust-analyzer for Rust"));
+        assert!(describe("Monitor").contains("clamped to 5..300"));
     }
 
     #[test]
