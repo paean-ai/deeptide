@@ -346,10 +346,46 @@ fn is_horizontal_rule(trimmed: &str) -> bool {
 }
 
 fn render_inline(text: &str, color: bool) -> String {
-    let text = replace_delimited(text, "`", "`", |inner| {
-        style(inner, Style::InlineCode, color)
-    });
-    let text = replace_delimited(&text, "**", "**", |inner| style(inner, Style::Bold, color));
+    // Inline code is processed first and its content is protected from the
+    // remaining passes, so markdown-significant characters inside backticks
+    // (`**kwargs`, `a_b_c`, `x~y`) render literally instead of being styled.
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('`') {
+        out.push_str(&render_inline_emphasis(&rest[..start], color));
+        let after_open = start + 1;
+        match rest[after_open..].find('`') {
+            Some(end_rel) => {
+                let inner = &rest[after_open..after_open + end_rel];
+                if inner.is_empty() {
+                    // An empty span (``) isn't code; keep one backtick literal
+                    // and continue scanning from just after it.
+                    out.push('`');
+                    rest = &rest[after_open..];
+                } else {
+                    out.push_str(&style(inner, Style::InlineCode, color));
+                    rest = &rest[after_open + end_rel + 1..];
+                }
+            }
+            None => {
+                // Unterminated backtick: treat it as ordinary text and let the
+                // emphasis pass handle the remainder.
+                out.push_str(&render_inline_emphasis(&rest[start..], color));
+                return out;
+            }
+        }
+    }
+    out.push_str(&render_inline_emphasis(rest, color));
+    out
+}
+
+/// Apply the non-code inline passes (bold, strike, links) to a span that is
+/// already known to contain no inline code.
+fn render_inline_emphasis(text: &str, color: bool) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let text = replace_delimited(text, "**", "**", |inner| style(inner, Style::Bold, color));
     let text = replace_delimited(&text, "__", "__", |inner| style(inner, Style::Bold, color));
     let text = replace_delimited(&text, "~~", "~~", |inner| {
         style(inner, Style::Strike, color)
@@ -514,5 +550,112 @@ mod tests {
         );
 
         assert_eq!(rendered, "a │ b\n──┼──\n1 │ 2");
+    }
+
+    fn render_colored(markdown: &str) -> String {
+        MarkdownRenderer::render_with_options(markdown, MarkdownRenderOptions { color: true })
+    }
+
+    #[test]
+    fn empty_input_renders_empty() {
+        assert_eq!(MarkdownRenderer::render(""), "");
+    }
+
+    #[test]
+    fn inline_bold_and_strike_styles_apply() {
+        // ** and __ both bold; ~~ strikes. Plain text survives ANSI stripping.
+        let plain = render_plain("a **b** c __d__ e ~~f~~");
+        assert_eq!(plain, "a b c d e f");
+
+        // The corresponding ANSI styles are actually emitted with color on.
+        let colored = render_colored("**b** __d__ ~~f~~");
+        assert!(
+            colored.contains("\x1b[1m"),
+            "bold escape missing: {colored:?}"
+        );
+        assert!(
+            colored.contains("\x1b[9m"),
+            "strike escape missing: {colored:?}"
+        );
+    }
+
+    #[test]
+    fn single_tilde_is_not_strikethrough() {
+        // The model uses ~ for "approximately"; only ~~ should strike, so the
+        // single tildes must be preserved verbatim.
+        let plain = render_plain("about ~5ms, not ~10ms");
+        assert_eq!(plain, "about ~5ms, not ~10ms");
+    }
+
+    #[test]
+    fn inline_code_protects_markdown_characters() {
+        // Markdown-significant characters inside a code span must NOT be
+        // re-interpreted (Python `**kwargs`, snake_case `a_b_c`, etc.).
+        assert_eq!(render_plain("call `a**b**c` now"), "call a**b**c now");
+        assert_eq!(render_plain("`def f(**kwargs)`"), "def f(**kwargs)");
+        assert_eq!(render_plain("`a__b__c`"), "a__b__c");
+
+        // The code content is still styled with color on.
+        assert!(render_colored("`code`").contains("\x1b[36m"));
+    }
+
+    #[test]
+    fn links_render_label_and_url() {
+        assert_eq!(
+            render_plain("see [Anthropic](https://example.com) here"),
+            "see Anthropic (https://example.com) here"
+        );
+        // Malformed links are left untouched rather than dropped.
+        assert_eq!(render_plain("[label](unclosed"), "[label](unclosed");
+        assert_eq!(render_plain("[bare label] text"), "[bare label] text");
+    }
+
+    #[test]
+    fn headers_render_each_level_and_reject_non_headers() {
+        assert_eq!(render_plain("# One"), "▌ One");
+        assert_eq!(render_plain("## Two"), "▎ Two");
+        assert_eq!(render_plain("### Three"), "  Three");
+        assert_eq!(render_plain("###### Six"), "  Six");
+        // Seven hashes exceed the ATX range, and a missing space is not a header.
+        assert_eq!(render_plain("####### Seven"), "####### Seven");
+        assert_eq!(render_plain("#NoSpace"), "#NoSpace");
+    }
+
+    #[test]
+    fn ordered_and_nested_lists_render() {
+        let plain = render_plain("1. first\n2. second");
+        assert!(plain.contains("1. first"), "got: {plain:?}");
+        assert!(plain.contains("2. second"), "got: {plain:?}");
+
+        // A nested bullet keeps its indentation and uses the • glyph.
+        let nested = render_plain("- top\n  - child");
+        let lines: Vec<&str> = nested.lines().collect();
+        assert_eq!(lines[0], "• top");
+        assert_eq!(lines[1], "  • child");
+    }
+
+    #[test]
+    fn horizontal_rules_and_near_misses() {
+        for rule in ["---", "***", "___"] {
+            let rendered = render_plain(rule);
+            assert_eq!(
+                rendered.chars().filter(|c| *c == '─').count(),
+                48,
+                "{rule:?} should render a 48-wide rule"
+            );
+        }
+        // Two characters is below the threshold, so it stays literal text.
+        assert_eq!(render_plain("--"), "--");
+    }
+
+    #[test]
+    fn code_block_without_language_has_no_label() {
+        let plain = render_plain("```\nplain code\n```");
+        assert!(plain.contains("┌─"), "got: {plain:?}");
+        assert!(plain.contains("│ plain code"), "got: {plain:?}");
+        assert!(plain.contains("└─"), "got: {plain:?}");
+        // No language token trails the top border.
+        let first = plain.lines().next().unwrap_or_default();
+        assert_eq!(first.trim(), "┌─");
     }
 }
