@@ -242,6 +242,13 @@ struct Cli {
     list_sessions: bool,
 
     #[arg(
+        long = "list-models",
+        action = ArgAction::SetTrue,
+        help = "List models with built-in pricing data and exit (no API key required)."
+    )]
+    list_models: bool,
+
+    #[arg(
         long = "no-session-persistence",
         env = "DEEPTIDE_NO_SESSION_PERSISTENCE",
         action = ArgAction::SetTrue,
@@ -288,6 +295,14 @@ fn run(mut cli: Cli) -> Result<(), String> {
             "{}",
             format_session_list(&deeptide_core::SessionStore::list(&cwd))
         );
+        return Ok(());
+    }
+
+    // --list-models is another no-API-key early exit so users can discover
+    // which models have built-in pricing data and which the CLI defaults
+    // to, without provisioning an API key first.
+    if cli.list_models {
+        println!("{}", format_model_list(DEFAULT_MODEL));
         return Ok(());
     }
 
@@ -1069,6 +1084,51 @@ fn parse_tool_restrictions(
     (allowed, disallowed)
 }
 
+/// Render the catalog of models for `--list-models`. Each row shows
+/// per-million-token prices for input, output, cache-create, and
+/// cache-read (USD), plus a flag marking the default. Aligned by name
+/// so the table stays readable as the catalog grows.
+fn format_model_list(default_model: &str) -> String {
+    let models = deeptide_core::known_models();
+    if models.is_empty() {
+        return String::from("No models with built-in pricing data are registered.");
+    }
+    let name_width = models
+        .iter()
+        .map(|m| m.name.len())
+        .max()
+        .unwrap_or(0)
+        .max(5);
+    let mut lines = vec![format!("Built-in models ({}):", models.len())];
+    lines.push(format!(
+        "  {:<name_width$}   input      output     cache_create   cache_read   default",
+        "name"
+    ));
+    for model in &models {
+        let p = model.pricing;
+        let is_default = if model.name == default_model {
+            "*"
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "  {:<name_width$}   ${:>5.2}/M   ${:>5.2}/M    ${:>5.2}/M      ${:>5.2}/M       {}",
+            model.name,
+            p.input * 1_000_000.0,
+            p.output * 1_000_000.0,
+            p.cache_create * 1_000_000.0,
+            p.cache_read * 1_000_000.0,
+            is_default,
+        ));
+    }
+    lines.push(String::new());
+    lines.push(format!("Default: {default_model} (override with --model <name>, env DEEPTIDE_MODEL, or settings.model)."));
+    lines.push(String::from(
+        "Other model names are still accepted on the wire; only listed ones get accurate cost tracking.",
+    ));
+    lines.join("\n")
+}
+
 /// Render the saved-session listing for `--list-sessions` (most-recent first).
 fn format_session_list(entries: &[deeptide_core::SessionEntry]) -> String {
     if entries.is_empty() {
@@ -1278,6 +1338,7 @@ mod tests {
             continue_session: false,
             resume: None,
             list_sessions: false,
+            list_models: false,
             no_session_persistence: false,
             settings: None,
             add_dir: Vec::new(),
@@ -1919,6 +1980,61 @@ mod tests {
         assert!(
             err.contains("--system-prompt-file"),
             "error should name the flag: {err}"
+        );
+    }
+
+    #[test]
+    fn format_model_list_marks_default_and_shows_every_known_model() {
+        let out = super::format_model_list("deepseek-v4-pro");
+        // Every entry in known_models() must appear in the table; if a
+        // future commit adds a new pricing entry, this test forces the
+        // change to also surface through `--list-models`.
+        let count = deeptide_core::known_models().len();
+        assert!(
+            out.starts_with(&format!("Built-in models ({count}):")),
+            "header should announce row count; got: {out}"
+        );
+        for model in deeptide_core::known_models() {
+            assert!(
+                out.contains(model.name),
+                "missing {} from model table", model.name
+            );
+        }
+        // The chosen default must end with the asterisk marker, and a
+        // non-default model must not.
+        for line in out.lines() {
+            if line.starts_with("  deepseek-v4-pro ") {
+                assert!(
+                    line.trim_end().ends_with('*'),
+                    "default row should end with '*'; got: {line}"
+                );
+            }
+            if line.starts_with("  deepseek-v4-flash ") {
+                assert!(
+                    !line.trim_end().ends_with('*'),
+                    "non-default row must not end with '*'; got: {line}"
+                );
+            }
+        }
+        // Footer points users at the override paths.
+        assert!(out.contains("--model"));
+        assert!(out.contains("DEEPTIDE_MODEL"));
+    }
+
+    #[test]
+    fn format_model_list_renders_pricing_per_million_tokens() {
+        // The cost.rs table stores prices as USD per token (e.g. 0.27 /
+        // 1_000_000.0). The CLI surfaces them scaled to per-million so
+        // they're human-readable. Spot-check the known v4-pro row.
+        let out = super::format_model_list("deepseek-v4-pro");
+        assert!(
+            out.contains("$ 0.27/M") || out.contains("$0.27/M"),
+            "expected input price scaled to per-million tokens; got: {out}"
+        );
+        // Output price for v4-pro is $1.10/M.
+        assert!(
+            out.contains("$ 1.10/M") || out.contains("$1.10/M"),
+            "expected output price scaled to per-million tokens; got: {out}"
         );
     }
 }
