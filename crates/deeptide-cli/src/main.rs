@@ -697,7 +697,7 @@ fn run_interactive(
     if !is_configured {
         writeln!(
             stdout,
-            "No API key configured; using local echo backend. Set DEEPTIDE_API_KEY or --api-key to call a model."
+            "No API key configured; using local echo backend. Set DEEPTIDE_API_KEY (or ANTHROPIC_API_KEY / ZERO_API_KEY) or pass --api-key to call a model. Run `deeptide --doctor` to inspect the full resolution chain."
         )
         .map_err(|error| error.to_string())?;
     }
@@ -877,6 +877,21 @@ fn emit_output(
     Ok(())
 }
 
+/// Returns the stderr warning that should be printed when a `--print`
+/// run starts without a resolved credential. Returns `None` when no
+/// warning is needed (either credentials resolved fine, or we're in
+/// interactive REPL mode where the user already sees an in-band
+/// banner). Extracted as a pure function so unit tests can pin the
+/// trigger condition + the wording.
+fn unconfigured_print_mode_warning(is_configured: bool, print_mode: bool) -> Option<String> {
+    if is_configured || !print_mode {
+        return None;
+    }
+    Some(String::from(
+        "warning: no API key resolved; --print is using the local echo backend and will NOT call a model.\n         set DEEPTIDE_API_KEY / ANTHROPIC_API_KEY / ZERO_API_KEY (or pass --api-key), or run `deeptide --doctor` to inspect the resolution chain.",
+    ))
+}
+
 /// The outcome of a one-shot (`--print`) run: the assistant's final text plus
 /// the run's accumulated cost/token usage, used to build the result envelope.
 struct PromptOutcome {
@@ -893,6 +908,21 @@ fn run_prompt(
     streaming_handler: Option<StreamingHandler>,
 ) -> Result<PromptOutcome, String> {
     let configured = configured_backend_with_handler(cli, streaming_handler)?;
+
+    // In one-shot (`--print`) mode the user can't see the interactive
+    // "No API key configured" banner that REPL emits to stdout. The
+    // print path was silently swapping in LocalEchoBackend and shipping
+    // a canned echo back as if it were a real model response — which
+    // looked plausible in `stream-json` output and could be mistaken
+    // for a real model run in CI logs. Surface the degradation loudly
+    // on stderr so the failure mode is obvious without breaking
+    // existing scripts that depend on exit code 0.
+    if let Some(warning) =
+        unconfigured_print_mode_warning(configured.is_configured, cli.print_mode)
+    {
+        eprintln!("{warning}");
+    }
+
     let (allowed_tools, disallowed_tools) = parse_tool_restrictions(
         cli.allowed_tools.as_deref(),
         cli.disallowed_tools.as_deref(),
@@ -2365,6 +2395,37 @@ mod tests {
                 "doctor PATH-probe section missing entry for {probe}; got: {report}"
             );
         }
+    }
+
+    #[test]
+    fn unconfigured_print_mode_emits_actionable_warning() {
+        // The whole point: --print mode without credentials must yield a
+        // loud stderr warning. The text must call out the failure mode
+        // ("local echo backend"), every env var the user can set, and
+        // the `--doctor` escape hatch.
+        let warning = super::unconfigured_print_mode_warning(false, true)
+            .expect("warning must fire when print mode is unconfigured");
+        assert!(warning.contains("local echo backend"));
+        assert!(warning.contains("DEEPTIDE_API_KEY"));
+        assert!(warning.contains("ANTHROPIC_API_KEY"));
+        assert!(warning.contains("ZERO_API_KEY"));
+        assert!(warning.contains("--api-key"));
+        assert!(warning.contains("deeptide --doctor"));
+    }
+
+    #[test]
+    fn configured_print_mode_does_not_warn() {
+        // is_configured = true → no warning (a real backend will run).
+        assert!(super::unconfigured_print_mode_warning(true, true).is_none());
+    }
+
+    #[test]
+    fn interactive_mode_relies_on_in_band_banner_not_stderr() {
+        // Interactive REPL prints its own visible banner on stdout when
+        // unconfigured. The stderr warning is a print-mode-only safety
+        // net to keep `--print` output trustworthy in CI logs.
+        assert!(super::unconfigured_print_mode_warning(false, false).is_none());
+        assert!(super::unconfigured_print_mode_warning(true, false).is_none());
     }
 
     #[test]

@@ -395,11 +395,25 @@ fn agent_tool_validates_swift_agent_types_and_reports_runtime_gap() {
         &context,
     );
     assert!(explore.is_error);
+    // AgentTool only ever reaches the registry fallback when something
+    // dispatches `Agent` outside the AgentLoop (library misuse or a
+    // test bypassing the loop). The CLI always wires a factory, so the
+    // fallback message must point users at the actual recovery path
+    // rather than implying the feature is unimplemented.
     assert!(
         explore
             .content
-            .contains("Sub-agent execution is not available")
+            .contains("Agent tool reached the registry fallback path"),
+        "stub must describe the real failure mode, not 'not available'"
     );
+    assert!(
+        explore
+            .content
+            .contains("with_subagent_backend_factory"),
+        "stub must name the recovery API so callers can fix it"
+    );
+    // Diagnostic metadata that helps the caller understand what they
+    // asked for must still be present.
     assert!(explore.content.contains("Type: Explore"));
     assert!(explore.content.contains("Model: fast-model"));
     assert!(explore.content.contains("Max turns: 10"));
