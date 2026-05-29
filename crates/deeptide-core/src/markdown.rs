@@ -556,59 +556,12 @@ fn render_links(text: &str, color: bool) -> String {
     out
 }
 
-fn display_width(text: &str) -> usize {
-    strip_ansi(text)
-        .chars()
-        .map(|ch| if is_wide(ch) { 2 } else { 1 })
-        .sum()
-}
-
-fn is_wide(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x1100..=0x115F
-            | 0x2329..=0x232A
-            | 0x2E80..=0xA4CF
-            | 0xAC00..=0xD7A3
-            | 0xF900..=0xFAFF
-            | 0xFE10..=0xFE19
-            | 0xFE30..=0xFE6F
-            | 0xFF00..=0xFF60
-            | 0xFFE0..=0xFFE6
-    )
-}
-
-#[cfg(test)]
-fn strip_ansi(text: &str) -> String {
-    strip_ansi_impl(text)
-}
-
-#[cfg(not(test))]
-fn strip_ansi(text: &str) -> String {
-    strip_ansi_impl(text)
-}
-
-fn strip_ansi_impl(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
-                }
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
+use crate::width::display_width;
 
 #[cfg(test)]
 mod tests {
-    use super::{MarkdownRenderOptions, MarkdownRenderer, strip_ansi};
+    use super::{MarkdownRenderOptions, MarkdownRenderer};
+    use crate::width::strip_ansi;
 
     fn render_plain(markdown: &str) -> String {
         strip_ansi(&MarkdownRenderer::render_with_options(

@@ -3318,23 +3318,9 @@ mod tests {
         }
     }
 
-    fn strip_ansi(text: &str) -> String {
-        let mut out = String::new();
-        let mut chars = text.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\x1b' && chars.peek() == Some(&'[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
-                }
-            } else {
-                out.push(ch);
-            }
-        }
-        out
-    }
+    // Reuse the canonical helper from the core width module so this test
+    // observes exactly the same ANSI semantics as production code.
+    use deeptide_core::width::strip_ansi;
 
     #[test]
     fn tool_batch_summary_dims_with_dot_prefix() {

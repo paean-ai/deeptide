@@ -23,6 +23,7 @@ pub mod tool_result_summary;
 pub mod tools;
 pub mod tps;
 pub mod tui;
+pub mod width;
 
 pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
