@@ -478,6 +478,17 @@ fn repl_swift_parity_support_commands_are_available() {
     assert!(doctor.contains("Deeptide doctor"));
     assert!(doctor.contains("Tools:"));
     assert!(doctor.contains("Commands:"));
+    // Enhanced diagnostics: settings layers + permission/hook/MCP counts
+    // (cross-platform parity with Swift's DoctorCommand).
+    assert!(doctor.contains("Settings layers (effective):"));
+    assert!(doctor.contains("global"));
+    assert!(doctor.contains("project"));
+    assert!(doctor.contains("local"));
+    assert!(doctor.contains("Permissions:"));
+    assert!(doctor.contains("allow,") && doctor.contains("deny rules"));
+    assert!(doctor.contains("Hooks:"));
+    assert!(doctor.contains("pre-tool=") && doctor.contains("compact="));
+    assert!(doctor.contains("MCP servers:"));
 
     let config = only_output(repl.submit("/config"));
     assert!(config.contains("Settings files:"));

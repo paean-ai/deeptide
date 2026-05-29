@@ -826,6 +826,8 @@ impl ReplSession {
     }
 
     fn execute_doctor_command(&self, args: &str) -> CommandResult {
+        use crate::config::ConfigStore;
+
         if !args.trim().is_empty() {
             return CommandResult::Text(String::from("Usage: /doctor"));
         }
@@ -861,6 +863,57 @@ impl ReplSession {
                 path.is_some(),
             ));
         }
+        // Settings layers (effective): which config files contribute, lowest to
+        // highest precedence. Mirrors Swift's `settingsLayers()` listing.
+        let cwd = &self.tool_context.cwd;
+        let settings = ConfigStore::load(cwd);
+        lines.push(String::new());
+        lines.push(String::from("Settings layers (effective):"));
+        for (layer, path) in [
+            ("global", ConfigStore::global_path()),
+            ("project", ConfigStore::project_path(cwd)),
+            ("local", ConfigStore::local_path(cwd)),
+        ] {
+            let status = if path.is_file() {
+                path.display().to_string()
+            } else {
+                format!("{} (absent)", path.display())
+            };
+            lines.push(format!("  {layer:<8} {status}"));
+        }
+
+        // Permissions, hooks, and MCP servers from the merged settings.
+        lines.push(String::new());
+        lines.push(String::from("Permissions:"));
+        let (allow, deny) = settings
+            .permissions
+            .as_ref()
+            .map(|p| {
+                (
+                    p.allow.as_ref().map_or(0, Vec::len),
+                    p.deny.as_ref().map_or(0, Vec::len),
+                )
+            })
+            .unwrap_or((0, 0));
+        lines.push(format!("  {allow} allow, {deny} deny rules"));
+
+        lines.push(String::from("Hooks:"));
+        let h = settings.hooks.unwrap_or_default();
+        lines.push(format!(
+            "  pre-tool={} post-tool={} prompt={} start={} end={} compact={}",
+            h.pre_tool_use.as_ref().map_or(0, Vec::len),
+            h.post_tool_use.as_ref().map_or(0, Vec::len),
+            h.user_prompt_submit.as_ref().map_or(0, Vec::len),
+            h.session_start.as_ref().map_or(0, Vec::len),
+            h.session_end.as_ref().map_or(0, Vec::len),
+            h.pre_compact.as_ref().map_or(0, Vec::len),
+        ));
+
+        lines.push(format!(
+            "MCP servers: {}",
+            settings.mcp_servers.as_ref().map_or(0, |m| m.len())
+        ));
+
         lines.push(String::new());
         lines.push(format!(
             "Tools: {} registered",
@@ -870,7 +923,7 @@ impl ReplSession {
             "Commands: {} registered",
             repl_command_sources().len()
         ));
-        lines.push(format!("CWD: {}", self.tool_context.cwd.display()));
+        lines.push(format!("CWD: {}", cwd.display()));
 
         CommandResult::Text(lines.join("\n"))
     }

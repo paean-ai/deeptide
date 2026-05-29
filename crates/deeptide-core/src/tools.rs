@@ -7560,7 +7560,10 @@ pub(crate) fn build_windows_notification_script(
 /// newlines are stripped so the inline command stays a single statement.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn powershell_string(value: &str) -> String {
-    let escaped = value.replace('\'', "''").replace('\r', "").replace('\n', " ");
+    let escaped = value
+        .replace('\'', "''")
+        .replace('\r', "")
+        .replace('\n', " ");
     format!("'{escaped}'")
 }
 
@@ -11519,10 +11522,7 @@ mod windows_notification_tests {
         // Single quotes inside the value must be doubled — that's the only
         // escape PowerShell single-quoted literals honor.
         assert_eq!(powershell_string("it's fine"), "'it''s fine'");
-        assert_eq!(
-            powershell_string("don't 'do' that"),
-            "'don''t ''do'' that'"
-        );
+        assert_eq!(powershell_string("don't 'do' that"), "'don''t ''do'' that'");
     }
 
     #[test]
@@ -11547,12 +11547,8 @@ mod windows_notification_tests {
 
     #[test]
     fn build_windows_notification_script_includes_title_body_and_sound() {
-        let script = build_windows_notification_script(
-            "Build Finished",
-            None,
-            "Tests are green.",
-            false,
-        );
+        let script =
+            build_windows_notification_script("Build Finished", None, "Tests are green.", false);
         assert!(script.contains("System.Windows.Forms.NotifyIcon"));
         assert!(script.contains("'Build Finished'"));
         assert!(script.contains("'Tests are green.'"));

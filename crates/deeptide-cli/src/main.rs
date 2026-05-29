@@ -917,8 +917,7 @@ fn run_prompt(
     // for a real model run in CI logs. Surface the degradation loudly
     // on stderr so the failure mode is obvious without breaking
     // existing scripts that depend on exit code 0.
-    if let Some(warning) =
-        unconfigured_print_mode_warning(configured.is_configured, cli.print_mode)
+    if let Some(warning) = unconfigured_print_mode_warning(configured.is_configured, cli.print_mode)
     {
         eprintln!("{warning}");
     }
@@ -1143,11 +1142,10 @@ fn parse_tool_restrictions(
 fn run_doctor(cli: &Cli, cwd: &Path) -> String {
     let mut lines = Vec::with_capacity(64);
 
-    lines.push(format!(
-        "Deeptide doctor  v{}",
-        env!("CARGO_PKG_VERSION")
+    lines.push(format!("Deeptide doctor  v{}", env!("CARGO_PKG_VERSION")));
+    lines.push(String::from(
+        "================================================",
     ));
-    lines.push(String::from("================================================"));
     lines.push(format!("workspace : {}", cwd.display()));
     lines.push(format!(
         "platform  : {} {}",
@@ -1235,7 +1233,11 @@ fn run_doctor(cli: &Cli, cwd: &Path) -> String {
     ));
     lines.push(format!(
         "  prompt cache    : {}",
-        if cli.no_prompt_cache { "DISABLED" } else { "enabled" }
+        if cli.no_prompt_cache {
+            "DISABLED"
+        } else {
+            "enabled"
+        }
     ));
     lines.push(format!("  max_output_tokens: {}", cli.max_output_tokens));
     lines.push(format!("  max_turns        : {}", cli.max_turns));
@@ -1256,21 +1258,25 @@ fn run_doctor(cli: &Cli, cwd: &Path) -> String {
     // Each entry is `(binary, platform-note)`. We surface the platform
     // note so a Linux user doesn't see "pbcopy ✗" as a problem.
     let probes: &[(&str, &str)] = &[
-        ("git",            ""),
-        ("rg",             "(recommended for fast grep)"),
-        ("pbpaste",        "(macOS clipboard read)"),
-        ("pbcopy",         "(macOS clipboard write)"),
-        ("wl-paste",       "(Wayland clipboard read)"),
-        ("xclip",          "(X11 clipboard)"),
-        ("xsel",           "(X11 clipboard fallback)"),
-        ("notify-send",    "(Linux desktop notifications)"),
-        ("osascript",      "(macOS scripting / notifications)"),
-        ("screencapture",  "(macOS screen capture)"),
-        ("ffmpeg",         "(audio/video transcribe)"),
-        ("powershell",     "(Windows clipboard / notifications)"),
+        ("git", ""),
+        ("rg", "(recommended for fast grep)"),
+        ("pbpaste", "(macOS clipboard read)"),
+        ("pbcopy", "(macOS clipboard write)"),
+        ("wl-paste", "(Wayland clipboard read)"),
+        ("xclip", "(X11 clipboard)"),
+        ("xsel", "(X11 clipboard fallback)"),
+        ("notify-send", "(Linux desktop notifications)"),
+        ("osascript", "(macOS scripting / notifications)"),
+        ("screencapture", "(macOS screen capture)"),
+        ("ffmpeg", "(audio/video transcribe)"),
+        ("powershell", "(Windows clipboard / notifications)"),
     ];
     for (bin, note) in probes {
-        let mark = if which_on_path(bin).is_some() { "✓" } else { "✗" };
+        let mark = if which_on_path(bin).is_some() {
+            "✓"
+        } else {
+            "✗"
+        };
         let suffix = if note.is_empty() {
             String::new()
         } else {
@@ -1343,11 +1349,7 @@ fn format_model_list(default_model: &str) -> String {
     ));
     for model in &models {
         let p = model.pricing;
-        let is_default = if model.name == default_model {
-            "*"
-        } else {
-            ""
-        };
+        let is_default = if model.name == default_model { "*" } else { "" };
         lines.push(format!(
             "  {:<name_width$}   ${:>5.2}/M   ${:>5.2}/M    ${:>5.2}/M      ${:>5.2}/M       {}",
             model.name,
@@ -2235,7 +2237,8 @@ mod tests {
         for model in deeptide_core::known_models() {
             assert!(
                 out.contains(model.name),
-                "missing {} from model table", model.name
+                "missing {} from model table",
+                model.name
             );
         }
         // The chosen default must end with the asterisk marker, and a
@@ -2387,8 +2390,18 @@ mod tests {
         // and is not asserted here, but the *catalog* must be exhaustive
         // so users can't be surprised by a missing entry.
         for probe in [
-            "git", "rg", "pbpaste", "pbcopy", "wl-paste", "xclip", "xsel",
-            "notify-send", "osascript", "screencapture", "ffmpeg", "powershell",
+            "git",
+            "rg",
+            "pbpaste",
+            "pbcopy",
+            "wl-paste",
+            "xclip",
+            "xsel",
+            "notify-send",
+            "osascript",
+            "screencapture",
+            "ffmpeg",
+            "powershell",
         ] {
             assert!(
                 report.contains(probe),

@@ -407,9 +407,7 @@ fn agent_tool_validates_swift_agent_types_and_reports_runtime_gap() {
         "stub must describe the real failure mode, not 'not available'"
     );
     assert!(
-        explore
-            .content
-            .contains("with_subagent_backend_factory"),
+        explore.content.contains("with_subagent_backend_factory"),
         "stub must name the recovery API so callers can fix it"
     );
     // Diagnostic metadata that helps the caller understand what they
@@ -1624,7 +1622,10 @@ fn discover_skills_lists_every_builtin_skill_as_json() {
         .get("count")
         .and_then(serde_json::Value::as_u64)
         .expect("count field");
-    assert!(count >= 7, "expected at least the 7 known skills; got {count}");
+    assert!(
+        count >= 7,
+        "expected at least the 7 known skills; got {count}"
+    );
 
     let skills = parsed
         .get("skills")
