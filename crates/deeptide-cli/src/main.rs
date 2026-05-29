@@ -233,6 +233,13 @@ struct Cli {
         help = "Resume a saved session by id, loading its history into context."
     )]
     resume: Option<String>,
+
+    #[arg(
+        long = "list-sessions",
+        action = ArgAction::SetTrue,
+        help = "List saved sessions for this directory and exit (no API key required)."
+    )]
+    list_sessions: bool,
 }
 
 fn main() {
@@ -250,9 +257,19 @@ fn run(mut cli: Cli) -> Result<(), String> {
             .map_err(|error| format!("invalid --cwd {}: {error}", cwd.display()))?;
     }
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    // --list-sessions is a no-API-key early exit: print the session list and stop.
+    if cli.list_sessions {
+        println!(
+            "{}",
+            format_session_list(&deeptide_core::SessionStore::list(&cwd))
+        );
+        return Ok(());
+    }
+
     // Load settings.json (global ← project ← local) and apply as fallbacks.
     // Explicit CLI flags and environment variables always take precedence.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let cfg = ConfigStore::load(&cwd);
     cfg.apply_env();
     apply_config_fallbacks(&mut cli, &cfg);
@@ -967,6 +984,34 @@ fn parse_tool_restrictions(
     (allowed, disallowed)
 }
 
+/// Render the saved-session listing for `--list-sessions` (most-recent first).
+fn format_session_list(entries: &[deeptide_core::SessionEntry]) -> String {
+    if entries.is_empty() {
+        return String::from(
+            "No saved sessions for this project. Sessions are saved automatically on each turn.",
+        );
+    }
+    let mut lines = vec![format!("Saved sessions ({}):", entries.len())];
+    for entry in entries.iter().take(50) {
+        let project = std::path::Path::new(&entry.cwd)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&entry.cwd);
+        let preview = if entry.preview.trim().is_empty() {
+            "(empty)"
+        } else {
+            entry.preview.trim()
+        };
+        lines.push(format!(
+            "  {}  {}  \"{}\"  ({} messages)",
+            entry.session_id, project, preview, entry.message_count
+        ));
+    }
+    lines.push(String::new());
+    lines.push(String::from("Use --resume <session-id> to resume one."));
+    lines.join("\n")
+}
+
 /// Resolve which prior session (if any) to resume. `--resume <id>` passes the
 /// id straight through; `--continue` selects the most recently updated session
 /// in `cwd` (or `None` when there is none). Validation happens at load time.
@@ -1147,6 +1192,7 @@ mod tests {
             yolo: false,
             continue_session: false,
             resume: None,
+            list_sessions: false,
         }
     }
 
@@ -1658,6 +1704,28 @@ mod tests {
         // empty one that would forbid every tool.
         let (allowed, _) = super::parse_tool_restrictions(Some("  , "), None);
         assert!(allowed.is_none());
+    }
+
+    #[test]
+    fn format_session_list_handles_empty_and_populated() {
+        assert!(super::format_session_list(&[]).contains("No saved sessions"));
+
+        let entry = deeptide_core::SessionEntry {
+            session_id: "2024-session-abc".to_owned(),
+            cwd: "/home/user/project".to_owned(),
+            model: "deepseek-v4-pro".to_owned(),
+            started_at: "2024-01-01T00:00:00Z".to_owned(),
+            updated_at: "2024-01-01T00:05:00Z".to_owned(),
+            preview: "fix the parser".to_owned(),
+            message_count: 7,
+        };
+        let listing = super::format_session_list(&[entry]);
+        assert!(listing.contains("Saved sessions (1):"));
+        assert!(listing.contains("2024-session-abc"));
+        assert!(listing.contains("project"));
+        assert!(listing.contains("fix the parser"));
+        assert!(listing.contains("7 messages"));
+        assert!(listing.contains("Use --resume"));
     }
 
     #[test]
