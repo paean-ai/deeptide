@@ -139,6 +139,7 @@ pub fn build_system_prompt(cwd: &Path) -> String {
         INTRO_SECTION.to_owned(),
         SYSTEM_SECTION.to_owned(),
         environment_section(cwd),
+        tool_index_section(),
         DOING_TASKS_SECTION.to_owned(),
         FILE_FIRST_SECTION.to_owned(),
         ARTIFACT_CONTRACT_SECTION.to_owned(),
@@ -159,6 +160,29 @@ pub fn build_system_prompt(cwd: &Path) -> String {
     }
 
     parts.join("\n\n")
+}
+
+/// Tool index: the registered tools with their read-only trait, plus
+/// dedicated-tool and batching guidance. Mirrors the Swift `toolIndexSection`.
+/// The model still receives full schemas separately; the `[read]` markers help
+/// it batch independent read-only calls.
+fn tool_index_section() -> String {
+    let registry = crate::ToolRegistry::with_builtin_tools();
+    let rows = registry
+        .tool_index()
+        .into_iter()
+        .map(|(name, read_only)| {
+            if read_only {
+                format!("- {name} [read]")
+            } else {
+                format!("- {name}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "# Tools\nTool schemas below define exact parameters. Prefer dedicated tools over Bash: Read for files, Edit for patches, Write for new/full files, Glob for file discovery, Grep for content search. Batch independent read-only tools ([read]); run dependent edits sequentially.\n{rows}"
+    )
 }
 
 /// Dynamic environment block: working directory, platform, and git status.
@@ -307,6 +331,24 @@ mod tests {
                 "prompt missing section {marker}: {prompt}"
             );
         }
+    }
+
+    #[test]
+    fn build_system_prompt_includes_tool_index_with_read_traits() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompt = build_system_prompt(temp.path());
+        assert!(prompt.contains("# Tools"));
+        assert!(prompt.contains("Prefer dedicated tools over Bash"));
+        // Read is read-only; Write is not.
+        assert!(
+            prompt.contains("- Read [read]"),
+            "Read should carry [read]: {prompt}"
+        );
+        assert!(prompt.contains("- Write\n") || prompt.ends_with("- Write"));
+        assert!(
+            !prompt.contains("- Write [read]"),
+            "Write must not be marked read-only"
+        );
     }
 
     #[test]
