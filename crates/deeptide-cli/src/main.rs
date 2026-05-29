@@ -209,6 +209,22 @@ struct Cli {
         help = "Bypass all permission checks (equivalent to --permission-mode bypass)."
     )]
     yolo: bool,
+
+    #[arg(
+        short = 'c',
+        long = "continue",
+        action = ArgAction::SetTrue,
+        help = "Resume the most recent session in this directory."
+    )]
+    continue_session: bool,
+
+    #[arg(
+        short = 'r',
+        long = "resume",
+        value_name = "SESSION_ID",
+        help = "Resume a saved session by id, loading its history into context."
+    )]
+    resume: Option<String>,
 }
 
 fn main() {
@@ -596,6 +612,17 @@ fn run_interactive(
         .map_err(|error| error.to_string())?;
     }
 
+    // --resume / --continue: restore a prior conversation before the first prompt.
+    let resume_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(session_id) = resolve_resume_id(cli, &resume_cwd) {
+        let count = repl.resume_session(&session_id)?;
+        writeln!(
+            stdout,
+            "Resumed session {session_id}: {count} message(s) restored."
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
     loop {
         // Print the status bar above the prompt line.
         writeln!(
@@ -786,6 +813,12 @@ fn run_prompt(
         loop_ = loop_.with_system_prompt(system_prompt);
     }
 
+    // --resume / --continue: run the prompt on top of a prior conversation.
+    if let Some(session_id) = resolve_resume_id(cli, cwd) {
+        let messages = deeptide_core::SessionStore::load(cwd, &session_id)?;
+        loop_.restore_messages(messages);
+    }
+
     let events = loop_.run(prompt);
     let mut assistant = None;
     for event in events {
@@ -910,6 +943,27 @@ fn parse_tool_restrictions(
     let allowed = allowed.map(split).filter(|list| !list.is_empty());
     let disallowed = disallowed.map(split).unwrap_or_default();
     (allowed, disallowed)
+}
+
+/// Resolve which prior session (if any) to resume. `--resume <id>` passes the
+/// id straight through; `--continue` selects the most recently updated session
+/// in `cwd` (or `None` when there is none). Validation happens at load time.
+fn resolve_resume_id(cli: &Cli, cwd: &Path) -> Option<String> {
+    if let Some(id) = cli
+        .resume
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(id.to_owned());
+    }
+    if cli.continue_session {
+        return deeptide_core::SessionStore::list(cwd)
+            .into_iter()
+            .next()
+            .map(|entry| entry.session_id);
+    }
+    None
 }
 
 fn resolve_system_prompt(cli: &Cli) -> Result<Option<String>, String> {
@@ -1068,6 +1122,8 @@ mod tests {
             allowed_tools: None,
             disallowed_tools: None,
             yolo: false,
+            continue_session: false,
+            resume: None,
         }
     }
 

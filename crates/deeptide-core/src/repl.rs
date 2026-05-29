@@ -175,6 +175,17 @@ impl ReplSession {
         self
     }
 
+    /// Load a saved session's history into context and continue it (subsequent
+    /// autosaves write back to the same session id). Returns the number of
+    /// restored messages. Used by `--resume` / `--continue` at startup.
+    pub fn resume_session(&mut self, session_id: &str) -> Result<usize, String> {
+        let messages = SessionStore::load(&self.tool_context.cwd, session_id)?;
+        let count = messages.len();
+        self.agent_loop.restore_messages(messages);
+        self.session_id = session_id.to_owned();
+        Ok(count)
+    }
+
     pub fn with_pricing_overrides(
         mut self,
         overrides: std::collections::HashMap<String, crate::ModelPricing>,
