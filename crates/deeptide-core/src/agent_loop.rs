@@ -107,6 +107,11 @@ pub struct AgentRequest {
     /// as absent so callers can pass an empty string without sending a blank
     /// system field to the API.
     pub system: Option<String>,
+    /// When `Some`, only these tools should be advertised to the model (the
+    /// backend filters its tool schemas to this set). `None` advertises every
+    /// tool. Set for restricted sub-agents so they are only offered the tools
+    /// they are allowed to call.
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +287,23 @@ impl AgentLoop {
         self
     }
 
+    /// The set of tools to advertise to the model. `None` when unrestricted
+    /// (advertise everything); otherwise only the permitted tools, so a
+    /// restricted sub-agent is never offered a tool it cannot call.
+    fn advertised_tools(&self) -> Option<Vec<String>> {
+        if self.allowed_tools.is_none() && self.disallowed_tools.is_empty() {
+            return None;
+        }
+        Some(
+            self.tool_registry
+                .names()
+                .into_iter()
+                .filter(|name| self.is_tool_permitted(name))
+                .map(ToOwned::to_owned)
+                .collect(),
+        )
+    }
+
     /// Whether `tool` may be called under the configured restrictions. Uses the
     /// same logic as the Swift `AgentDefinition.filterTools`.
     fn is_tool_permitted(&self, tool: &str) -> bool {
@@ -452,6 +474,7 @@ impl AgentLoop {
                 step: self.current_run_step,
                 max_turns: self.max_turns,
                 system: self.system_prompt.clone(),
+                allowed_tools: self.advertised_tools(),
             };
 
             match self.backend.respond(request) {

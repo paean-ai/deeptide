@@ -473,6 +473,41 @@ fn agent_loop_allowlist_excludes_unlisted_tools() {
 }
 
 #[test]
+fn agent_loop_restricted_loop_advertises_only_permitted_tools() {
+    let seen: Arc<Mutex<Option<Option<Vec<String>>>>> = Arc::new(Mutex::new(None));
+
+    // Unrestricted: the request advertises every tool (allowed_tools = None).
+    let mut loop_ = AgentLoop::new(Box::new(RequestCaptureBackend {
+        seen: Arc::clone(&seen),
+    }));
+    let _ = loop_.run("hello");
+    let captured = seen.lock().expect("lock").take().expect("a request");
+    assert!(
+        captured.is_none(),
+        "unrestricted loop should advertise all tools"
+    );
+
+    // Restricted: the request advertises the permitted subset, excluding the
+    // disallowed tool but keeping an allowed one.
+    let mut loop_ = AgentLoop::new(Box::new(RequestCaptureBackend {
+        seen: Arc::clone(&seen),
+    }))
+    .with_tool_restrictions(None, vec![String::from("Write")]);
+    let _ = loop_.run("hello");
+    let advertised = seen
+        .lock()
+        .expect("lock")
+        .take()
+        .expect("a request")
+        .expect("restricted loop should carry an allowed-tools set");
+    assert!(advertised.iter().any(|name| name == "Read"));
+    assert!(
+        !advertised.iter().any(|name| name == "Write"),
+        "a disallowed tool must not be advertised"
+    );
+}
+
+#[test]
 fn agent_loop_blocks_when_transcript_exceeds_hard_limit() {
     // window_size is large enough that a single oversized message cannot be
     // compacted away, so the transcript stays over the 98% blocking threshold.
@@ -649,6 +684,22 @@ fn agent_loop_exit_plan_mode_returns_to_default_permission_mode() {
                 && content.contains("- Bash: Run cargo test")
         )
     }));
+}
+
+/// Records the `allowed_tools` of the first request it receives, then completes.
+struct RequestCaptureBackend {
+    seen: Arc<Mutex<Option<Option<Vec<String>>>>>,
+}
+
+impl AgentBackend for RequestCaptureBackend {
+    fn respond(&mut self, request: AgentRequest) -> Result<AgentResponse, String> {
+        *self.seen.lock().expect("lock") = Some(request.allowed_tools.clone());
+        Ok(AgentResponse {
+            content: String::from("done"),
+            usage: None,
+            tool_calls: Vec::new(),
+        })
+    }
 }
 
 struct StaticBackend {
