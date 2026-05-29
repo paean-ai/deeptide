@@ -585,11 +585,57 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
+// ── Activity spinner ────────────────────────────────────────────────────────
+//
+// The interactive REPL runs each turn synchronously: model "thinking" and tool
+// execution happen with no output until the assistant streams text. These pure
+// helpers render a single-line braille spinner the CLI animates on a background
+// thread so the terminal isn't silent while work is in flight. The CLI owns the
+// carriage-return / line-clear control codes; this module only builds the
+// visible string so the frame/verb/elapsed logic stays testable.
+
+/// Braille spinner frames, advanced once per animation tick.
+const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Rotating activity verbs — changed every few seconds for a little life
+/// without churning so fast it distracts.
+const SPINNER_VERBS: [&str; 6] = [
+    "Working",
+    "Thinking",
+    "Pondering",
+    "Crunching",
+    "Churning",
+    "Brewing",
+];
+
+/// The spinner glyph for animation tick `tick` (wraps around the frame set).
+pub fn spinner_frame(tick: usize) -> char {
+    SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
+}
+
+/// The activity verb shown at `elapsed_secs`, rotating every 4 seconds.
+pub fn spinner_verb(elapsed_secs: u64) -> &'static str {
+    let index = (elapsed_secs / 4) as usize % SPINNER_VERBS.len();
+    SPINNER_VERBS[index]
+}
+
+/// Render one spinner status line, e.g. `⠹ Thinking… (6s)`. The elapsed suffix
+/// is omitted in the first second so a quick turn doesn't flash "(0s)".
+pub fn render_spinner_line(tick: usize, elapsed_secs: u64) -> String {
+    let frame = spinner_frame(tick);
+    let verb = spinner_verb(elapsed_secs);
+    if elapsed_secs == 0 {
+        format!("{frame} {verb}…")
+    } else {
+        format!("{frame} {verb}… ({elapsed_secs}s)")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         InputBar, InputState, StatusLine, StatusSegment, TranscriptItem, TuiFrame,
-        render_output_panel,
+        render_output_panel, render_spinner_line, spinner_frame, spinner_verb,
     };
 
     #[test]
@@ -813,5 +859,31 @@ mod tests {
         let rendered = render_output_panel("**bold** words in a long line", 12, false);
         assert!(rendered.contains("bold"));
         assert!(rendered.lines().count() > 1);
+    }
+
+    #[test]
+    fn spinner_frame_cycles_through_all_glyphs() {
+        // Tick 0 and tick==len land on the same frame (wrap-around).
+        assert_eq!(spinner_frame(0), spinner_frame(10));
+        // Consecutive ticks differ, so the spinner visibly animates.
+        assert_ne!(spinner_frame(0), spinner_frame(1));
+    }
+
+    #[test]
+    fn spinner_verb_rotates_every_four_seconds() {
+        assert_eq!(spinner_verb(0), spinner_verb(3));
+        assert_ne!(spinner_verb(0), spinner_verb(4));
+        // Rotation wraps after the full verb set is exhausted.
+        assert_eq!(spinner_verb(0), spinner_verb(24));
+    }
+
+    #[test]
+    fn spinner_line_omits_elapsed_in_first_second_then_shows_it() {
+        let immediate = render_spinner_line(0, 0);
+        assert!(immediate.ends_with('…'), "got: {immediate}");
+        assert!(!immediate.contains("(0s)"));
+
+        let later = render_spinner_line(3, 6);
+        assert!(later.contains("(6s)"), "got: {later}");
     }
 }

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use clap::{ArgAction, Parser, ValueEnum};
 use deeptide_core::config::ConfigStore;
@@ -639,13 +641,37 @@ fn run_interactive(
     // print from `ReplEvent::Output`.
     let use_color = use_color(cli);
     let did_stream: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    // Activity spinner coordination. While a turn runs synchronously (model
+    // thinking + tool execution), a background thread animates a spinner so the
+    // terminal isn't silent. `spinner_stop` halts it; `output_started` records
+    // that real output has taken over the current line (so neither the handler
+    // nor the spinner's exit-clear erases streamed text); `spinner_lock`
+    // serializes the two threads' writes to stdout.
+    let spinner_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+    let output_started: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let spinner_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+
     let did_stream_handler = Arc::clone(&did_stream);
+    let spinner_stop_handler = Arc::clone(&spinner_stop);
+    let output_started_handler = Arc::clone(&output_started);
+    let spinner_lock_handler = Arc::clone(&spinner_lock);
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
         if let StreamingEvent::TextDelta { delta, .. } = event {
-            // Write the delta directly; no buffering so text appears immediately.
-            let _ = io::stdout().write_all(delta.as_bytes());
-            let _ = io::stdout().flush();
-            did_stream_handler.store(true, Ordering::Relaxed);
+            let first = !did_stream_handler.swap(true, Ordering::Relaxed);
+            // Stop the spinner under the lock so it cannot draw a frame over the
+            // text we are about to print.
+            if let Ok(_guard) = spinner_lock_handler.lock() {
+                spinner_stop_handler.store(true, Ordering::Relaxed);
+                output_started_handler.store(true, Ordering::Relaxed);
+                let mut out = io::stdout();
+                if first {
+                    // Erase the spinner line before the first streamed token.
+                    let _ = out.write_all(b"\r\x1b[2K");
+                }
+                let _ = out.write_all(delta.as_bytes());
+                let _ = out.flush();
+            }
         }
     });
 
@@ -745,10 +771,32 @@ fn run_interactive(
                     let _ = err;
                 }
 
-                // Reset the streaming flag before each submission.
+                // Reset per-turn streaming + spinner state.
                 did_stream.store(false, Ordering::Relaxed);
+                output_started.store(false, Ordering::Relaxed);
+                spinner_stop.store(false, Ordering::Relaxed);
 
-                for event in repl.submit(&content) {
+                // Animate an activity spinner on a background thread while the
+                // synchronous turn runs, so model thinking and tool execution
+                // aren't silent. Skipped when color is off (plain/log output).
+                let spinner_handle = if use_color {
+                    let stop = Arc::clone(&spinner_stop);
+                    let started = Arc::clone(&output_started);
+                    let lock = Arc::clone(&spinner_lock);
+                    Some(thread::spawn(move || run_spinner(&stop, &started, &lock)))
+                } else {
+                    None
+                };
+
+                let events = repl.submit(&content);
+
+                // Halt the spinner and reclaim its line before printing results.
+                spinner_stop.store(true, Ordering::Relaxed);
+                if let Some(handle) = spinner_handle {
+                    let _ = handle.join();
+                }
+
+                for event in events {
                     match event {
                         ReplEvent::Output(text) => {
                             if did_stream.swap(false, Ordering::Relaxed) {
@@ -796,6 +844,40 @@ fn run_interactive(
         save_history(&mut rl, path);
     }
     Ok(())
+}
+
+/// Animate the activity spinner until `stop` is set, redrawing one line in
+/// place. Writes are serialized with `lock` (shared with the streaming handler)
+/// so a frame never interleaves with — or paints over — streamed text. The
+/// spinner line is cleared on exit only when real output has not already taken
+/// over the current line (`output_started`).
+fn run_spinner(stop: &AtomicBool, output_started: &AtomicBool, lock: &Mutex<()>) {
+    // Grace period so an instant response never flashes a spinner.
+    thread::sleep(Duration::from_millis(150));
+    let start = Instant::now();
+    let mut tick = 0usize;
+    while !stop.load(Ordering::Relaxed) {
+        if let Ok(_guard) = lock.lock() {
+            // Re-check under the lock: the handler flips `stop` while holding it,
+            // so this guarantees we never draw after output has begun.
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let line = tui::render_spinner_line(tick, start.elapsed().as_secs());
+            let mut out = io::stdout();
+            let _ = write!(out, "\r{line}\x1b[K");
+            let _ = out.flush();
+        }
+        tick = tick.wrapping_add(1);
+        thread::sleep(Duration::from_millis(120));
+    }
+    if !output_started.load(Ordering::Relaxed)
+        && let Ok(_guard) = lock.lock()
+    {
+        let mut out = io::stdout();
+        let _ = write!(out, "\r\x1b[2K");
+        let _ = out.flush();
+    }
 }
 
 fn save_history(rl: &mut Editor<ReplHelper, rustyline::history::DefaultHistory>, path: &PathBuf) {
