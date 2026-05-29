@@ -22,6 +22,8 @@ use rustyline::hint::Hinter;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Context, Editor, Helper};
 
+mod status_bar;
+
 const DEFAULT_MODEL: &str = "deepseek-v4-pro";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
@@ -765,17 +767,48 @@ fn run_interactive(
         .map_err(|error| error.to_string())?;
     }
 
-    loop {
-        // Print the status bar above the prompt line.
-        writeln!(
-            stdout,
-            "{}",
-            repl.status_line().render(terminal_width().unwrap_or(100))
-        )
-        .map_err(|error| error.to_string())?;
-        stdout.flush().map_err(|error| error.to_string())?;
+    // Anchor the status bar to the bottom row of the terminal so it doesn't
+    // scroll with conversation content. Falls back (returns None) on non-
+    // TTY stdout, `TERM=dumb`, or terminals too small to host the bar — in
+    // which case the loop falls back to printing the bar inline above the
+    // prompt every turn (the pre-anchored behaviour).
+    let mut anchored = if use_color {
+        status_bar::AnchoredStatusBar::try_engage()
+    } else {
+        None
+    };
 
-        let readline = rl.readline(&repl.prompt());
+    // Pre-rendered styled prompt. Computed once: the raw `repl.prompt()`
+    // value is stable for the lifetime of the session, and rustyline needs
+    // `\x01...\x02` markers around invisible escape sequences so cursor
+    // positioning stays correct (see status_bar::rustyline_safe).
+    let raw_prompt = repl.prompt();
+    let styled_prompt = if let Some(stripped) = raw_prompt.strip_suffix(' ') {
+        format!(
+            "{} ",
+            status_bar::rustyline_safe(stripped, status_bar::palette::PROMPT, use_color)
+        )
+    } else {
+        status_bar::rustyline_safe(&raw_prompt, status_bar::palette::PROMPT, use_color)
+    };
+
+    loop {
+        // Paint the status bar (anchored at row N, OR inline above the
+        // prompt as a safe fallback when anchoring isn't available).
+        let bar_width = anchored
+            .as_ref()
+            .map(status_bar::AnchoredStatusBar::cols)
+            .unwrap_or_else(|| terminal_width().unwrap_or(100));
+        let bar_text = repl.status_line().render(bar_width);
+        let bar_styled = status_bar::dim(&bar_text, use_color);
+        if let Some(bar) = anchored.as_mut() {
+            bar.repaint(&bar_styled, &spinner_lock);
+        } else {
+            writeln!(stdout, "{bar_styled}").map_err(|error| error.to_string())?;
+            stdout.flush().map_err(|error| error.to_string())?;
+        }
+
+        let readline = rl.readline(&styled_prompt);
         match readline {
             Ok(line) => {
                 let trimmed = line.trim().to_owned();
@@ -809,7 +842,9 @@ fn run_interactive(
                     let stop = Arc::clone(&spinner_stop);
                     let started = Arc::clone(&output_started);
                     let lock = Arc::clone(&spinner_lock);
-                    Some(thread::spawn(move || run_spinner(&stop, &started, &lock)))
+                    Some(thread::spawn(move || {
+                        run_spinner(&stop, &started, &lock, true)
+                    }))
                 } else {
                     None
                 };
@@ -877,7 +912,12 @@ fn run_interactive(
 /// so a frame never interleaves with — or paints over — streamed text. The
 /// spinner line is cleared on exit only when real output has not already taken
 /// over the current line (`output_started`).
-fn run_spinner(stop: &AtomicBool, output_started: &AtomicBool, lock: &Mutex<()>) {
+///
+/// `color` controls whether the spinner line is wrapped in a dim ANSI SGR
+/// pair so it visually recedes behind upcoming streamed text. The setting
+/// must match the rest of the CLI's color policy (`use_color(cli)`) so a
+/// piped or `--no-color` run never emits stray escapes.
+fn run_spinner(stop: &AtomicBool, output_started: &AtomicBool, lock: &Mutex<()>, color: bool) {
     // Grace period so an instant response never flashes a spinner.
     thread::sleep(Duration::from_millis(150));
     let start = Instant::now();
@@ -889,7 +929,8 @@ fn run_spinner(stop: &AtomicBool, output_started: &AtomicBool, lock: &Mutex<()>)
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            let line = tui::render_spinner_line(tick, start.elapsed().as_secs());
+            let raw = tui::render_spinner_line(tick, start.elapsed().as_secs());
+            let line = status_bar::dim(&raw, color);
             let mut out = io::stdout();
             let _ = write!(out, "\r{line}\x1b[K");
             let _ = out.flush();
