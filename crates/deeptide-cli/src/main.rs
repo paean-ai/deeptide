@@ -12,15 +12,19 @@ use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
-    CommandCompletionSource, CompletionEngine, LocalEchoBackend, ModelPricing, ReplEvent,
-    ReplSession, StreamingEvent, StreamingHandler, ThinkingConfig, tui,
+    AskOutcome, CommandCompletionSource, CompletionEngine, LocalEchoBackend, MarkdownRenderOptions,
+    ModelPricing, ReplEvent, ReplSession, StatusSegment, StreamingEvent, StreamingHandler,
+    StreamingMarkdownRenderer, SystemMessage, ThinkingConfig, ToolCall, tui,
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
-use rustyline::{Context, Editor, Helper};
+use rustyline::{
+    Cmd, ConditionalEventHandler, Context, Editor, Event, EventContext, EventHandler, Helper,
+    KeyCode, KeyEvent, Modifiers, RepeatCount,
+};
 
 mod status_bar;
 
@@ -684,11 +688,19 @@ fn run_interactive(
     let spinner_stop_handler = Arc::clone(&spinner_stop);
     let output_started_handler = Arc::clone(&output_started);
     let spinner_lock_handler = Arc::clone(&spinner_lock);
+    // Line-buffered markdown renderer for streamed output. Sits inside an
+    // `Arc<Mutex<…>>` because the streaming handler is invoked from whatever
+    // thread the backend uses, and we may also need to drain (flush) it
+    // from the REPL thread between turns.
+    let streaming_md = Arc::new(Mutex::new(StreamingMarkdownRenderer::new(
+        MarkdownRenderOptions { color: use_color },
+    )));
+    let streaming_md_handler = Arc::clone(&streaming_md);
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
         if let StreamingEvent::TextDelta { delta, .. } = event {
             let first = !did_stream_handler.swap(true, Ordering::Relaxed);
-            // Stop the spinner under the lock so it cannot draw a frame over the
-            // text we are about to print.
+            // Stop the spinner under the lock so it cannot draw a frame over
+            // the text we are about to print.
             if let Ok(_guard) = spinner_lock_handler.lock() {
                 spinner_stop_handler.store(true, Ordering::Relaxed);
                 output_started_handler.store(true, Ordering::Relaxed);
@@ -697,7 +709,18 @@ fn run_interactive(
                     // Erase the spinner line before the first streamed token.
                     let _ = out.write_all(b"\r\x1b[2K");
                 }
-                let _ = out.write_all(delta.as_bytes());
+                // Apply incremental markdown rendering. Bold, lists, headers,
+                // links, and inline code now style correctly even though the
+                // model is emitting one chunk at a time. Code fences are
+                // passed through verbatim while open (the body remains
+                // readable as it streams in).
+                let rendered = match streaming_md_handler.lock() {
+                    Ok(mut renderer) => renderer.push(delta),
+                    // If the mutex is poisoned, fall back to raw output so the
+                    // user still sees the model response.
+                    Err(_) => delta.clone(),
+                };
+                let _ = out.write_all(rendered.as_bytes());
                 let _ = out.flush();
             }
         }
@@ -709,6 +732,26 @@ fn run_interactive(
         cli.allowed_tools.as_deref(),
         cli.disallowed_tools.as_deref(),
     );
+    // Permission ask callback. Invoked synchronously from inside the agent
+    // loop whenever a tool requires interactive approval; reads y/n/a from
+    // stdin and returns the user's choice. Built BEFORE the REPL so we can
+    // pass it as a builder argument; uses the same spinner mutex so the
+    // prompt isn't clobbered by an in-flight frame.
+    let ask_spinner_stop = Arc::clone(&spinner_stop);
+    let ask_spinner_lock = Arc::clone(&spinner_lock);
+    let ask_output_started = Arc::clone(&output_started);
+    let ask_use_color = use_color;
+    let ask_callback: deeptide_core::PermissionAskCallback =
+        Arc::new(move |tool_call: &ToolCall| {
+            handle_permission_prompt(
+                tool_call,
+                &ask_spinner_lock,
+                &ask_spinner_stop,
+                &ask_output_started,
+                ask_use_color,
+            )
+        });
+
     let mut repl = ReplSession::new(configured.backend)
         .with_model(configured.model)
         .with_permission_mode(permission_mode)
@@ -721,7 +764,8 @@ fn run_interactive(
         .with_session_persistence(!cli.no_session_persistence)
         .with_additional_dirs(&cli.add_dir)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
-        .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
+        .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config))
+        .with_ask_callback(ask_callback);
     if let Some(append) = cli.append_system_prompt.as_deref() {
         repl = repl.with_appended_system_prompt(append);
     }
@@ -734,6 +778,17 @@ fn run_interactive(
     let mut rl: Editor<ReplHelper, rustyline::history::DefaultHistory> =
         Editor::with_config(rl_config).map_err(|error| error.to_string())?;
     rl.set_helper(Some(helper));
+
+    // Shift+Tab: cycle the session permission mode. The conditional handler
+    // sets `pending_mode_cycle` and asks rustyline to interrupt readline so
+    // the REPL loop can observe the flag and react with visible feedback.
+    let pending_mode_cycle: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    rl.bind_sequence(
+        Event::KeySeq(vec![KeyEvent(KeyCode::BackTab, Modifiers::NONE)]),
+        EventHandler::Conditional(Box::new(ShiftTabCycleHandler {
+            pending: Arc::clone(&pending_mode_cycle),
+        })),
+    );
 
     let history_path = history_file_path();
     if let Some(ref path) = history_path {
@@ -792,6 +847,14 @@ fn run_interactive(
         status_bar::rustyline_safe(&raw_prompt, status_bar::palette::PROMPT, use_color)
     };
 
+    // Auth indicator state. `is_configured` (computed from
+    // `effective_credential`) is the inference-side API key result and is
+    // stable for the lifetime of the session. The Paean publish token is
+    // probed each repaint because it's environmental and could in principle
+    // change mid-session; the call is just env-var reads and is cheap.
+    let api_key_resolved = is_configured;
+    let mut auth_paint_tick: u64 = 0;
+
     loop {
         // Paint the status bar (anchored at row N, OR inline above the
         // prompt as a safe fallback when anchoring isn't available).
@@ -799,7 +862,12 @@ fn run_interactive(
             .as_ref()
             .map(status_bar::AnchoredStatusBar::cols)
             .unwrap_or_else(|| terminal_width().unwrap_or(100));
-        let bar_text = repl.status_line().render(bar_width);
+        let auth_segment =
+            build_auth_segment(api_key_resolved, paean_token_resolved(), auth_paint_tick);
+        auth_paint_tick = auth_paint_tick.wrapping_add(1);
+        let bar_text = repl
+            .status_line_with_auth(Some(auth_segment))
+            .render(bar_width);
         let bar_styled = status_bar::dim(&bar_text, use_color);
         if let Some(bar) = anchored.as_mut() {
             bar.repaint(&bar_styled, &spinner_lock);
@@ -857,6 +925,21 @@ fn run_interactive(
                     let _ = handle.join();
                 }
 
+                // Drain the streaming markdown buffer. The model often
+                // produces a trailing line without a final newline; without
+                // this flush that fragment would stay buffered and reappear
+                // on the next turn's first delta with stale state. Resetting
+                // the renderer also clears any fence state so a turn that
+                // ended mid-code-block doesn't bleed into the next response.
+                if let Ok(mut renderer) = streaming_md.lock() {
+                    let trailing = renderer.flush();
+                    if !trailing.is_empty() {
+                        let _ = stdout.write_all(trailing.as_bytes());
+                    }
+                    *renderer =
+                        StreamingMarkdownRenderer::new(MarkdownRenderOptions { color: use_color });
+                }
+
                 for event in events {
                     match event {
                         ReplEvent::Output(text) => {
@@ -878,6 +961,10 @@ fn run_interactive(
                                 .map_err(|error| error.to_string())?;
                             }
                         }
+                        ReplEvent::System(message) => {
+                            let rendered = render_system_message(&message, use_color, cli.debug);
+                            writeln!(stdout, "{rendered}").map_err(|error| error.to_string())?;
+                        }
                         ReplEvent::Exit => {
                             if let Some(ref path) = history_path {
                                 save_history(&mut rl, path);
@@ -888,6 +975,22 @@ fn run_interactive(
                 }
             }
             Err(ReadlineError::Interrupted) => {
+                // Shift+Tab piggy-backs on rustyline's Interrupt command to
+                // break out of readline cleanly. If the cycle handler set the
+                // flag, this isn't a real Ctrl+C — it's the user asking to
+                // rotate the permission mode.
+                if pending_mode_cycle.swap(false, Ordering::Relaxed) {
+                    let next = next_permission_mode(repl.agent_loop().permission_mode());
+                    repl.set_permission_mode(next);
+                    let label = next.label();
+                    let line = if use_color {
+                        format!("  → mode \x1b[1m{label}\x1b[0m")
+                    } else {
+                        format!("  → mode {label}")
+                    };
+                    writeln!(stdout, "{line}").map_err(|error| error.to_string())?;
+                    continue;
+                }
                 // Ctrl+C — echo ^C and continue (matches Swift/zero-cli behaviour)
                 writeln!(stdout, "^C").map_err(|error| error.to_string())?;
                 continue;
@@ -1664,6 +1767,363 @@ fn effective_credential(cli: &Cli) -> Option<CloudCredential> {
     None
 }
 
+/// Render a [`SystemMessage`] for the interactive REPL. Color is applied
+/// when the user hasn't opted out via `--no-color` / `NO_COLOR`; in plain
+/// mode the output is just the structured fields joined together.
+///
+/// Styling vocabulary:
+/// - tool batch summary       → dim `· Tools …`
+/// - tool success             → green `✓ <Name>` + dim summary
+/// - tool failure             → red `✗ <Name>` + bright summary
+/// - small successful body    → dim `│ <line>` left-bar (claude-code style)
+/// - compaction notice        → dim `· Context auto-compacted …`
+/// - notice (alert)           → yellow `⚠ <message>`
+/// - call-id                  → only shown under `--debug` (was always-on)
+fn render_system_message(message: &SystemMessage, use_color: bool, debug: bool) -> String {
+    match message {
+        SystemMessage::ToolBatch {
+            label,
+            failed_count,
+        } => {
+            let verb = if *failed_count == 0 {
+                "Tools completed"
+            } else {
+                "Tools completed with failures"
+            };
+            let raw = format!("· {verb}: {label}");
+            status_bar::dim(&raw, use_color)
+        }
+        SystemMessage::Tool {
+            name,
+            call_id,
+            summary,
+            is_error,
+            body,
+        } => render_tool_event(
+            name,
+            call_id,
+            summary,
+            *is_error,
+            body.as_deref(),
+            use_color,
+            debug,
+        ),
+        SystemMessage::Compaction {
+            compressed_messages,
+            tokens_after,
+        } => {
+            let raw = format!(
+                "· Context auto-compacted: folded {compressed_messages} earlier message(s); ~{tokens_after} tokens now."
+            );
+            status_bar::dim(&raw, use_color)
+        }
+        SystemMessage::Notice(text) => {
+            if use_color {
+                format!("\x1b[33m⚠ {text}\x1b[0m")
+            } else {
+                format!("! {text}")
+            }
+        }
+    }
+}
+
+/// Format a single tool event line. Call IDs are hidden by default
+/// (they're long and noisy) and only re-surfaced under `--debug` for
+/// correlation with backend logs.
+fn render_tool_event(
+    name: &str,
+    call_id: &str,
+    summary: &str,
+    is_error: bool,
+    body: Option<&str>,
+    use_color: bool,
+    debug: bool,
+) -> String {
+    let id_suffix = if debug {
+        format!(" ({call_id})")
+    } else {
+        String::new()
+    };
+
+    let header = if is_error {
+        if use_color {
+            format!(
+                "\x1b[31m✗\x1b[0m \x1b[1m{name}\x1b[0m{id_dim}  \x1b[31m{summary}\x1b[0m",
+                id_dim = if debug {
+                    format!("\x1b[2m{id_suffix}\x1b[0m")
+                } else {
+                    String::new()
+                }
+            )
+        } else {
+            format!("✗ {name}{id_suffix}  {summary}")
+        }
+    } else if use_color {
+        format!(
+            "\x1b[32m✓\x1b[0m \x1b[1m{name}\x1b[0m{id_dim}  \x1b[2m{summary}\x1b[0m",
+            id_dim = if debug {
+                format!("\x1b[2m{id_suffix}\x1b[0m")
+            } else {
+                String::new()
+            }
+        )
+    } else {
+        format!("✓ {name}{id_suffix}  {summary}")
+    };
+
+    match body {
+        Some(body) if !body.is_empty() => {
+            // Indent body lines with a dim left bar so they're visually
+            // grouped with the tool header without overwhelming the bar.
+            let prefix = if use_color {
+                "\x1b[2m│\x1b[0m "
+            } else {
+                "│ "
+            };
+            let body_block = body
+                .lines()
+                .map(|line| format!("{prefix}{line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{header}\n{body_block}")
+        }
+        _ => header,
+    }
+}
+
+/// Advance the permission mode by one step around the cycle
+/// `Default → AcceptEdits → Plan → Bypass → Default`. Bound to Shift+Tab so
+/// users can switch into YOLO mid-session without restarting the REPL.
+fn next_permission_mode(current: PermissionMode) -> PermissionMode {
+    match current {
+        PermissionMode::Default => PermissionMode::AcceptEdits,
+        PermissionMode::AcceptEdits => PermissionMode::Plan,
+        PermissionMode::Plan => PermissionMode::Bypass,
+        PermissionMode::Bypass => PermissionMode::Default,
+    }
+}
+
+/// Conditional readline handler that records "Shift+Tab was pressed" via an
+/// atomic flag and asks rustyline to interrupt the current readline session.
+///
+/// The interrupt is the cleanest way out of `rl.readline()` from inside a
+/// custom binding: it returns `ReadlineError::Interrupted` which our REPL
+/// already handles as a benign restart point. The REPL then observes the
+/// flag, cycles the permission mode, paints feedback, and presents a fresh
+/// prompt — losing any partial input the user had typed, but that's a fair
+/// trade for a binding that only fires on an explicit modifier keystroke.
+struct ShiftTabCycleHandler {
+    pending: Arc<AtomicBool>,
+}
+
+impl ConditionalEventHandler for ShiftTabCycleHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        self.pending.store(true, Ordering::Relaxed);
+        // Force rustyline to exit with `Interrupted` so the REPL loop can
+        // observe the flag and react. Without this rustyline would just sit
+        // in `readline()` and the mode switch would be invisible until the
+        // user pressed Enter on their own.
+        Some(Cmd::Interrupt)
+    }
+}
+
+/// Interactive permission prompt invoked by the agent loop when a tool
+/// call needs the user's approval. Stops the spinner, prints a one-line
+/// summary of the pending tool call, reads the user's choice from stdin,
+/// and returns the resulting [`AskOutcome`].
+///
+/// Input grammar (see [`parse_permission_response`]):
+/// - empty / `y` / `yes`      → allow this call only
+/// - `n` / `no`               → deny this call
+/// - `t` / `this` / `tool`    → allow this call AND auto-approve every
+///   subsequent call to the **same tool** for the rest of the session
+///   (session-scoped rule, NOT persisted to disk).
+/// - `a` / `all` / `yolo`     → allow this call AND flip the session to
+///   YOLO (Bypass) so subsequent risky calls don't re-prompt either.
+fn handle_permission_prompt(
+    tool_call: &ToolCall,
+    spinner_lock: &Arc<Mutex<()>>,
+    spinner_stop: &Arc<AtomicBool>,
+    output_started: &Arc<AtomicBool>,
+    use_color: bool,
+) -> AskOutcome {
+    // Halt the spinner first; the lock then prevents it from racing the
+    // prompt write before it observes the stop flag.
+    spinner_stop.store(true, Ordering::Relaxed);
+    let _spinner_guard = spinner_lock.lock().ok();
+
+    let mut stdout = io::stdout();
+    // Clear whatever the spinner left on the current line.
+    let _ = stdout.write_all(b"\r\x1b[2K");
+
+    let summary = summarize_tool_call_for_prompt(tool_call);
+    let header = if use_color {
+        format!(
+            "\n\x1b[33m  ⏸  Permission required\x1b[0m  \x1b[1m{}\x1b[0m  {}\n",
+            tool_call.name, summary
+        )
+    } else {
+        format!(
+            "\n  ⏸  Permission required  {}  {}\n",
+            tool_call.name, summary
+        )
+    };
+    let prompt = if use_color {
+        "  \x1b[2m[y]es / [n]o / [t]his-tool / [a]ll-yolo\x1b[0m  > "
+    } else {
+        "  [y]es / [n]o / [t]his-tool / [a]ll-yolo  > "
+    };
+    let _ = stdout.write_all(header.as_bytes());
+    let _ = stdout.write_all(prompt.as_bytes());
+    let _ = stdout.flush();
+
+    output_started.store(true, Ordering::Relaxed);
+
+    let mut response = String::new();
+    if io::stdin().read_line(&mut response).is_err() {
+        return AskOutcome::Deny {
+            reason: String::from("failed to read approval from stdin"),
+        };
+    }
+
+    let outcome = parse_permission_response(&response, &tool_call.name);
+
+    // Echo a hint when a session-wide effect was triggered so the user
+    // understands why subsequent calls stop prompting.
+    match &outcome {
+        AskOutcome::AllowAndSetMode(_) => {
+            let _ = writeln!(
+                stdout,
+                "  (session switched to YOLO mode — Shift+Tab to cycle back)"
+            );
+        }
+        AskOutcome::AllowAllSession { tool_name } => {
+            let _ = writeln!(
+                stdout,
+                "  (session-allowing every {tool_name} call until exit)"
+            );
+        }
+        _ => {}
+    }
+
+    outcome
+}
+
+/// Pure parser for the permission-prompt response. Splitting the I/O
+/// (`handle_permission_prompt`) from the decision logic (this function)
+/// keeps the keyword matching unit-testable without faking stdin.
+fn parse_permission_response(raw: &str, tool_name: &str) -> AskOutcome {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => AskOutcome::Allow,
+        "n" | "no" => AskOutcome::Deny {
+            reason: String::from("user declined"),
+        },
+        "t" | "this" | "tool" | "this-tool" | "always" => AskOutcome::AllowAllSession {
+            tool_name: tool_name.to_owned(),
+        },
+        "a" | "all" | "yolo" | "all-yolo" => AskOutcome::AllowAndSetMode(PermissionMode::Bypass),
+        other => AskOutcome::Deny {
+            reason: format!("user declined ({other})"),
+        },
+    }
+}
+
+/// Produce a one-line summary of the tool call's most relevant input field
+/// for the permission prompt. Bash → command, Write/Edit → file_path, etc.
+/// Falls back to a truncated JSON dump for unknown tools so the user can
+/// still see what's being requested.
+fn summarize_tool_call_for_prompt(tool_call: &ToolCall) -> String {
+    const MAX_LEN: usize = 140;
+
+    let extracted = match tool_call.name.as_str() {
+        "Bash" => tool_call
+            .input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        "Write" | "Edit" => tool_call
+            .input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        "Read" => tool_call
+            .input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        "WebFetch" => tool_call
+            .input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        _ => None,
+    };
+
+    let raw =
+        extracted.unwrap_or_else(|| serde_json::to_string(&tool_call.input).unwrap_or_default());
+
+    // Single-line, trimmed to MAX_LEN characters (not bytes) for the prompt.
+    let collapsed: String = raw
+        .lines()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if collapsed.chars().count() <= MAX_LEN {
+        collapsed
+    } else {
+        let mut truncated: String = collapsed.chars().take(MAX_LEN).collect();
+        truncated.push('…');
+        truncated
+    }
+}
+
+/// Returns `true` when a Paean publishing token is exported in the
+/// environment. Paean today only powers `/publish` (skill upload to
+/// api.paean.ai); inference still routes through Anthropic-compatible
+/// providers via the regular API key chain. The status bar surfaces this so
+/// users can see at a glance whether `/publish` will work without re-reading
+/// `--doctor`.
+fn paean_token_resolved() -> bool {
+    env_first_non_empty(&["PAEAN_API_TOKEN", "PAEAN_TOKEN", "CLIDE_API_TOKEN"]).is_some()
+}
+
+/// Build the status-bar auth segment, rotating between the inference API key
+/// indicator and the Paean publish-token indicator when both are present.
+///
+/// Rotation logic:
+/// - both keys resolved → alternate every paint between `key ok` / `paean ok`
+/// - only API key      → `key ok`
+/// - only Paean token  → `paean ok`
+/// - neither           → `auth —`
+///
+/// `tick` is a monotonically increasing counter (one per status-bar paint).
+/// We don't tie it to wall-clock time because the bar only repaints between
+/// turns; tying to paints keeps the cycle smooth and predictable from the
+/// user's perspective.
+fn build_auth_segment(api_key_resolved: bool, paean_resolved: bool, tick: u64) -> StatusSegment {
+    match (api_key_resolved, paean_resolved) {
+        (true, true) => {
+            if tick.is_multiple_of(2) {
+                StatusSegment::new("key", "ok")
+            } else {
+                StatusSegment::new("paean", "ok")
+            }
+        }
+        (true, false) => StatusSegment::new("key", "ok"),
+        (false, true) => StatusSegment::new("paean", "ok"),
+        (false, false) => StatusSegment::new("auth", "—"),
+    }
+}
+
 fn subagent_backend_factory(
     config: Option<AnthropicConfig>,
 ) -> impl Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static {
@@ -1755,11 +2215,17 @@ impl EnumValue for OutputFormat {
 mod tests {
     use super::{
         Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
-        collect_prompt, configured_backend, effective_base_url, effective_model,
-        normalize_embedded_mode, use_color, validate_formats,
+        build_auth_segment, collect_prompt, configured_backend, effective_base_url,
+        effective_model, next_permission_mode, normalize_embedded_mode, paean_token_resolved,
+        parse_permission_response, render_system_message, summarize_tool_call_for_prompt,
+        use_color, validate_formats,
     };
     use clap::Parser;
-    use deeptide_core::{AnthropicAuthMode, ConfigData, ProviderProfile, ThinkingConfig};
+    use deeptide_core::AskOutcome;
+    use deeptide_core::permissions::PermissionMode;
+    use deeptide_core::{
+        AnthropicAuthMode, ConfigData, ProviderProfile, SystemMessage, ThinkingConfig,
+    };
     use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -1829,6 +2295,9 @@ mod tests {
                 "ANTHROPIC_AUTH_TOKEN",
                 "ZERO_CLI_MODEL",
                 "ANTHROPIC_MODEL",
+                "PAEAN_API_TOKEN",
+                "PAEAN_TOKEN",
+                "CLIDE_API_TOKEN",
             ] {
                 std::env::remove_var(name);
             }
@@ -2796,5 +3265,360 @@ mod tests {
             out.contains("$ 1.10/M") || out.contains("$1.10/M"),
             "expected output price scaled to per-million tokens; got: {out}"
         );
+    }
+
+    #[test]
+    fn auth_segment_shows_key_ok_when_only_api_key_resolved() {
+        let segment = build_auth_segment(true, false, 0);
+        assert_eq!(segment.label, "key");
+        assert_eq!(segment.value, "ok");
+        // Same shape regardless of tick: with no paean token, there's
+        // nothing to rotate to.
+        let segment_later = build_auth_segment(true, false, 999);
+        assert_eq!(segment_later.label, "key");
+    }
+
+    #[test]
+    fn auth_segment_shows_paean_when_only_paean_resolved() {
+        let segment = build_auth_segment(false, true, 0);
+        assert_eq!(segment.label, "paean");
+        assert_eq!(segment.value, "ok");
+    }
+
+    #[test]
+    fn auth_segment_warns_when_neither_resolved() {
+        let segment = build_auth_segment(false, false, 0);
+        assert_eq!(segment.label, "auth");
+        // Em-dash, not the regular minus.
+        assert_eq!(segment.value, "—");
+    }
+
+    #[test]
+    fn auth_segment_rotates_when_both_resolved() {
+        let even = build_auth_segment(true, true, 0);
+        let odd = build_auth_segment(true, true, 1);
+        assert_eq!(even.label, "key");
+        assert_eq!(odd.label, "paean");
+        // Wrap-around at u64::MAX preserves the alternating contract.
+        assert_eq!(build_auth_segment(true, true, u64::MAX).label, "paean");
+        assert_eq!(build_auth_segment(true, true, 2).label, "key");
+    }
+
+    fn tool_call(name: &str, input: serde_json::Value) -> deeptide_core::ToolCall {
+        deeptide_core::ToolCall::new("call_test", name, input)
+    }
+
+    #[test]
+    fn permission_response_empty_or_yes_allows() {
+        for input in ["", "\n", "y", "Y\n", "yes", "  YES  "] {
+            assert!(
+                matches!(parse_permission_response(input, "Write"), AskOutcome::Allow),
+                "{input:?} should map to Allow"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_response_no_denies_with_user_declined_reason() {
+        for input in ["n", "N\n", "no", "  NO  "] {
+            let outcome = parse_permission_response(input, "Bash");
+            match outcome {
+                AskOutcome::Deny { reason } => assert_eq!(reason, "user declined"),
+                other => panic!("{input:?} should Deny, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn permission_response_this_tool_installs_session_allow_for_named_tool() {
+        for input in ["t", "T\n", "this", "tool", "this-tool", "  always  "] {
+            match parse_permission_response(input, "Write") {
+                AskOutcome::AllowAllSession { tool_name } => {
+                    assert_eq!(tool_name, "Write", "input={input:?}");
+                }
+                other => panic!("{input:?} should AllowAllSession, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn permission_response_all_flips_session_into_bypass() {
+        for input in ["a", "A\n", "all", "yolo", "all-yolo"] {
+            match parse_permission_response(input, "Write") {
+                AskOutcome::AllowAndSetMode(mode) => {
+                    assert_eq!(mode, PermissionMode::Bypass, "input={input:?}");
+                }
+                other => panic!("{input:?} should AllowAndSetMode, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn permission_response_unknown_token_safely_denies_with_echoed_token() {
+        // Fail closed: an unrecognised response must NOT default to Allow.
+        // The echoed token helps the user retry without re-reading the
+        // tool summary.
+        match parse_permission_response("maybe", "Bash") {
+            AskOutcome::Deny { reason } => {
+                assert!(reason.contains("maybe"), "got: {reason}");
+            }
+            other => panic!("unknown input should Deny, got {other:?}"),
+        }
+    }
+
+    // Reuse the canonical helper from the core width module so this test
+    // observes exactly the same ANSI semantics as production code.
+    use deeptide_core::width::strip_ansi;
+
+    #[test]
+    fn tool_batch_summary_dims_with_dot_prefix() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::ToolBatch {
+                label: "Read 2 files in src/".into(),
+                failed_count: 0,
+            },
+            true,
+            false,
+        ));
+        assert_eq!(plain, "· Tools completed: Read 2 files in src/");
+        // ANSI codes present for color-on: dim escape \x1b[2m must appear.
+        let colored = render_system_message(
+            &SystemMessage::ToolBatch {
+                label: "Read 2 files in src/".into(),
+                failed_count: 0,
+            },
+            true,
+            false,
+        );
+        assert!(colored.contains("\x1b[2m"), "got: {colored:?}");
+    }
+
+    #[test]
+    fn tool_batch_failure_uses_failed_verb() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::ToolBatch {
+                label: "Wrote 1 write, 1 failed".into(),
+                failed_count: 1,
+            },
+            false,
+            false,
+        ));
+        assert_eq!(
+            plain,
+            "· Tools completed with failures: Wrote 1 write, 1 failed"
+        );
+    }
+
+    #[test]
+    fn tool_success_shows_green_check_and_hides_call_id_by_default() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::Tool {
+                name: "Read".into(),
+                call_id: "toolu_abc123".into(),
+                summary: "1 lines".into(),
+                is_error: false,
+                body: None,
+            },
+            true,
+            false,
+        ));
+        // Visible glyphs only — call_id must not leak.
+        assert!(plain.starts_with("✓ Read"), "got: {plain:?}");
+        assert!(plain.contains("1 lines"), "got: {plain:?}");
+        assert!(!plain.contains("toolu_abc123"), "got: {plain:?}");
+    }
+
+    #[test]
+    fn tool_success_surfaces_call_id_under_debug() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::Tool {
+                name: "Read".into(),
+                call_id: "toolu_abc123".into(),
+                summary: "1 lines".into(),
+                is_error: false,
+                body: None,
+            },
+            false,
+            true,
+        ));
+        assert!(plain.contains("toolu_abc123"), "got: {plain:?}");
+    }
+
+    #[test]
+    fn tool_failure_shows_red_cross_and_summary() {
+        let colored = render_system_message(
+            &SystemMessage::Tool {
+                name: "Write".into(),
+                call_id: "toolu_w".into(),
+                summary: "Permission required for Write.".into(),
+                is_error: true,
+                body: None,
+            },
+            true,
+            false,
+        );
+        // Red escape \x1b[31m must appear for the failure glyph and summary.
+        assert!(colored.contains("\x1b[31m"), "got: {colored:?}");
+        let plain = strip_ansi(&colored);
+        assert!(plain.starts_with("✗ Write"), "got: {plain:?}");
+        assert!(plain.contains("Permission required"), "got: {plain:?}");
+    }
+
+    #[test]
+    fn tool_body_renders_with_dim_left_bar() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::Tool {
+                name: "Read".into(),
+                call_id: "x".into(),
+                summary: "2 lines".into(),
+                is_error: false,
+                body: Some("1\talpha\n2\tbeta".into()),
+            },
+            true,
+            false,
+        ));
+        let lines: Vec<&str> = plain.lines().collect();
+        assert!(lines[0].starts_with("✓ Read"), "got: {lines:?}");
+        assert_eq!(lines[1], "│ 1\talpha");
+        assert_eq!(lines[2], "│ 2\tbeta");
+    }
+
+    #[test]
+    fn compaction_message_dims_with_dot_prefix() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::Compaction {
+                compressed_messages: 4,
+                tokens_after: 12_345,
+            },
+            true,
+            false,
+        ));
+        assert_eq!(
+            plain,
+            "· Context auto-compacted: folded 4 earlier message(s); ~12345 tokens now."
+        );
+    }
+
+    #[test]
+    fn notice_uses_alert_glyph_and_yellow_color() {
+        let colored = render_system_message(
+            &SystemMessage::Notice("Maximum turns reached.".into()),
+            true,
+            false,
+        );
+        assert!(colored.contains("\x1b[33m"), "got: {colored:?}");
+        let plain = strip_ansi(&colored);
+        assert_eq!(plain, "⚠ Maximum turns reached.");
+
+        // Plain mode falls back to ASCII for portability.
+        let plain_mode =
+            render_system_message(&SystemMessage::Notice("Boom.".into()), false, false);
+        assert_eq!(plain_mode, "! Boom.");
+    }
+
+    #[test]
+    fn shift_tab_cycles_modes_in_a_full_loop() {
+        // Default → AcceptEdits → Plan → Bypass → Default. Each step is a
+        // single Shift+Tab press in the running REPL.
+        assert_eq!(
+            next_permission_mode(PermissionMode::Default),
+            PermissionMode::AcceptEdits
+        );
+        assert_eq!(
+            next_permission_mode(PermissionMode::AcceptEdits),
+            PermissionMode::Plan
+        );
+        assert_eq!(
+            next_permission_mode(PermissionMode::Plan),
+            PermissionMode::Bypass
+        );
+        assert_eq!(
+            next_permission_mode(PermissionMode::Bypass),
+            PermissionMode::Default
+        );
+    }
+
+    #[test]
+    fn permission_prompt_summary_extracts_bash_command() {
+        let summary = summarize_tool_call_for_prompt(&tool_call(
+            "Bash",
+            serde_json::json!({"command": "ls -la /tmp"}),
+        ));
+        assert_eq!(summary, "ls -la /tmp");
+    }
+
+    #[test]
+    fn permission_prompt_summary_extracts_file_path_for_writes() {
+        let summary = summarize_tool_call_for_prompt(&tool_call(
+            "Write",
+            serde_json::json!({"file_path": "/tmp/foo.txt", "content": "secret"}),
+        ));
+        assert_eq!(summary, "/tmp/foo.txt");
+    }
+
+    #[test]
+    fn permission_prompt_summary_truncates_long_commands_with_ellipsis() {
+        let long_cmd = "a".repeat(500);
+        let summary = summarize_tool_call_for_prompt(&tool_call(
+            "Bash",
+            serde_json::json!({"command": long_cmd}),
+        ));
+        assert!(
+            summary.ends_with('…'),
+            "expected ellipsis, got: {summary:?}"
+        );
+        assert!(summary.chars().count() <= 141);
+    }
+
+    #[test]
+    fn permission_prompt_summary_collapses_newlines_in_command() {
+        let summary = summarize_tool_call_for_prompt(&tool_call(
+            "Bash",
+            serde_json::json!({"command": "echo line1\n  echo line2\necho line3"}),
+        ));
+        // Prompt must stay single-line; whitespace collapses to single spaces.
+        assert_eq!(summary, "echo line1 echo line2 echo line3");
+    }
+
+    #[test]
+    fn permission_prompt_summary_falls_back_to_json_for_unknown_tools() {
+        let summary = summarize_tool_call_for_prompt(&tool_call(
+            "MysteryTool",
+            serde_json::json!({"k": "v"}),
+        ));
+        assert!(summary.contains("\"k\""), "got: {summary:?}");
+        assert!(summary.contains("\"v\""), "got: {summary:?}");
+    }
+
+    #[test]
+    fn paean_token_resolved_detects_any_supported_env_name() {
+        let _guard = env_guard();
+        clear_api_env();
+        assert!(!paean_token_resolved());
+
+        unsafe {
+            std::env::set_var("PAEAN_TOKEN", "fixture");
+        }
+        assert!(paean_token_resolved());
+
+        clear_api_env();
+        unsafe {
+            std::env::set_var("CLIDE_API_TOKEN", "fixture");
+        }
+        assert!(paean_token_resolved());
+
+        clear_api_env();
+        unsafe {
+            std::env::set_var("PAEAN_API_TOKEN", "fixture");
+        }
+        assert!(paean_token_resolved());
+
+        clear_api_env();
+        // Empty string should not be treated as a resolved token.
+        unsafe {
+            std::env::set_var("PAEAN_API_TOKEN", "");
+        }
+        assert!(!paean_token_resolved());
+        clear_api_env();
     }
 }

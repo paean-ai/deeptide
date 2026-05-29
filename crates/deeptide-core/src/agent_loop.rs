@@ -220,6 +220,39 @@ const DEFAULT_CONTEXT_WINDOW: usize = 128_000;
 /// `CompactionManager.maxMessagesBeforeCompact`.
 const MAX_MESSAGES_BEFORE_COMPACT: usize = 200;
 
+/// Outcome of an interactive permission prompt. The REPL surfaces a
+/// `[y]es / [n]o / [t]his-tool / [a]llow-and-bypass` prompt and returns
+/// one of these so the agent loop can both decide on the current tool
+/// call AND adjust session-wide permissions (mode or rules) in one
+/// round-trip.
+#[derive(Debug, Clone)]
+pub enum AskOutcome {
+    /// Approve this single tool call. Session permission mode is unchanged.
+    Allow,
+    /// Approve this call AND install a session-scoped allow rule for every
+    /// subsequent invocation of the **same tool name** (e.g. all `Write`
+    /// calls for the rest of this REPL session). The rule is not persisted
+    /// to disk — closing the session removes it. Use this when the user
+    /// wants to stop being prompted for a specific tool without flipping
+    /// the entire session into Bypass.
+    AllowAllSession {
+        /// The exact tool name (e.g. `"Write"`, `"Bash"`) to whitelist.
+        tool_name: String,
+    },
+    /// Approve this single tool call AND switch the session to the given
+    /// mode so subsequent calls of comparable risk don't re-prompt.
+    AllowAndSetMode(PermissionMode),
+    /// Reject this call. The tool result is replaced with an error string
+    /// surfaced back to the model so it can recover or apologise.
+    Deny { reason: String },
+}
+
+/// Callback invoked when a tool call needs interactive approval (the
+/// permission system returned [`PermissionDecision::Ask`]). The callback
+/// runs synchronously in the agent loop thread; the REPL's wiring stops the
+/// spinner, prints the prompt, reads stdin, and returns the decision.
+pub type PermissionAskCallback = Arc<dyn Fn(&ToolCall) -> AskOutcome + Send + Sync>;
+
 pub struct AgentLoop {
     backend: Box<dyn AgentBackend>,
     messages: Vec<ConversationMessage>,
@@ -240,6 +273,11 @@ pub struct AgentLoop {
     /// Tools that may never be called, even if present in `allowed_tools`.
     /// Mirrors a sub-agent definition's `disallowedTools`.
     disallowed_tools: Vec<String>,
+    /// Interactive approval callback. When unset, an `Ask` decision still
+    /// returns an error (preserving the non-interactive contract used by
+    /// `--print` mode and library embeds); when set, the REPL gets a chance
+    /// to elicit a decision from the user.
+    ask_callback: Option<PermissionAskCallback>,
 }
 
 impl AgentLoop {
@@ -263,7 +301,23 @@ impl AgentLoop {
             hooks: crate::hooks::HookEngine::empty(),
             allowed_tools: None,
             disallowed_tools: Vec::new(),
+            ask_callback: None,
         }
+    }
+
+    /// Install a callback to invoke when a tool call needs interactive
+    /// approval. Without this callback (the default), `Ask` decisions are
+    /// returned to the model as errors — appropriate for `--print` mode and
+    /// library embeds where there's no human at the keyboard.
+    pub fn with_ask_callback(mut self, callback: PermissionAskCallback) -> Self {
+        self.ask_callback = Some(callback);
+        self
+    }
+
+    /// Update the active permission mode mid-session. Used by the REPL's
+    /// Shift+Tab cycle and by [`AskOutcome::AllowAndSetMode`].
+    pub fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.permission_manager.set_mode(mode);
     }
 
     /// Install the lifecycle hook engine (built from `settings.json` hooks).
@@ -702,11 +756,85 @@ impl AgentLoop {
                 "Permission denied for {}: {reason}",
                 tool_call.name
             )),
-            PermissionDecision::Ask => crate::ToolResult::error(format!(
+            PermissionDecision::Ask => self.handle_ask_decision(tool_call),
+        }
+    }
+
+    /// Resolve an `Ask` permission decision either by prompting the user
+    /// (when an interactive callback is installed) or by returning the
+    /// long-standing non-interactive error so headless callers behave
+    /// unchanged.
+    fn handle_ask_decision(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
+        let Some(callback) = self.ask_callback.clone() else {
+            return crate::ToolResult::error(format!(
                 "Permission required for {}. Re-run with --permission-mode accept-edits or add an allow rule to approve this tool call.",
+                tool_call.name
+            ));
+        };
+
+        let outcome = callback(tool_call);
+        match outcome {
+            AskOutcome::Allow => self.dispatch_approved_tool_call(tool_call),
+            AskOutcome::AllowAllSession { tool_name } => {
+                // Wildcard pattern bound to the tool name: matches every
+                // future call to this tool regardless of arguments. The
+                // rule lives in the session_allow_list (in-memory only) so
+                // it disappears at REPL exit — users can't accidentally
+                // grant durable trust by accepting one prompt.
+                self.permission_manager
+                    .add_session_rule(true, &tool_name, "*");
+                self.dispatch_approved_tool_call(tool_call)
+            }
+            AskOutcome::AllowAndSetMode(mode) => {
+                self.permission_manager.set_mode(mode);
+                self.dispatch_approved_tool_call(tool_call)
+            }
+            AskOutcome::Deny { reason } => crate::ToolResult::error(format!(
+                "Permission denied for {}: {reason}",
                 tool_call.name
             )),
         }
+    }
+
+    /// Execute a tool call that the user just approved, honouring the same
+    /// `PreToolUse` / `PostToolUse` hook lifecycle as the auto-allow path so
+    /// users can't sidestep their hooks by clicking "yes" at the prompt.
+    fn dispatch_approved_tool_call(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
+        if self.hooks.has_hooks(crate::hooks::HookEvent::PreToolUse) {
+            let input_json = serde_json::to_string(&tool_call.input).ok();
+            if let Some(reason) = self
+                .hooks
+                .pre_tool_block_reason(&tool_call.name, input_json.as_deref())
+            {
+                return crate::ToolResult::error(reason);
+            }
+        }
+
+        let result = if tool_call.name == "Agent"
+            && let Some(result) = self.execute_subagent_tool_call(tool_call)
+        {
+            result
+        } else if tool_call.name == "CtxInspect" {
+            self.execute_ctx_inspect_tool_call(tool_call)
+        } else if tool_call.name == "Snip" {
+            self.execute_snip_tool_call(tool_call)
+        } else if tool_call.name == "Brief" {
+            self.execute_brief_tool_call(tool_call)
+        } else {
+            self.tool_registry
+                .call(&tool_call.name, tool_call.input.clone(), &self.tool_context)
+        };
+
+        if self.hooks.has_hooks(crate::hooks::HookEvent::PostToolUse) {
+            let input_json = serde_json::to_string(&tool_call.input).ok();
+            let _ = self.hooks.run(
+                crate::hooks::HookEvent::PostToolUse,
+                Some(&tool_call.name),
+                input_json.as_deref(),
+            );
+        }
+
+        result
     }
 
     fn execute_subagent_tool_call(&self, tool_call: &ToolCall) -> Option<crate::ToolResult> {

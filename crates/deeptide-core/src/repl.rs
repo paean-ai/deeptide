@@ -17,8 +17,48 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplEvent {
+    /// Free-form assistant text or slash-command output. The CLI renders
+    /// this through the markdown pipeline (live or assembled).
     Output(String),
+    /// A structured, system-emitted message — tool execution events,
+    /// auto-compaction summaries, terminal conditions. Carries enough
+    /// metadata for the CLI to apply tool-specific styling (color, icons,
+    /// dim call IDs) without parsing strings.
+    System(SystemMessage),
+    /// Request the CLI to exit the REPL loop (e.g. `/exit`, Ctrl+D).
     Exit,
+}
+
+/// Structured payload for [`ReplEvent::System`]. Each variant carries the
+/// raw data needed by the CLI to render the event; the deeptide-core layer
+/// stays color-agnostic because color is a CLI-time concern (driven by
+/// `--no-color` / `NO_COLOR` / TTY detection).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemMessage {
+    /// "Tools completed: Read 1 file in ." — the batch-level rollup the
+    /// agent loop emits after a tool batch finishes.
+    ToolBatch { label: String, failed_count: usize },
+    /// Per-tool result line — the CLI styles success vs failure differently
+    /// and dims the call_id by default.
+    Tool {
+        name: String,
+        call_id: String,
+        summary: String,
+        is_error: bool,
+        /// Optional expanded body shown verbatim after the summary line
+        /// (small, successful tool results only — see
+        /// `should_expand_tool_result`).
+        body: Option<String>,
+    },
+    /// Auto-compaction completed; `compressed_messages` older messages
+    /// folded into a summary, `tokens_after` tokens remain.
+    Compaction {
+        compressed_messages: usize,
+        tokens_after: usize,
+    },
+    /// Terminal notice (max-turns, model error, blocked context window).
+    /// Carries a pre-formatted message; the CLI applies an "alert" style.
+    Notice(String),
 }
 
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
@@ -341,6 +381,20 @@ impl ReplSession {
         self
     }
 
+    /// Forward an interactive permission callback into the underlying agent
+    /// loop so that tools needing approval (`PermissionDecision::Ask`)
+    /// surface a prompt instead of failing.
+    pub fn with_ask_callback(mut self, callback: crate::PermissionAskCallback) -> Self {
+        self.agent_loop = self.agent_loop.with_ask_callback(callback);
+        self
+    }
+
+    /// Update the active permission mode mid-session. Used by the
+    /// Shift+Tab keybinding to cycle Default → AcceptEdits → Plan → Bypass.
+    pub fn set_permission_mode(&mut self, mode: crate::permissions::PermissionMode) {
+        self.agent_loop.set_permission_mode(mode);
+    }
+
     pub fn with_clipboard_writer<F>(mut self, writer: F) -> Self
     where
         F: Fn(&str) -> Result<(), String> + Send + Sync + 'static,
@@ -476,6 +530,17 @@ impl ReplSession {
     }
 
     pub fn status_line(&self) -> StatusLine {
+        self.status_line_with_auth(None)
+    }
+
+    /// Build the status line with an optional auth segment inserted at its
+    /// canonical priority slot (between `ctx` and `turns`).
+    ///
+    /// Segments are listed from highest to lowest survival priority. The
+    /// renderer drops trailing segments first when the terminal is narrow, so
+    /// the must-show items (model, mode, cwd, git, ctx, auth) stay visible
+    /// while `turns` and `cost` fall off first.
+    pub fn status_line_with_auth(&self, auth: Option<StatusSegment>) -> StatusLine {
         let summary = self.agent_loop.cost_tracker().summary();
         let context_tokens = estimate_repl_context_tokens(self.agent_loop.messages());
         let window = model_context_window(self.agent_loop.model()) as usize;
@@ -484,18 +549,28 @@ impl ReplSession {
             .checked_div(window)
             .unwrap_or(0);
         let branch = git_branch(&self.tool_context.cwd).unwrap_or_else(|| String::from("no-git"));
+        let cwd = format_cwd_for_status(&self.tool_context.cwd);
 
-        StatusLine::new([
+        let mut segments = vec![
             StatusSegment::new("model", self.agent_loop.model()),
             StatusSegment::new("mode", self.agent_loop.permission_mode().label()),
-            StatusSegment::new("ctx", format!("{context_pct}%")),
-            StatusSegment::new(
-                "turns",
-                format!("{}/{}", summary.turns.len(), self.agent_loop.max_turns()),
-            ),
+            StatusSegment::new("cwd", cwd),
             StatusSegment::new("git", branch),
-            StatusSegment::new("cost", CostTracker::format_usd(summary.total_cost_usd)),
-        ])
+            StatusSegment::new("ctx", format!("{context_pct}%")),
+        ];
+        if let Some(auth) = auth {
+            segments.push(auth);
+        }
+        segments.push(StatusSegment::new(
+            "turns",
+            format!("{}/{}", summary.turns.len(), self.agent_loop.max_turns()),
+        ));
+        segments.push(StatusSegment::new(
+            "cost",
+            CostTracker::format_usd(summary.total_cost_usd),
+        ));
+
+        StatusLine::new(segments)
     }
 
     pub fn agent_loop(&self) -> &AgentLoop {
@@ -1975,63 +2050,70 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
             label,
             failed_count,
             ..
-        } => {
-            let status = if failed_count == 0 {
-                "completed"
-            } else {
-                "completed with failures"
-            };
-            Some(ReplEvent::Output(format!("Tools {status}: {label}")))
-        }
-        AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => {
-            Some(ReplEvent::Output(String::from("Maximum turns reached.")))
-        }
-        AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)) => {
-            Some(ReplEvent::Output(format!("Model error: {error}")))
-        }
+        } => Some(ReplEvent::System(SystemMessage::ToolBatch {
+            label,
+            failed_count,
+        })),
+        AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => Some(ReplEvent::System(
+            SystemMessage::Notice(String::from("Maximum turns reached.")),
+        )),
+        AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)) => Some(ReplEvent::System(
+            SystemMessage::Notice(format!("Model error: {error}")),
+        )),
         AgentLoopEvent::Terminal(AgentTerminalEvent::Blocked) => {
-            Some(ReplEvent::Output(String::from(
+            Some(ReplEvent::System(SystemMessage::Notice(String::from(
                 "Context window full: the transcript exceeds the model's limit even after compaction. Start a new session (/new) or trim context.",
-            )))
+            ))))
         }
         AgentLoopEvent::ToolResult {
             tool_call,
             content,
             is_error,
-        } => Some(ReplEvent::Output(render_tool_result_for_repl(
+        } => Some(ReplEvent::System(build_tool_system_message(
             &tool_call.name,
             &tool_call.id,
             &content,
             is_error,
         ))),
-        AgentLoopEvent::Compaction(report) => Some(ReplEvent::Output(format!(
-            "Context auto-compacted: folded {} earlier message(s); ~{} tokens now.",
-            report.compressed_messages, report.tokens_after
-        ))),
+        AgentLoopEvent::Compaction(report) => Some(ReplEvent::System(SystemMessage::Compaction {
+            compressed_messages: report.compressed_messages,
+            tokens_after: report.tokens_after,
+        })),
         AgentLoopEvent::User(_) | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => None,
     }
 }
 
-fn render_tool_result_for_repl(
+/// Build a structured [`SystemMessage::Tool`] from a single tool result.
+/// Decides whether the body is small enough to inline below the summary
+/// (`should_expand_tool_result`); the CLI then renders the body verbatim
+/// without re-applying markdown styling so tool output (file contents,
+/// command output, etc.) is preserved exactly.
+fn build_tool_system_message(
     tool_name: &str,
     tool_id: &str,
     content: &str,
     is_error: bool,
-) -> String {
+) -> SystemMessage {
     let summary = ToolResultSummaryFormatter::summary(tool_name, content, is_error);
-    let verb = if is_error { "failed" } else { "completed" };
-    let header = format!("Tool {tool_name} ({tool_id}) {verb}:");
     let trimmed = content.trim();
 
-    if is_error
+    let body = if is_error
         || trimmed.is_empty()
         || ToolResultSummaryFormatter::should_mute_appearance(tool_name, content, is_error)
         || !should_expand_tool_result(trimmed)
     {
-        return format!("{header} {summary}");
-    }
+        None
+    } else {
+        Some(trimmed.to_owned())
+    };
 
-    format!("{header} {summary}\n{trimmed}")
+    SystemMessage::Tool {
+        name: tool_name.to_owned(),
+        call_id: tool_id.to_owned(),
+        summary,
+        is_error,
+        body,
+    }
 }
 
 fn should_expand_tool_result(trimmed: &str) -> bool {
@@ -2653,6 +2735,42 @@ fn git_branch(cwd: &std::path::Path) -> Option<String> {
     (!branch.is_empty()).then_some(branch)
 }
 
+/// Compact the absolute working-directory path for the status bar.
+///
+/// We substitute `$HOME` with `~` and, when the remaining string is still
+/// wide enough to crowd the bar on an 80-column terminal, collapse it to the
+/// basename. This keeps the most identifying piece of information visible
+/// without hijacking the bar with deep nested paths.
+pub(crate) fn format_cwd_for_status(cwd: &std::path::Path) -> String {
+    const MAX_DISPLAY_CHARS: usize = 28;
+
+    let raw = cwd.display().to_string();
+    let with_tilde = match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() => raw
+            .strip_prefix(&home)
+            .map(|rest| {
+                if rest.is_empty() {
+                    String::from("~")
+                } else if rest.starts_with('/') {
+                    format!("~{rest}")
+                } else {
+                    raw.clone()
+                }
+            })
+            .unwrap_or(raw),
+        _ => raw,
+    };
+
+    if with_tilde.chars().count() <= MAX_DISPLAY_CHARS {
+        return with_tilde;
+    }
+
+    cwd.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or(with_tilde)
+}
+
 fn last_user_prompt(messages: &[ConversationMessage]) -> Option<String> {
     messages
         .iter()
@@ -3024,4 +3142,69 @@ fn split_shell_like(input: &str) -> Vec<String> {
     }
 
     parts
+}
+
+#[cfg(test)]
+mod cwd_format_tests {
+    use super::format_cwd_for_status;
+    use std::path::PathBuf;
+
+    fn with_home<T>(home: &str, body: impl FnOnce() -> T) -> T {
+        use std::sync::{Mutex, OnceLock};
+        // `HOME` is process-global and `cargo test` runs these cases in
+        // parallel, so serialize them: without the lock one test's save/restore
+        // interleaves with another's body and it reads the wrong `HOME`.
+        static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = HOME_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var("HOME").ok();
+        // SAFETY: process-wide env mutation; restored below. Acceptable in a
+        // single-threaded unit test that does not run alongside other env
+        // probes (no other test in this module touches HOME).
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        let out = body();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        out
+    }
+
+    #[test]
+    fn collapses_home_prefix_to_tilde() {
+        with_home("/Users/ryan", || {
+            let formatted = format_cwd_for_status(&PathBuf::from("/Users/ryan/projects/foo"));
+            assert_eq!(formatted, "~/projects/foo");
+        });
+    }
+
+    #[test]
+    fn long_path_falls_back_to_basename() {
+        with_home("/Users/ryan", || {
+            let formatted = format_cwd_for_status(&PathBuf::from(
+                "/Users/ryan/a/very/deeply/nested/path/that/exceeds/the/limit/deeptide-npm",
+            ));
+            assert_eq!(formatted, "deeptide-npm");
+        });
+    }
+
+    #[test]
+    fn unrelated_root_is_kept_verbatim_when_short() {
+        with_home("/Users/ryan", || {
+            let formatted = format_cwd_for_status(&PathBuf::from("/opt/work"));
+            assert_eq!(formatted, "/opt/work");
+        });
+    }
+
+    #[test]
+    fn exact_home_collapses_to_tilde() {
+        with_home("/Users/ryan", || {
+            let formatted = format_cwd_for_status(&PathBuf::from("/Users/ryan"));
+            assert_eq!(formatted, "~");
+        });
+    }
 }

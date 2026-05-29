@@ -531,13 +531,7 @@ fn truncate_to_width(value: &str, width: usize) -> String {
     out
 }
 
-fn display_width(text: &str) -> usize {
-    strip_ansi(text).chars().map(char_width).sum()
-}
-
-fn char_width(ch: char) -> usize {
-    if is_wide(ch) { 2 } else { 1 }
-}
+use crate::width::{char_width, display_width, is_wide};
 
 fn is_unspaced_wide_text(value: &str) -> bool {
     let trimmed = value.trim_end_matches(' ');
@@ -550,39 +544,6 @@ fn take_chars(value: &str, count: usize) -> String {
 
 fn skip_chars(value: &str, count: usize) -> String {
     value.chars().skip(count).collect()
-}
-
-fn is_wide(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x1100..=0x115F
-            | 0x2329..=0x232A
-            | 0x2E80..=0xA4CF
-            | 0xAC00..=0xD7A3
-            | 0xF900..=0xFAFF
-            | 0xFE10..=0xFE19
-            | 0xFE30..=0xFE6F
-            | 0xFF00..=0xFF60
-            | 0xFFE0..=0xFFE6
-    )
-}
-
-fn strip_ansi(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
-                }
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
 }
 
 // ── Activity spinner ────────────────────────────────────────────────────────

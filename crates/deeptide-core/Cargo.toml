@@ -16,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
+unicode-width.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
