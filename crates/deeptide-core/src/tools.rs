@@ -119,6 +119,7 @@ impl ToolRegistry {
         registry.register(Box::<CronDeleteTool>::default());
         registry.register(Box::<ReviewArtifactTool>::default());
         registry.register(Box::<SkillTool>::default());
+        registry.register(Box::<DiscoverSkillsTool>::default());
         registry.register(Box::<PublishTool>::default());
         registry.register(Box::<RemoteTriggerTool>::default());
         registry.register(Box::<PushNotificationTool>::default());
@@ -845,8 +846,18 @@ impl Tool for AgentTool {
             .unwrap_or("(inherit parent model)");
         let tool_policy = invocation.definition.tool_policy_label();
 
+        // This fallback only fires when something dispatches `Agent`
+        // straight through the `ToolRegistry` without going through
+        // `AgentLoop::execute_tool_call`, which intercepts `Agent` calls
+        // and routes them through the registered subagent backend factory.
+        // The CLI wires one up automatically; if you see this message,
+        // either a custom embedder is calling the registry directly or a
+        // test forgot to call `AgentLoop::with_subagent_backend_factory`.
         ToolResult::error(format!(
-            "Sub-agent execution is not available in this Rust build yet.\n\
+            "Agent tool reached the registry fallback path. The hosting AgentLoop did not\n\
+             register a subagent backend factory; call `AgentLoop::with_subagent_backend_factory(...)`\n\
+             before `run()`, or dispatch this tool call through `AgentLoop::execute_tool_call`\n\
+             instead of `ToolRegistry::call` directly.\n\n\
              Requested: {}\n\
              Type: {}\n\
              Model: {model}\n\
@@ -2450,6 +2461,62 @@ impl Tool for SkillTool {
         ToolResult::text(format!(
             "Skill invoked: {skill_name}\n\n[SKILL PROMPT START]\n{expanded}\n[SKILL PROMPT END]\n\nFollow the instructions above. The skill specifies what to do and how to do it."
         ))
+    }
+}
+
+/// Read-only catalog of every built-in skill. Mirrors zero-cli's
+/// `DiscoverSkillsTool` so the model can proactively learn what skill
+/// templates are available before deciding to call `Skill`.
+///
+/// The previous behavior surfaced the catalog only as a side effect of
+/// calling `Skill` with an unknown name, which wastes a tool call and
+/// pollutes the transcript with an error. `DiscoverSkills` lets the model
+/// list the surface up front and pick the right skill on the first try.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DiscoverSkillsTool;
+
+impl Tool for DiscoverSkillsTool {
+    fn name(&self) -> &'static str {
+        "DiscoverSkills"
+    }
+
+    fn description(&self) -> &'static str {
+        "List every built-in Deeptide skill (name, one-line description, optional when-to-use hint). \
+         Use before invoking Skill to pick the right template; no side effects."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, _input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let skills_json: Vec<serde_json::Value> = builtin_skills()
+            .iter()
+            .map(|skill| {
+                let mut obj = serde_json::Map::with_capacity(3);
+                obj.insert(
+                    String::from("name"),
+                    serde_json::Value::String(skill.name.to_owned()),
+                );
+                obj.insert(
+                    String::from("description"),
+                    serde_json::Value::String(skill.description.to_owned()),
+                );
+                if let Some(when) = skill.when_to_use {
+                    obj.insert(
+                        String::from("when_to_use"),
+                        serde_json::Value::String(when.to_owned()),
+                    );
+                }
+                serde_json::Value::Object(obj)
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "count": skills_json.len(),
+            "skills": skills_json,
+            "invocation_hint": "Invoke a skill with Skill({\"skill\": \"<name>\", \"args\": \"<optional arguments>\"}).",
+        });
+        ToolResult::text(payload.to_string())
     }
 }
 
@@ -7414,14 +7481,90 @@ fn post_desktop_notification_impl(
 
 #[cfg(target_os = "windows")]
 fn post_desktop_notification_impl(
-    _title: &str,
-    _subtitle: Option<&str>,
-    _message: &str,
-    _sound: bool,
+    title: &str,
+    subtitle: Option<&str>,
+    message: &str,
+    sound: bool,
 ) -> ToolResult {
-    ToolResult::error(
-        "PushNotification is not implemented on Windows yet. Use normal assistant output or a RemoteTrigger webhook.",
+    let script = build_windows_notification_script(title, subtitle, message, sound);
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            ToolResult::text(format!("Notification posted: {title}"))
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            ToolResult::error(format!(
+                "powershell NotifyIcon exited with code {}. {}",
+                output.status.code().unwrap_or(-1),
+                stderr.trim()
+            ))
+        }
+        Err(error) => ToolResult::error(format!(
+            "Failed to spawn powershell for Windows notification: {error}"
+        )),
+    }
+}
+
+/// Build a single-line PowerShell script that pops a Windows tray balloon
+/// notification using `System.Windows.Forms.NotifyIcon`.
+///
+/// Implementation choice: NotifyIcon ships with .NET Framework on every
+/// supported Windows release, so we don't depend on third-party modules
+/// (BurntToast etc.) or `msg.exe` (missing on Home editions). The balloon
+/// auto-dismisses; we sleep just long enough to keep the icon alive while
+/// Windows renders the popup, then `Dispose()` to release the tray slot.
+///
+/// Compiled on Windows and in tests on every host so the escape logic
+/// stays unit-testable from a developer machine that can't actually
+/// cross-compile cargo test to Windows (`ring` needs a Windows linker).
+/// Only the wiring that shells out to `powershell` is `target_os =
+/// "windows"`-gated; everything pure is testable everywhere.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn build_windows_notification_script(
+    title: &str,
+    subtitle: Option<&str>,
+    message: &str,
+    sound: bool,
+) -> String {
+    // NotifyIcon has no distinct subtitle slot, so we prepend any subtitle
+    // into the body separated by a blank line — same shape macOS uses
+    // when subtitles fall through to its osascript path.
+    let combined_message = match subtitle.filter(|value| !value.is_empty()) {
+        Some(subtitle) => format!("{subtitle}\n\n{message}"),
+        None => message.to_owned(),
+    };
+    format!(
+        "Add-Type -AssemblyName System.Windows.Forms;\
+         $n = New-Object System.Windows.Forms.NotifyIcon;\
+         $n.Icon = [System.Drawing.SystemIcons]::Information;\
+         $n.Visible = $true;\
+         $n.BalloonTipTitle = {title};\
+         $n.BalloonTipText  = {body};\
+         $n.BalloonTipIcon  = [System.Windows.Forms.ToolTipIcon]::Info;\
+         if ({sound_flag}) {{ [System.Console]::Beep() }};\
+         $n.ShowBalloonTip(5000);\
+         Start-Sleep -Milliseconds 5500;\
+         $n.Dispose();",
+        title = powershell_string(title),
+        body = powershell_string(&combined_message),
+        sound_flag = if sound { "$true" } else { "$false" },
     )
+}
+
+/// Escape a string for safe embedding inside a PowerShell single-quoted
+/// literal. PowerShell single quotes do not interpret backslashes, but a
+/// literal single quote must be doubled (`''`). Carriage returns and
+/// newlines are stripped so the inline command stays a single statement.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn powershell_string(value: &str) -> String {
+    let escaped = value
+        .replace('\'', "''")
+        .replace('\r', "")
+        .replace('\n', " ");
+    format!("'{escaped}'")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -11362,5 +11505,83 @@ mod bash_output_tests {
         assert_eq!(clamp_bash_max(Some(50_000)), 50_000);
         assert_eq!(clamp_bash_max(Some(1_000)), 10_000);
         assert_eq!(clamp_bash_max(Some(999_999)), 150_000);
+    }
+}
+
+#[cfg(test)]
+mod windows_notification_tests {
+    //! Unit tests for the Windows PushNotification PowerShell builder.
+    //! These exercise the pure script/escape helpers on any host so we
+    //! don't have to wait for Windows CI to catch escape regressions.
+    use super::{build_windows_notification_script, powershell_string};
+
+    #[test]
+    fn powershell_string_wraps_in_single_quotes_and_doubles_internal_quotes() {
+        assert_eq!(powershell_string(""), "''");
+        assert_eq!(powershell_string("hello"), "'hello'");
+        // Single quotes inside the value must be doubled — that's the only
+        // escape PowerShell single-quoted literals honor.
+        assert_eq!(powershell_string("it's fine"), "'it''s fine'");
+        assert_eq!(powershell_string("don't 'do' that"), "'don''t ''do'' that'");
+    }
+
+    #[test]
+    fn powershell_string_strips_newlines_so_the_script_stays_one_statement() {
+        // Newlines would terminate the PowerShell command — replace with
+        // spaces. Carriage returns are stripped entirely so `\r\n`
+        // collapses to a single space, not two characters.
+        assert_eq!(powershell_string("a\nb"), "'a b'");
+        assert_eq!(powershell_string("a\r\nb"), "'a b'");
+        assert_eq!(powershell_string("a\rb"), "'ab'");
+    }
+
+    #[test]
+    fn powershell_string_passes_backslashes_through_unchanged() {
+        // Single-quoted PowerShell literals do NOT interpret backslashes.
+        // Path-like inputs must round-trip untouched.
+        assert_eq!(
+            powershell_string(r"C:\Users\test\file"),
+            r"'C:\Users\test\file'"
+        );
+    }
+
+    #[test]
+    fn build_windows_notification_script_includes_title_body_and_sound() {
+        let script =
+            build_windows_notification_script("Build Finished", None, "Tests are green.", false);
+        assert!(script.contains("System.Windows.Forms.NotifyIcon"));
+        assert!(script.contains("'Build Finished'"));
+        assert!(script.contains("'Tests are green.'"));
+        // sound = false → the conditional branch must not auto-Beep.
+        assert!(script.contains("if ($false)"));
+        // Dispose must always run so we don't leak tray icons.
+        assert!(script.contains(".Dispose()"));
+    }
+
+    #[test]
+    fn build_windows_notification_script_inlines_subtitle_before_body() {
+        let script = build_windows_notification_script(
+            "Deploy",
+            Some("staging-us-east"),
+            "Rolled out to 47 hosts.",
+            true,
+        );
+        // Subtitle + blank line + body must collapse to a single
+        // PowerShell-safe literal once escaped (newlines → spaces).
+        assert!(
+            script.contains("'staging-us-east  Rolled out to 47 hosts.'"),
+            "expected subtitle then body in single literal; got: {script}"
+        );
+        // sound = true → Beep branch must be reachable.
+        assert!(script.contains("if ($true)"));
+    }
+
+    #[test]
+    fn build_windows_notification_script_omits_subtitle_when_blank() {
+        // Empty subtitles should be treated like absent ones — no
+        // leading "  " on the body literal.
+        let script = build_windows_notification_script("T", Some(""), "M", false);
+        assert!(script.contains("'M'"));
+        assert!(!script.contains("'  M'"));
     }
 }

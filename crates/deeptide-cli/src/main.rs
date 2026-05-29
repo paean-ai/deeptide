@@ -242,6 +242,20 @@ struct Cli {
     list_sessions: bool,
 
     #[arg(
+        long = "list-models",
+        action = ArgAction::SetTrue,
+        help = "List models with built-in pricing data and exit (no API key required)."
+    )]
+    list_models: bool,
+
+    #[arg(
+        long = "doctor",
+        action = ArgAction::SetTrue,
+        help = "Print a diagnostic report (config paths, env, model, optional tooling) and exit."
+    )]
+    doctor: bool,
+
+    #[arg(
         long = "no-session-persistence",
         env = "DEEPTIDE_NO_SESSION_PERSISTENCE",
         action = ArgAction::SetTrue,
@@ -288,6 +302,23 @@ fn run(mut cli: Cli) -> Result<(), String> {
             "{}",
             format_session_list(&deeptide_core::SessionStore::list(&cwd))
         );
+        return Ok(());
+    }
+
+    // --list-models is another no-API-key early exit so users can discover
+    // which models have built-in pricing data and which the CLI defaults
+    // to, without provisioning an API key first.
+    if cli.list_models {
+        println!("{}", format_model_list(DEFAULT_MODEL));
+        return Ok(());
+    }
+
+    // --doctor is a no-network, no-API-key diagnostic that surfaces the
+    // configuration the CLI would use on a real run plus environment
+    // health checks. Designed to be the first thing a user runs when
+    // something doesn't behave the way they expect.
+    if cli.doctor {
+        println!("{}", run_doctor(&cli, &cwd));
         return Ok(());
     }
 
@@ -666,7 +697,7 @@ fn run_interactive(
     if !is_configured {
         writeln!(
             stdout,
-            "No API key configured; using local echo backend. Set DEEPTIDE_API_KEY or --api-key to call a model."
+            "No API key configured; using local echo backend. Set DEEPTIDE_API_KEY (or ANTHROPIC_API_KEY / ZERO_API_KEY) or pass --api-key to call a model. Run `deeptide --doctor` to inspect the full resolution chain."
         )
         .map_err(|error| error.to_string())?;
     }
@@ -846,6 +877,21 @@ fn emit_output(
     Ok(())
 }
 
+/// Returns the stderr warning that should be printed when a `--print`
+/// run starts without a resolved credential. Returns `None` when no
+/// warning is needed (either credentials resolved fine, or we're in
+/// interactive REPL mode where the user already sees an in-band
+/// banner). Extracted as a pure function so unit tests can pin the
+/// trigger condition + the wording.
+fn unconfigured_print_mode_warning(is_configured: bool, print_mode: bool) -> Option<String> {
+    if is_configured || !print_mode {
+        return None;
+    }
+    Some(String::from(
+        "warning: no API key resolved; --print is using the local echo backend and will NOT call a model.\n         set DEEPTIDE_API_KEY / ANTHROPIC_API_KEY / ZERO_API_KEY (or pass --api-key), or run `deeptide --doctor` to inspect the resolution chain.",
+    ))
+}
+
 /// The outcome of a one-shot (`--print`) run: the assistant's final text plus
 /// the run's accumulated cost/token usage, used to build the result envelope.
 struct PromptOutcome {
@@ -862,6 +908,20 @@ fn run_prompt(
     streaming_handler: Option<StreamingHandler>,
 ) -> Result<PromptOutcome, String> {
     let configured = configured_backend_with_handler(cli, streaming_handler)?;
+
+    // In one-shot (`--print`) mode the user can't see the interactive
+    // "No API key configured" banner that REPL emits to stdout. The
+    // print path was silently swapping in LocalEchoBackend and shipping
+    // a canned echo back as if it were a real model response — which
+    // looked plausible in `stream-json` output and could be mistaken
+    // for a real model run in CI logs. Surface the degradation loudly
+    // on stderr so the failure mode is obvious without breaking
+    // existing scripts that depend on exit code 0.
+    if let Some(warning) = unconfigured_print_mode_warning(configured.is_configured, cli.print_mode)
+    {
+        eprintln!("{warning}");
+    }
+
     let (allowed_tools, disallowed_tools) = parse_tool_restrictions(
         cli.allowed_tools.as_deref(),
         cli.disallowed_tools.as_deref(),
@@ -1067,6 +1127,245 @@ fn parse_tool_restrictions(
     let allowed = allowed.map(split).filter(|list| !list.is_empty());
     let disallowed = disallowed.map(split).unwrap_or_default();
     (allowed, disallowed)
+}
+
+/// Render the diagnostic report for `--doctor`.
+///
+/// Designed to be the first thing a user runs when something doesn't
+/// behave the way they expect. Does no network I/O and never reveals
+/// credential values — API keys are reduced to a presence flag plus
+/// their string length so users can confirm they're set without
+/// leaking secrets into a pasted bug report.
+///
+/// `cwd` is passed in (rather than re-read inside the function) so the
+/// test suite can drive the report under a tempdir.
+fn run_doctor(cli: &Cli, cwd: &Path) -> String {
+    let mut lines = Vec::with_capacity(64);
+
+    lines.push(format!("Deeptide doctor  v{}", env!("CARGO_PKG_VERSION")));
+    lines.push(String::from(
+        "================================================",
+    ));
+    lines.push(format!("workspace : {}", cwd.display()));
+    lines.push(format!(
+        "platform  : {} {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    lines.push(String::new());
+
+    lines.push(String::from("[ config files ]"));
+    for (label, path) in [
+        ("global ", ConfigStore::global_path()),
+        ("project", ConfigStore::project_path(cwd)),
+        ("local  ", ConfigStore::local_path(cwd)),
+    ] {
+        let status = if path.exists() { "exists" } else { "missing" };
+        lines.push(format!("  {label}  {}  [{status}]", path.display()));
+    }
+    match cli.settings.as_ref() {
+        Some(path) => {
+            let status = if path.exists() { "exists" } else { "MISSING" };
+            lines.push(format!("  --settings  {}  [{status}]", path.display()));
+        }
+        None => lines.push(String::from("  --settings  (not provided)")),
+    }
+    lines.push(String::new());
+
+    lines.push(String::from("[ model ]"));
+    lines.push(format!("  effective  : {}", effective_model(cli)));
+    lines.push(format!("  --model    : {}", cli.model));
+    lines.push(format!(
+        "  env override (DEEPTIDE_MODEL): {}",
+        env_first_non_empty(&["DEEPTIDE_MODEL", "ZERO_CLI_MODEL", "ANTHROPIC_MODEL"])
+            .unwrap_or_else(|| String::from("(not set)"))
+    ));
+    match cli.fallback_model.as_deref() {
+        Some(fallback) => lines.push(format!("  fallback   : {fallback}")),
+        None => lines.push(String::from("  fallback   : (none)")),
+    }
+    lines.push(String::new());
+
+    lines.push(String::from("[ auth ]"));
+    lines.push(format!("  base_url   : {}", effective_base_url(cli)));
+    let credential = effective_credential(cli);
+    match &credential {
+        Some(CloudCredential::ApiKey(_)) => lines.push(String::from(
+            "  credential : api key resolved (--api-key or ZERO_API_KEY / ANTHROPIC_API_KEY)",
+        )),
+        Some(CloudCredential::BearerToken(_)) => lines.push(String::from(
+            "  credential : bearer token resolved (ZERO_CLI_AUTH_TOKEN / ANTHROPIC_AUTH_TOKEN)",
+        )),
+        None => lines.push(String::from(
+            "  credential : NOT RESOLVED — set --api-key, ZERO_API_KEY, or ANTHROPIC_API_KEY before running a turn.",
+        )),
+    }
+    // Env var presence breakdown — never reveals the value, just shows
+    // length so users can confirm they exported the right variable.
+    for name in [
+        "ZERO_API_KEY",
+        "ZERO_CLI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ZERO_CLI_AUTH_TOKEN",
+    ] {
+        match std::env::var(name) {
+            Ok(value) if !value.trim().is_empty() => {
+                lines.push(format!(
+                    "    env {name}  = present (len={})",
+                    value.trim().len()
+                ));
+            }
+            _ => lines.push(format!("    env {name}  = (unset)")),
+        }
+    }
+    lines.push(String::new());
+
+    lines.push(String::from("[ baseline ]"));
+    lines.push(format!("  permission_mode : {}", cli.permission_mode));
+    lines.push(format!(
+        "  yolo            : {}",
+        if cli.yolo { "ON" } else { "off" }
+    ));
+    lines.push(format!(
+        "  stream          : {}",
+        if cli.stream { "ON" } else { "off" }
+    ));
+    lines.push(format!(
+        "  prompt cache    : {}",
+        if cli.no_prompt_cache {
+            "DISABLED"
+        } else {
+            "enabled"
+        }
+    ));
+    lines.push(format!("  max_output_tokens: {}", cli.max_output_tokens));
+    lines.push(format!("  max_turns        : {}", cli.max_turns));
+    lines.push(String::new());
+
+    lines.push(String::from("[ sessions ]"));
+    let sessions = deeptide_core::SessionStore::list(cwd);
+    lines.push(format!("  saved for this cwd: {}", sessions.len()));
+    if let Some(most_recent) = sessions.first() {
+        lines.push(format!(
+            "  most-recent       : {} ({} messages)",
+            most_recent.session_id, most_recent.message_count
+        ));
+    }
+    lines.push(String::new());
+
+    lines.push(String::from("[ optional tools detected on PATH ]"));
+    // Each entry is `(binary, platform-note)`. We surface the platform
+    // note so a Linux user doesn't see "pbcopy ✗" as a problem.
+    let probes: &[(&str, &str)] = &[
+        ("git", ""),
+        ("rg", "(recommended for fast grep)"),
+        ("pbpaste", "(macOS clipboard read)"),
+        ("pbcopy", "(macOS clipboard write)"),
+        ("wl-paste", "(Wayland clipboard read)"),
+        ("xclip", "(X11 clipboard)"),
+        ("xsel", "(X11 clipboard fallback)"),
+        ("notify-send", "(Linux desktop notifications)"),
+        ("osascript", "(macOS scripting / notifications)"),
+        ("screencapture", "(macOS screen capture)"),
+        ("ffmpeg", "(audio/video transcribe)"),
+        ("powershell", "(Windows clipboard / notifications)"),
+    ];
+    for (bin, note) in probes {
+        let mark = if which_on_path(bin).is_some() {
+            "✓"
+        } else {
+            "✗"
+        };
+        let suffix = if note.is_empty() {
+            String::new()
+        } else {
+            format!(" {note}")
+        };
+        lines.push(format!("  [{mark}] {bin}{suffix}"));
+    }
+    lines.push(String::new());
+
+    if credential.is_none() {
+        lines.push(String::from(
+            "WARNING: no credential resolved. The CLI will refuse to make API calls until one is set.",
+        ));
+    } else {
+        lines.push(String::from(
+            "Looks healthy. Run `deeptide -p 'hello'` to verify end-to-end connectivity.",
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Lightweight `which`-style probe that walks `$PATH` and reports the
+/// first absolute path of an executable named `binary`, or `None`. We
+/// deliberately don't shell out to system `which` because Windows
+/// PowerShell's `which` alias is `Get-Command` with different semantics
+/// — rolling our own keeps `--doctor` self-contained.
+fn which_on_path(binary: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        // On Windows the binary may end with `.exe`/`.cmd`/`.bat`; on
+        // other platforms a bare name is enough. We try the bare name
+        // first because that's what 90% of users have on Unix.
+        let candidate = dir.join(binary);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            for ext in ["exe", "cmd", "bat", "ps1"] {
+                let candidate = dir.join(format!("{binary}.{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Render the catalog of models for `--list-models`. Each row shows
+/// per-million-token prices for input, output, cache-create, and
+/// cache-read (USD), plus a flag marking the default. Aligned by name
+/// so the table stays readable as the catalog grows.
+fn format_model_list(default_model: &str) -> String {
+    let models = deeptide_core::known_models();
+    if models.is_empty() {
+        return String::from("No models with built-in pricing data are registered.");
+    }
+    let name_width = models
+        .iter()
+        .map(|m| m.name.len())
+        .max()
+        .unwrap_or(0)
+        .max(5);
+    let mut lines = vec![format!("Built-in models ({}):", models.len())];
+    lines.push(format!(
+        "  {:<name_width$}   input      output     cache_create   cache_read   default",
+        "name"
+    ));
+    for model in &models {
+        let p = model.pricing;
+        let is_default = if model.name == default_model { "*" } else { "" };
+        lines.push(format!(
+            "  {:<name_width$}   ${:>5.2}/M   ${:>5.2}/M    ${:>5.2}/M      ${:>5.2}/M       {}",
+            model.name,
+            p.input * 1_000_000.0,
+            p.output * 1_000_000.0,
+            p.cache_create * 1_000_000.0,
+            p.cache_read * 1_000_000.0,
+            is_default,
+        ));
+    }
+    lines.push(String::new());
+    lines.push(format!("Default: {default_model} (override with --model <name>, env DEEPTIDE_MODEL, or settings.model)."));
+    lines.push(String::from(
+        "Other model names are still accepted on the wire; only listed ones get accurate cost tracking.",
+    ));
+    lines.join("\n")
 }
 
 /// Render the saved-session listing for `--list-sessions` (most-recent first).
@@ -1278,6 +1577,8 @@ mod tests {
             continue_session: false,
             resume: None,
             list_sessions: false,
+            list_models: false,
+            doctor: false,
             no_session_persistence: false,
             settings: None,
             add_dir: Vec::new(),
@@ -1919,6 +2220,259 @@ mod tests {
         assert!(
             err.contains("--system-prompt-file"),
             "error should name the flag: {err}"
+        );
+    }
+
+    #[test]
+    fn format_model_list_marks_default_and_shows_every_known_model() {
+        let out = super::format_model_list("deepseek-v4-pro");
+        // Every entry in known_models() must appear in the table; if a
+        // future commit adds a new pricing entry, this test forces the
+        // change to also surface through `--list-models`.
+        let count = deeptide_core::known_models().len();
+        assert!(
+            out.starts_with(&format!("Built-in models ({count}):")),
+            "header should announce row count; got: {out}"
+        );
+        for model in deeptide_core::known_models() {
+            assert!(
+                out.contains(model.name),
+                "missing {} from model table",
+                model.name
+            );
+        }
+        // The chosen default must end with the asterisk marker, and a
+        // non-default model must not.
+        for line in out.lines() {
+            if line.starts_with("  deepseek-v4-pro ") {
+                assert!(
+                    line.trim_end().ends_with('*'),
+                    "default row should end with '*'; got: {line}"
+                );
+            }
+            if line.starts_with("  deepseek-v4-flash ") {
+                assert!(
+                    !line.trim_end().ends_with('*'),
+                    "non-default row must not end with '*'; got: {line}"
+                );
+            }
+        }
+        // Footer points users at the override paths.
+        assert!(out.contains("--model"));
+        assert!(out.contains("DEEPTIDE_MODEL"));
+    }
+
+    #[test]
+    fn doctor_report_does_not_leak_credential_values() {
+        let _g = env_guard();
+        // Use a unique unlikely-to-collide secret. We want to verify it
+        // appears nowhere in the doctor report even if the env var is set.
+        let secret = "sk-deeptide-doctor-test-XYZZY-DO-NOT-LEAK-12345";
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", secret);
+        }
+        let cli = sample_cli();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = super::run_doctor(&cli, dir.path());
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+
+        assert!(
+            !report.contains(secret),
+            "doctor report leaked the secret value: {report}"
+        );
+        // The report must still confirm the credential is present and
+        // surface a useful length so the user can sanity-check it.
+        assert!(
+            report.contains("ANTHROPIC_API_KEY  = present (len="),
+            "doctor must report ANTHROPIC_API_KEY presence + length"
+        );
+        assert!(
+            report.contains(&format!("len={})", secret.len())),
+            "doctor must report the exact length of the env var; got: {report}"
+        );
+    }
+
+    #[test]
+    fn doctor_report_announces_missing_credential_when_no_env_set() {
+        let _g = env_guard();
+        for name in [
+            "ZERO_API_KEY",
+            "ZERO_CLI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ZERO_CLI_AUTH_TOKEN",
+        ] {
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+        let mut cli = sample_cli();
+        cli.api_key = None;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = super::run_doctor(&cli, dir.path());
+        assert!(
+            report.contains("credential : NOT RESOLVED"),
+            "doctor must call out missing credential prominently; got: {report}"
+        );
+        assert!(
+            report.contains("WARNING: no credential resolved"),
+            "doctor must emit a closing warning when no credential is set"
+        );
+    }
+
+    #[test]
+    fn doctor_report_surfaces_each_config_scope_with_existence_state() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Create only the project scope; global and local should report
+        // as missing, project as exists.
+        let project_dir = dir.path().join(".deeptide");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        std::fs::write(project_dir.join("settings.json"), "{}").expect("project file");
+
+        let cli = sample_cli();
+        let report = super::run_doctor(&cli, dir.path());
+
+        // Look at the project line specifically.
+        let project_line = report
+            .lines()
+            .find(|line| line.contains(".deeptide/settings.json") && line.contains("project"))
+            .expect("project line present");
+        assert!(
+            project_line.ends_with("[exists]"),
+            "project scope must be marked existing: {project_line}"
+        );
+        let local_line = report
+            .lines()
+            .find(|line| line.contains("settings.local.json"))
+            .expect("local line present");
+        assert!(
+            local_line.ends_with("[missing]"),
+            "local scope must be marked missing: {local_line}"
+        );
+    }
+
+    #[test]
+    fn doctor_report_marks_settings_override_path_existence() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = dir.path().join("custom.json");
+        std::fs::write(&settings, "{}").expect("write");
+        let mut cli = sample_cli();
+        cli.settings = Some(settings.clone());
+        let report = super::run_doctor(&cli, dir.path());
+        assert!(
+            report.contains(&format!("--settings  {}  [exists]", settings.display())),
+            "doctor must mark an existing --settings file as [exists]; got: {report}"
+        );
+
+        // Now point at a non-existent file — the report should say MISSING
+        // (uppercase) so it stands out as a likely misconfiguration.
+        let mut cli2 = sample_cli();
+        cli2.settings = Some(dir.path().join("nope.json"));
+        let report2 = super::run_doctor(&cli2, dir.path());
+        assert!(
+            report2.contains("[MISSING]"),
+            "doctor must mark a bad --settings path as [MISSING] (uppercase)"
+        );
+    }
+
+    #[test]
+    fn doctor_report_probes_path_for_known_optional_tools() {
+        let _g = env_guard();
+        let cli = sample_cli();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = super::run_doctor(&cli, dir.path());
+
+        // Every probe must appear; their detection state varies by host
+        // and is not asserted here, but the *catalog* must be exhaustive
+        // so users can't be surprised by a missing entry.
+        for probe in [
+            "git",
+            "rg",
+            "pbpaste",
+            "pbcopy",
+            "wl-paste",
+            "xclip",
+            "xsel",
+            "notify-send",
+            "osascript",
+            "screencapture",
+            "ffmpeg",
+            "powershell",
+        ] {
+            assert!(
+                report.contains(probe),
+                "doctor PATH-probe section missing entry for {probe}; got: {report}"
+            );
+        }
+    }
+
+    #[test]
+    fn unconfigured_print_mode_emits_actionable_warning() {
+        // The whole point: --print mode without credentials must yield a
+        // loud stderr warning. The text must call out the failure mode
+        // ("local echo backend"), every env var the user can set, and
+        // the `--doctor` escape hatch.
+        let warning = super::unconfigured_print_mode_warning(false, true)
+            .expect("warning must fire when print mode is unconfigured");
+        assert!(warning.contains("local echo backend"));
+        assert!(warning.contains("DEEPTIDE_API_KEY"));
+        assert!(warning.contains("ANTHROPIC_API_KEY"));
+        assert!(warning.contains("ZERO_API_KEY"));
+        assert!(warning.contains("--api-key"));
+        assert!(warning.contains("deeptide --doctor"));
+    }
+
+    #[test]
+    fn configured_print_mode_does_not_warn() {
+        // is_configured = true → no warning (a real backend will run).
+        assert!(super::unconfigured_print_mode_warning(true, true).is_none());
+    }
+
+    #[test]
+    fn interactive_mode_relies_on_in_band_banner_not_stderr() {
+        // Interactive REPL prints its own visible banner on stdout when
+        // unconfigured. The stderr warning is a print-mode-only safety
+        // net to keep `--print` output trustworthy in CI logs.
+        assert!(super::unconfigured_print_mode_warning(false, false).is_none());
+        assert!(super::unconfigured_print_mode_warning(true, false).is_none());
+    }
+
+    #[test]
+    fn which_on_path_finds_a_known_binary_or_returns_none() {
+        // `sh` is present on every Unix host the CI matrix supports;
+        // on Windows we don't run this assertion at all.
+        #[cfg(unix)]
+        {
+            assert!(
+                super::which_on_path("sh").is_some(),
+                "PATH probe failed to find sh — env may be misconfigured"
+            );
+        }
+        // A guaranteed-absent binary must return None.
+        assert!(
+            super::which_on_path("deeptide-doctor-definitely-does-not-exist-xyz").is_none(),
+            "PATH probe must return None for clearly absent binaries"
+        );
+    }
+
+    #[test]
+    fn format_model_list_renders_pricing_per_million_tokens() {
+        // The cost.rs table stores prices as USD per token (e.g. 0.27 /
+        // 1_000_000.0). The CLI surfaces them scaled to per-million so
+        // they're human-readable. Spot-check the known v4-pro row.
+        let out = super::format_model_list("deepseek-v4-pro");
+        assert!(
+            out.contains("$ 0.27/M") || out.contains("$0.27/M"),
+            "expected input price scaled to per-million tokens; got: {out}"
+        );
+        // Output price for v4-pro is $1.10/M.
+        assert!(
+            out.contains("$ 1.10/M") || out.contains("$1.10/M"),
+            "expected output price scaled to per-million tokens; got: {out}"
         );
     }
 }

@@ -44,7 +44,10 @@ pub use context_window::{
     CompressionReport, ContextWindowConfig, ContextWindowManager, HeuristicSummarizer, Summarizer,
     estimate_tokens,
 };
-pub use cost::{CacheHealth, CostSummary, CostTracker, ModelPricing, TurnRecord, TurnUsage};
+pub use cost::{
+    CacheHealth, CostSummary, CostTracker, KnownModel, ModelPricing, TurnRecord, TurnUsage,
+    known_models,
+};
 pub use hooks::{HookEngine, HookEvent, HookOutcome};
 pub use markdown::{MarkdownRenderOptions, MarkdownRenderer};
 pub use permissions::{

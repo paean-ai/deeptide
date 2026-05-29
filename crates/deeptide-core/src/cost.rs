@@ -312,6 +312,26 @@ fn default_pricing(model: &str) -> Option<ModelPricing> {
         .find_map(|(name, pricing)| (name == model).then_some(pricing))
 }
 
+/// One row of the built-in model catalog: a model name + its public
+/// pricing per million tokens. Returned by [`known_models`] so the CLI
+/// (`--list-models`) and any future REPL command can render the catalog
+/// without duplicating the pricing constants.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KnownModel {
+    pub name: &'static str,
+    pub pricing: ModelPricing,
+}
+
+/// Public catalog of the models with built-in pricing data. The CLI's
+/// `--list-models` reads this; new entries here automatically appear in
+/// both `--list-models` and the cost-tracking subsystem.
+pub fn known_models() -> Vec<KnownModel> {
+    default_pricing_table()
+        .into_iter()
+        .map(|(name, pricing)| KnownModel { name, pricing })
+        .collect()
+}
+
 fn default_pricing_table() -> [(&'static str, ModelPricing); 5] {
     [
         (
