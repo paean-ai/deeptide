@@ -128,6 +128,7 @@ fn streaming_backend_delivers_text_deltas_and_assembles_response() {
             step: 0,
             max_turns: 1,
             system: None,
+            allowed_tools: None,
         })
         .expect("streaming respond");
 
@@ -194,6 +195,7 @@ fn streaming_backend_works_without_handler_callback() {
             step: 0,
             max_turns: 1,
             system: None,
+            allowed_tools: None,
         })
         .expect("streaming respond without handler");
     assert_eq!(response.content, "Hello, world!");

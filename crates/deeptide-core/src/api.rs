@@ -317,6 +317,15 @@ impl AnthropicBackend {
             &self.config.tool_choice,
             self.config.enable_prompt_caching,
         );
+        // A restricted sub-agent only advertises the tools it may call, so the
+        // model is not offered (and cannot waste a turn on) a forbidden tool.
+        if let Some(allowed) = request.allowed_tools.as_deref() {
+            body.tools = filter_wire_tools(
+                std::mem::take(&mut body.tools),
+                allowed,
+                self.config.enable_prompt_caching,
+            );
+        }
         apply_thinking(&mut body, self.config.thinking.as_ref());
         body.stream = self.config.enable_streaming;
         let url = messages_url(&self.config.base_url);
@@ -488,6 +497,28 @@ struct WireTool {
     /// schema prefix — for us that's ~50K tokens of schema definitions.
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<WireCacheControl>,
+}
+
+/// Keep only the tools named in `allowed`, preserving declaration order, and
+/// re-attach the cache breakpoint to the new last tool. Used to advertise a
+/// restricted sub-agent only the tools it is permitted to call.
+fn filter_wire_tools(
+    tools: Vec<WireTool>,
+    allowed: &[String],
+    enable_caching: bool,
+) -> Vec<WireTool> {
+    let mut filtered: Vec<WireTool> = tools
+        .into_iter()
+        .filter(|tool| allowed.iter().any(|name| name == tool.name))
+        .map(|mut tool| {
+            tool.cache_control = None;
+            tool
+        })
+        .collect();
+    if enable_caching && let Some(last) = filtered.last_mut() {
+        last.cache_control = Some(WireCacheControl::ephemeral());
+    }
+    filtered
 }
 
 fn build_messages_request<'a>(
@@ -1648,8 +1679,8 @@ fn api_error_hint(status: u16, error_type: Option<&str>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        WireContentBlock, apply_thinking, build_messages_request, classify_error, messages_url,
-        parse_messages_response, tool_schemas,
+        WireContentBlock, apply_thinking, build_messages_request, classify_error,
+        filter_wire_tools, messages_url, parse_messages_response, tool_schemas,
     };
     use crate::{ConversationMessage, ThinkingConfig, ToolCall, ToolChoice, ToolResultBlock};
     use std::time::Duration;
@@ -1676,6 +1707,38 @@ mod tests {
             advertised_only.is_empty(),
             "API schemas with no registered tool: {advertised_only:?}"
         );
+    }
+
+    #[test]
+    fn filter_wire_tools_restricts_to_allowed_set() {
+        use std::collections::BTreeSet;
+        let allowed = vec![String::from("Read"), String::from("Grep")];
+        let filtered = filter_wire_tools(tool_schemas(), &allowed, true);
+
+        let names: BTreeSet<&str> = filtered.iter().map(|tool| tool.name).collect();
+        assert_eq!(names, ["Grep", "Read"].into_iter().collect());
+
+        // Exactly one cache breakpoint, on the last surviving tool.
+        let cached = filtered
+            .iter()
+            .filter(|tool| tool.cache_control.is_some())
+            .count();
+        assert_eq!(cached, 1);
+        assert!(
+            filtered
+                .last()
+                .expect("filtered list is non-empty")
+                .cache_control
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn filter_wire_tools_without_caching_sets_no_marker() {
+        let filtered = filter_wire_tools(tool_schemas(), &[String::from("Read")], false);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "Read");
+        assert!(filtered[0].cache_control.is_none());
     }
 
     #[test]
