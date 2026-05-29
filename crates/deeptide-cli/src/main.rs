@@ -255,6 +255,14 @@ struct Cli {
         help = "Merge an explicit settings.json file on top of the global/project/local scopes."
     )]
     settings: Option<PathBuf>,
+
+    #[arg(
+        long = "add-dir",
+        value_name = "PATH",
+        action = ArgAction::Append,
+        help = "Register an additional directory in the session context (repeatable), like /add-dir in the REPL."
+    )]
+    add_dir: Vec<PathBuf>,
 }
 
 fn main() {
@@ -626,6 +634,7 @@ fn run_interactive(
         .with_hooks(hooks)
         .with_tool_restrictions(allowed_tools, disallowed_tools)
         .with_session_persistence(!cli.no_session_persistence)
+        .with_additional_dirs(&cli.add_dir)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
     if let Some(append) = cli.append_system_prompt.as_deref() {
@@ -1217,6 +1226,7 @@ mod tests {
             list_sessions: false,
             no_session_persistence: false,
             settings: None,
+            add_dir: Vec::new(),
         }
     }
 
