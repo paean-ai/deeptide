@@ -70,6 +70,30 @@ fn help_command_suggests_similar_unknown_commands() {
     assert!(output.contains("Did you mean: /memory?"));
 }
 
+#[test]
+fn help_command_suggests_typo_via_edit_distance() {
+    let context = CommandContext::builder().all_commands(commands).build();
+    // "commti" neither starts with nor contains any command, but is one
+    // transposition away from "commit" — the fuzzy fallback should catch it.
+    let output = text(HelpCommand.execute("commti", &context));
+
+    assert!(output.contains("Unknown command: /commti"));
+    assert!(
+        output.contains("Did you mean: /commit?"),
+        "expected /commit suggestion, got: {output}"
+    );
+}
+
+#[test]
+fn help_command_reports_no_match_for_unrelated_command() {
+    let context = CommandContext::builder().all_commands(commands).build();
+    let output = text(HelpCommand.execute("zzzzzz", &context));
+
+    assert!(output.contains("Unknown command: /zzzzzz"));
+    assert!(output.contains("Type /help for the full list."));
+    assert!(!output.contains("Did you mean"));
+}
+
 fn text(result: CommandResult) -> String {
     match result {
         CommandResult::Text(value) => value,
