@@ -762,7 +762,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "ToolSearch",
-            description: "Search available tools by name or capability. Use select:ToolA,ToolB for exact summaries.",
+            description: "Search the live tool registry by name, purpose, or capability.\n- query: search keywords (required).\n- max_results: cap on results (default 10).\n- Use select:Read,Edit,Grep when you know exact tool names and want their summaries without fuzzy ranking.\n- Prefix required terms with +, e.g. \"+macos permission\" or \"+mcp resource\".\n- Searches CamelCase tool names, one-line summaries, and capability synonyms such as screenshot, clipboard, OCR, Spotlight, crash, and LSP.\n- Returns names, read/write and parallel-safety traits, and one-line summaries. Use it before guessing between related tools.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -862,7 +862,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "MCP",
-            description: "Forward a JSON-RPC method to a configured MCP server.",
+            description: "Forward a JSON-RPC call to an MCP server configured under settings.mcp_servers.\n- server: the server key in settings.mcp_servers (or mcpServers).\n- method: JSON-RPC method such as tools/call, resources/list, or prompts/get.\n- params: free-form JSON object passed to the server.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1802,6 +1802,8 @@ mod tests {
         assert!(describe("LSP").contains("documentSymbol"));
         assert!(describe("LSP").contains("rust-analyzer for Rust"));
         assert!(describe("Monitor").contains("clamped to 5..300"));
+        assert!(describe("ToolSearch").contains("Prefix required terms with +"));
+        assert!(describe("MCP").contains("settings.mcp_servers"));
     }
 
     #[test]
