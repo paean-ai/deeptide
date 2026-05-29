@@ -26,7 +26,8 @@ pub mod tui;
 
 pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
-    AgentUsage, ConversationMessage, LocalEchoBackend, MessageRole, ToolCall, ToolResultBlock,
+    AgentUsage, AskOutcome, ConversationMessage, LocalEchoBackend, MessageRole,
+    PermissionAskCallback, ToolCall, ToolResultBlock,
 };
 pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ThinkingConfig, ToolChoice};
 pub use commands::{
@@ -50,7 +51,7 @@ pub use cost::{
     known_models,
 };
 pub use hooks::{HookEngine, HookEvent, HookOutcome};
-pub use markdown::{MarkdownRenderOptions, MarkdownRenderer};
+pub use markdown::{MarkdownRenderOptions, MarkdownRenderer, StreamingMarkdownRenderer};
 pub use permissions::{
     PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
     ToolInput,

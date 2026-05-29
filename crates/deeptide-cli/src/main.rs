@@ -12,15 +12,19 @@ use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
-    CommandCompletionSource, CompletionEngine, LocalEchoBackend, ModelPricing, ReplEvent,
-    ReplSession, StatusSegment, StreamingEvent, StreamingHandler, ThinkingConfig, tui,
+    AskOutcome, CommandCompletionSource, CompletionEngine, LocalEchoBackend, MarkdownRenderOptions,
+    ModelPricing, ReplEvent, ReplSession, StatusSegment, StreamingEvent, StreamingHandler,
+    StreamingMarkdownRenderer, ThinkingConfig, ToolCall, tui,
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
-use rustyline::{Context, Editor, Helper};
+use rustyline::{
+    Cmd, ConditionalEventHandler, Context, Editor, Event, EventContext, EventHandler, Helper,
+    KeyCode, KeyEvent, Modifiers, RepeatCount,
+};
 
 mod status_bar;
 
@@ -684,11 +688,19 @@ fn run_interactive(
     let spinner_stop_handler = Arc::clone(&spinner_stop);
     let output_started_handler = Arc::clone(&output_started);
     let spinner_lock_handler = Arc::clone(&spinner_lock);
+    // Line-buffered markdown renderer for streamed output. Sits inside an
+    // `Arc<Mutex<…>>` because the streaming handler is invoked from whatever
+    // thread the backend uses, and we may also need to drain (flush) it
+    // from the REPL thread between turns.
+    let streaming_md = Arc::new(Mutex::new(StreamingMarkdownRenderer::new(
+        MarkdownRenderOptions { color: use_color },
+    )));
+    let streaming_md_handler = Arc::clone(&streaming_md);
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
         if let StreamingEvent::TextDelta { delta, .. } = event {
             let first = !did_stream_handler.swap(true, Ordering::Relaxed);
-            // Stop the spinner under the lock so it cannot draw a frame over the
-            // text we are about to print.
+            // Stop the spinner under the lock so it cannot draw a frame over
+            // the text we are about to print.
             if let Ok(_guard) = spinner_lock_handler.lock() {
                 spinner_stop_handler.store(true, Ordering::Relaxed);
                 output_started_handler.store(true, Ordering::Relaxed);
@@ -697,7 +709,18 @@ fn run_interactive(
                     // Erase the spinner line before the first streamed token.
                     let _ = out.write_all(b"\r\x1b[2K");
                 }
-                let _ = out.write_all(delta.as_bytes());
+                // Apply incremental markdown rendering. Bold, lists, headers,
+                // links, and inline code now style correctly even though the
+                // model is emitting one chunk at a time. Code fences are
+                // passed through verbatim while open (the body remains
+                // readable as it streams in).
+                let rendered = match streaming_md_handler.lock() {
+                    Ok(mut renderer) => renderer.push(delta),
+                    // If the mutex is poisoned, fall back to raw output so the
+                    // user still sees the model response.
+                    Err(_) => delta.clone(),
+                };
+                let _ = out.write_all(rendered.as_bytes());
                 let _ = out.flush();
             }
         }
@@ -709,6 +732,26 @@ fn run_interactive(
         cli.allowed_tools.as_deref(),
         cli.disallowed_tools.as_deref(),
     );
+    // Permission ask callback. Invoked synchronously from inside the agent
+    // loop whenever a tool requires interactive approval; reads y/n/a from
+    // stdin and returns the user's choice. Built BEFORE the REPL so we can
+    // pass it as a builder argument; uses the same spinner mutex so the
+    // prompt isn't clobbered by an in-flight frame.
+    let ask_spinner_stop = Arc::clone(&spinner_stop);
+    let ask_spinner_lock = Arc::clone(&spinner_lock);
+    let ask_output_started = Arc::clone(&output_started);
+    let ask_use_color = use_color;
+    let ask_callback: deeptide_core::PermissionAskCallback =
+        Arc::new(move |tool_call: &ToolCall| {
+            handle_permission_prompt(
+                tool_call,
+                &ask_spinner_lock,
+                &ask_spinner_stop,
+                &ask_output_started,
+                ask_use_color,
+            )
+        });
+
     let mut repl = ReplSession::new(configured.backend)
         .with_model(configured.model)
         .with_permission_mode(permission_mode)
@@ -721,7 +764,8 @@ fn run_interactive(
         .with_session_persistence(!cli.no_session_persistence)
         .with_additional_dirs(&cli.add_dir)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
-        .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
+        .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config))
+        .with_ask_callback(ask_callback);
     if let Some(append) = cli.append_system_prompt.as_deref() {
         repl = repl.with_appended_system_prompt(append);
     }
@@ -734,6 +778,17 @@ fn run_interactive(
     let mut rl: Editor<ReplHelper, rustyline::history::DefaultHistory> =
         Editor::with_config(rl_config).map_err(|error| error.to_string())?;
     rl.set_helper(Some(helper));
+
+    // Shift+Tab: cycle the session permission mode. The conditional handler
+    // sets `pending_mode_cycle` and asks rustyline to interrupt readline so
+    // the REPL loop can observe the flag and react with visible feedback.
+    let pending_mode_cycle: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    rl.bind_sequence(
+        Event::KeySeq(vec![KeyEvent(KeyCode::BackTab, Modifiers::NONE)]),
+        EventHandler::Conditional(Box::new(ShiftTabCycleHandler {
+            pending: Arc::clone(&pending_mode_cycle),
+        })),
+    );
 
     let history_path = history_file_path();
     if let Some(ref path) = history_path {
@@ -870,6 +925,21 @@ fn run_interactive(
                     let _ = handle.join();
                 }
 
+                // Drain the streaming markdown buffer. The model often
+                // produces a trailing line without a final newline; without
+                // this flush that fragment would stay buffered and reappear
+                // on the next turn's first delta with stale state. Resetting
+                // the renderer also clears any fence state so a turn that
+                // ended mid-code-block doesn't bleed into the next response.
+                if let Ok(mut renderer) = streaming_md.lock() {
+                    let trailing = renderer.flush();
+                    if !trailing.is_empty() {
+                        let _ = stdout.write_all(trailing.as_bytes());
+                    }
+                    *renderer =
+                        StreamingMarkdownRenderer::new(MarkdownRenderOptions { color: use_color });
+                }
+
                 for event in events {
                     match event {
                         ReplEvent::Output(text) => {
@@ -901,6 +971,22 @@ fn run_interactive(
                 }
             }
             Err(ReadlineError::Interrupted) => {
+                // Shift+Tab piggy-backs on rustyline's Interrupt command to
+                // break out of readline cleanly. If the cycle handler set the
+                // flag, this isn't a real Ctrl+C — it's the user asking to
+                // rotate the permission mode.
+                if pending_mode_cycle.swap(false, Ordering::Relaxed) {
+                    let next = next_permission_mode(repl.agent_loop().permission_mode());
+                    repl.set_permission_mode(next);
+                    let label = next.label();
+                    let line = if use_color {
+                        format!("  → mode \x1b[1m{label}\x1b[0m")
+                    } else {
+                        format!("  → mode {label}")
+                    };
+                    writeln!(stdout, "{line}").map_err(|error| error.to_string())?;
+                    continue;
+                }
                 // Ctrl+C — echo ^C and continue (matches Swift/zero-cli behaviour)
                 writeln!(stdout, "^C").map_err(|error| error.to_string())?;
                 continue;
@@ -1629,6 +1715,174 @@ fn effective_credential(cli: &Cli) -> Option<CloudCredential> {
     None
 }
 
+/// Advance the permission mode by one step around the cycle
+/// `Default → AcceptEdits → Plan → Bypass → Default`. Bound to Shift+Tab so
+/// users can switch into YOLO mid-session without restarting the REPL.
+fn next_permission_mode(current: PermissionMode) -> PermissionMode {
+    match current {
+        PermissionMode::Default => PermissionMode::AcceptEdits,
+        PermissionMode::AcceptEdits => PermissionMode::Plan,
+        PermissionMode::Plan => PermissionMode::Bypass,
+        PermissionMode::Bypass => PermissionMode::Default,
+    }
+}
+
+/// Conditional readline handler that records "Shift+Tab was pressed" via an
+/// atomic flag and asks rustyline to interrupt the current readline session.
+///
+/// The interrupt is the cleanest way out of `rl.readline()` from inside a
+/// custom binding: it returns `ReadlineError::Interrupted` which our REPL
+/// already handles as a benign restart point. The REPL then observes the
+/// flag, cycles the permission mode, paints feedback, and presents a fresh
+/// prompt — losing any partial input the user had typed, but that's a fair
+/// trade for a binding that only fires on an explicit modifier keystroke.
+struct ShiftTabCycleHandler {
+    pending: Arc<AtomicBool>,
+}
+
+impl ConditionalEventHandler for ShiftTabCycleHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        self.pending.store(true, Ordering::Relaxed);
+        // Force rustyline to exit with `Interrupted` so the REPL loop can
+        // observe the flag and react. Without this rustyline would just sit
+        // in `readline()` and the mode switch would be invisible until the
+        // user pressed Enter on their own.
+        Some(Cmd::Interrupt)
+    }
+}
+
+/// Interactive permission prompt invoked by the agent loop when a tool
+/// call needs the user's approval. Stops the spinner, prints a one-line
+/// summary of the pending tool call, reads y/n/a from stdin, and returns
+/// the resulting [`AskOutcome`].
+///
+/// Input grammar:
+/// - empty / `y` / `yes`   → allow this call only
+/// - `n` / `no`            → deny this call
+/// - `a` / `all` / `yolo`  → allow this call AND flip the session to YOLO
+///   (Bypass) so subsequent risky calls don't re-prompt.
+fn handle_permission_prompt(
+    tool_call: &ToolCall,
+    spinner_lock: &Arc<Mutex<()>>,
+    spinner_stop: &Arc<AtomicBool>,
+    output_started: &Arc<AtomicBool>,
+    use_color: bool,
+) -> AskOutcome {
+    // Halt the spinner first; the lock then prevents it from racing the
+    // prompt write before it observes the stop flag.
+    spinner_stop.store(true, Ordering::Relaxed);
+    let _spinner_guard = spinner_lock.lock().ok();
+
+    let mut stdout = io::stdout();
+    // Clear whatever the spinner left on the current line.
+    let _ = stdout.write_all(b"\r\x1b[2K");
+
+    let summary = summarize_tool_call_for_prompt(tool_call);
+    let header = if use_color {
+        format!(
+            "\n\x1b[33m  ⏸  Permission required\x1b[0m  \x1b[1m{}\x1b[0m  {}\n",
+            tool_call.name, summary
+        )
+    } else {
+        format!(
+            "\n  ⏸  Permission required  {}  {}\n",
+            tool_call.name, summary
+        )
+    };
+    let prompt = if use_color {
+        "  \x1b[2m[y]es / [n]o / [a]ll-yolo\x1b[0m  > "
+    } else {
+        "  [y]es / [n]o / [a]ll-yolo  > "
+    };
+    let _ = stdout.write_all(header.as_bytes());
+    let _ = stdout.write_all(prompt.as_bytes());
+    let _ = stdout.flush();
+
+    output_started.store(true, Ordering::Relaxed);
+
+    let mut response = String::new();
+    if io::stdin().read_line(&mut response).is_err() {
+        return AskOutcome::Deny {
+            reason: String::from("failed to read approval from stdin"),
+        };
+    }
+
+    match response.trim().to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => AskOutcome::Allow,
+        "n" | "no" => AskOutcome::Deny {
+            reason: String::from("user declined"),
+        },
+        "a" | "all" | "yolo" | "all-yolo" => {
+            let _ = writeln!(
+                stdout,
+                "  (session switched to YOLO mode — Shift+Tab to cycle back)"
+            );
+            AskOutcome::AllowAndSetMode(PermissionMode::Bypass)
+        }
+        other => AskOutcome::Deny {
+            reason: format!("user declined ({other})"),
+        },
+    }
+}
+
+/// Produce a one-line summary of the tool call's most relevant input field
+/// for the permission prompt. Bash → command, Write/Edit → file_path, etc.
+/// Falls back to a truncated JSON dump for unknown tools so the user can
+/// still see what's being requested.
+fn summarize_tool_call_for_prompt(tool_call: &ToolCall) -> String {
+    const MAX_LEN: usize = 140;
+
+    let extracted = match tool_call.name.as_str() {
+        "Bash" => tool_call
+            .input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        "Write" | "Edit" => tool_call
+            .input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        "Read" => tool_call
+            .input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        "WebFetch" => tool_call
+            .input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        _ => None,
+    };
+
+    let raw =
+        extracted.unwrap_or_else(|| serde_json::to_string(&tool_call.input).unwrap_or_default());
+
+    // Single-line, trimmed to MAX_LEN characters (not bytes) for the prompt.
+    let collapsed: String = raw
+        .lines()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if collapsed.chars().count() <= MAX_LEN {
+        collapsed
+    } else {
+        let mut truncated: String = collapsed.chars().take(MAX_LEN).collect();
+        truncated.push('…');
+        truncated
+    }
+}
+
 /// Returns `true` when a Paean publishing token is exported in the
 /// environment. Paean today only powers `/publish` (skill upload to
 /// api.paean.ai); inference still routes through Anthropic-compatible
@@ -1759,10 +2013,11 @@ mod tests {
     use super::{
         Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
         build_auth_segment, collect_prompt, configured_backend, effective_base_url,
-        effective_model, normalize_embedded_mode, paean_token_resolved, use_color,
-        validate_formats,
+        effective_model, next_permission_mode, normalize_embedded_mode, paean_token_resolved,
+        summarize_tool_call_for_prompt, use_color, validate_formats,
     };
     use clap::Parser;
+    use deeptide_core::permissions::PermissionMode;
     use deeptide_core::{AnthropicAuthMode, ConfigData, ProviderProfile, ThinkingConfig};
     use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -2840,6 +3095,84 @@ mod tests {
         // Wrap-around at u64::MAX preserves the alternating contract.
         assert_eq!(build_auth_segment(true, true, u64::MAX).label, "paean");
         assert_eq!(build_auth_segment(true, true, 2).label, "key");
+    }
+
+    fn tool_call(name: &str, input: serde_json::Value) -> deeptide_core::ToolCall {
+        deeptide_core::ToolCall::new("call_test", name, input)
+    }
+
+    #[test]
+    fn shift_tab_cycles_modes_in_a_full_loop() {
+        // Default → AcceptEdits → Plan → Bypass → Default. Each step is a
+        // single Shift+Tab press in the running REPL.
+        assert_eq!(
+            next_permission_mode(PermissionMode::Default),
+            PermissionMode::AcceptEdits
+        );
+        assert_eq!(
+            next_permission_mode(PermissionMode::AcceptEdits),
+            PermissionMode::Plan
+        );
+        assert_eq!(
+            next_permission_mode(PermissionMode::Plan),
+            PermissionMode::Bypass
+        );
+        assert_eq!(
+            next_permission_mode(PermissionMode::Bypass),
+            PermissionMode::Default
+        );
+    }
+
+    #[test]
+    fn permission_prompt_summary_extracts_bash_command() {
+        let summary = summarize_tool_call_for_prompt(&tool_call(
+            "Bash",
+            serde_json::json!({"command": "ls -la /tmp"}),
+        ));
+        assert_eq!(summary, "ls -la /tmp");
+    }
+
+    #[test]
+    fn permission_prompt_summary_extracts_file_path_for_writes() {
+        let summary = summarize_tool_call_for_prompt(&tool_call(
+            "Write",
+            serde_json::json!({"file_path": "/tmp/foo.txt", "content": "secret"}),
+        ));
+        assert_eq!(summary, "/tmp/foo.txt");
+    }
+
+    #[test]
+    fn permission_prompt_summary_truncates_long_commands_with_ellipsis() {
+        let long_cmd = "a".repeat(500);
+        let summary = summarize_tool_call_for_prompt(&tool_call(
+            "Bash",
+            serde_json::json!({"command": long_cmd}),
+        ));
+        assert!(
+            summary.ends_with('…'),
+            "expected ellipsis, got: {summary:?}"
+        );
+        assert!(summary.chars().count() <= 141);
+    }
+
+    #[test]
+    fn permission_prompt_summary_collapses_newlines_in_command() {
+        let summary = summarize_tool_call_for_prompt(&tool_call(
+            "Bash",
+            serde_json::json!({"command": "echo line1\n  echo line2\necho line3"}),
+        ));
+        // Prompt must stay single-line; whitespace collapses to single spaces.
+        assert_eq!(summary, "echo line1 echo line2 echo line3");
+    }
+
+    #[test]
+    fn permission_prompt_summary_falls_back_to_json_for_unknown_tools() {
+        let summary = summarize_tool_call_for_prompt(&tool_call(
+            "MysteryTool",
+            serde_json::json!({"k": "v"}),
+        ));
+        assert!(summary.contains("\"k\""), "got: {summary:?}");
+        assert!(summary.contains("\"v\""), "got: {summary:?}");
     }
 
     #[test]
