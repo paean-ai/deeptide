@@ -1598,6 +1598,91 @@ fn skill_tool_expands_builtin_skill_prompts_and_reports_unknown_names() {
 }
 
 #[test]
+fn discover_skills_lists_every_builtin_skill_as_json() {
+    use deeptide_core::tools::DiscoverSkillsTool;
+    let context = ToolContext::new(".");
+    let result = DiscoverSkillsTool.call(serde_json::json!({}), &context);
+    assert!(!result.is_error);
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result.content).expect("DiscoverSkills output must be valid JSON");
+    let count = parsed
+        .get("count")
+        .and_then(serde_json::Value::as_u64)
+        .expect("count field");
+    assert!(count >= 7, "expected at least the 7 known skills; got {count}");
+
+    let skills = parsed
+        .get("skills")
+        .and_then(serde_json::Value::as_array)
+        .expect("skills array");
+    let names: Vec<&str> = skills
+        .iter()
+        .filter_map(|s| s.get("name").and_then(serde_json::Value::as_str))
+        .collect();
+    // Every shipped built-in must show up.
+    for required in [
+        "commit",
+        "simplify",
+        "review-pr",
+        "init",
+        "batch",
+        "publish",
+        "update-config",
+    ] {
+        assert!(
+            names.contains(&required),
+            "DiscoverSkills missing skill '{required}'; got: {names:?}"
+        );
+    }
+
+    // The when_to_use field is optional in the schema and must only appear
+    // on skills that actually carry guidance — `publish` is the canonical
+    // example.
+    let publish = skills
+        .iter()
+        .find(|s| s.get("name").and_then(serde_json::Value::as_str) == Some("publish"))
+        .expect("publish skill in catalog");
+    assert!(
+        publish
+            .get("when_to_use")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|hint| hint.contains("publish")),
+        "publish skill must carry when_to_use guidance"
+    );
+
+    let commit = skills
+        .iter()
+        .find(|s| s.get("name").and_then(serde_json::Value::as_str) == Some("commit"))
+        .expect("commit skill");
+    assert!(
+        commit.get("when_to_use").is_none(),
+        "commit skill has no when_to_use; the field must be omitted"
+    );
+
+    let hint = parsed
+        .get("invocation_hint")
+        .and_then(serde_json::Value::as_str)
+        .expect("invocation_hint present");
+    assert!(hint.contains("Skill(") && hint.contains("\"skill\""));
+}
+
+#[test]
+fn discover_skills_ignores_input_arguments() {
+    use deeptide_core::tools::DiscoverSkillsTool;
+    let context = ToolContext::new(".");
+    let with_args = DiscoverSkillsTool.call(
+        serde_json::json!({"unused": 42, "skill": "noise"}),
+        &context,
+    );
+    assert!(!with_args.is_error);
+    // The schema enforces additionalProperties:false on the wire, but the
+    // local implementation must not break if extras sneak through.
+    let parsed: serde_json::Value = serde_json::from_str(&with_args.content).expect("json");
+    assert!(parsed.get("skills").is_some());
+}
+
+#[test]
 fn publish_tool_renders_status_and_validates_option_conflicts() {
     // PublishTool reads PAEAN_API_* / CLIDE_API_* env vars during dispatch.
     // Other publish_tool_* tests mutate those vars under `publish_env_guard`,

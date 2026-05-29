@@ -119,6 +119,7 @@ impl ToolRegistry {
         registry.register(Box::<CronDeleteTool>::default());
         registry.register(Box::<ReviewArtifactTool>::default());
         registry.register(Box::<SkillTool>::default());
+        registry.register(Box::<DiscoverSkillsTool>::default());
         registry.register(Box::<PublishTool>::default());
         registry.register(Box::<RemoteTriggerTool>::default());
         registry.register(Box::<PushNotificationTool>::default());
@@ -2450,6 +2451,62 @@ impl Tool for SkillTool {
         ToolResult::text(format!(
             "Skill invoked: {skill_name}\n\n[SKILL PROMPT START]\n{expanded}\n[SKILL PROMPT END]\n\nFollow the instructions above. The skill specifies what to do and how to do it."
         ))
+    }
+}
+
+/// Read-only catalog of every built-in skill. Mirrors zero-cli's
+/// `DiscoverSkillsTool` so the model can proactively learn what skill
+/// templates are available before deciding to call `Skill`.
+///
+/// The previous behavior surfaced the catalog only as a side effect of
+/// calling `Skill` with an unknown name, which wastes a tool call and
+/// pollutes the transcript with an error. `DiscoverSkills` lets the model
+/// list the surface up front and pick the right skill on the first try.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DiscoverSkillsTool;
+
+impl Tool for DiscoverSkillsTool {
+    fn name(&self) -> &'static str {
+        "DiscoverSkills"
+    }
+
+    fn description(&self) -> &'static str {
+        "List every built-in Deeptide skill (name, one-line description, optional when-to-use hint). \
+         Use before invoking Skill to pick the right template; no side effects."
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn call(&self, _input: serde_json::Value, _context: &ToolContext) -> ToolResult {
+        let skills_json: Vec<serde_json::Value> = builtin_skills()
+            .iter()
+            .map(|skill| {
+                let mut obj = serde_json::Map::with_capacity(3);
+                obj.insert(
+                    String::from("name"),
+                    serde_json::Value::String(skill.name.to_owned()),
+                );
+                obj.insert(
+                    String::from("description"),
+                    serde_json::Value::String(skill.description.to_owned()),
+                );
+                if let Some(when) = skill.when_to_use {
+                    obj.insert(
+                        String::from("when_to_use"),
+                        serde_json::Value::String(when.to_owned()),
+                    );
+                }
+                serde_json::Value::Object(obj)
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "count": skills_json.len(),
+            "skills": skills_json,
+            "invocation_hint": "Invoke a skill with Skill({\"skill\": \"<name>\", \"args\": \"<optional arguments>\"}).",
+        });
+        ToolResult::text(payload.to_string())
     }
 }
 

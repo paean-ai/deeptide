@@ -1247,6 +1247,16 @@ fn tool_schemas() -> Vec<WireTool> {
             cache_control: None,
         },
         WireTool {
+            name: "DiscoverSkills",
+            description: "List every built-in Deeptide skill (name, description, optional when-to-use). Read-only. Use BEFORE calling Skill to discover the surface; avoids wasted tool calls on unknown skill names.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            cache_control: None,
+        },
+        WireTool {
             name: "Publish",
             description: "Prepare, inspect, or delete a static frontend publish on clide.app.",
             input_schema: serde_json::json!({
