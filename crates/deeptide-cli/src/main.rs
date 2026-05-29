@@ -249,6 +249,13 @@ struct Cli {
     list_models: bool,
 
     #[arg(
+        long = "doctor",
+        action = ArgAction::SetTrue,
+        help = "Print a diagnostic report (config paths, env, model, optional tooling) and exit."
+    )]
+    doctor: bool,
+
+    #[arg(
         long = "no-session-persistence",
         env = "DEEPTIDE_NO_SESSION_PERSISTENCE",
         action = ArgAction::SetTrue,
@@ -303,6 +310,15 @@ fn run(mut cli: Cli) -> Result<(), String> {
     // to, without provisioning an API key first.
     if cli.list_models {
         println!("{}", format_model_list(DEFAULT_MODEL));
+        return Ok(());
+    }
+
+    // --doctor is a no-network, no-API-key diagnostic that surfaces the
+    // configuration the CLI would use on a real run plus environment
+    // health checks. Designed to be the first thing a user runs when
+    // something doesn't behave the way they expect.
+    if cli.doctor {
+        println!("{}", run_doctor(&cli, &cwd));
         return Ok(());
     }
 
@@ -1084,6 +1100,197 @@ fn parse_tool_restrictions(
     (allowed, disallowed)
 }
 
+/// Render the diagnostic report for `--doctor`.
+///
+/// Designed to be the first thing a user runs when something doesn't
+/// behave the way they expect. Does no network I/O and never reveals
+/// credential values — API keys are reduced to a presence flag plus
+/// their string length so users can confirm they're set without
+/// leaking secrets into a pasted bug report.
+///
+/// `cwd` is passed in (rather than re-read inside the function) so the
+/// test suite can drive the report under a tempdir.
+fn run_doctor(cli: &Cli, cwd: &Path) -> String {
+    let mut lines = Vec::with_capacity(64);
+
+    lines.push(format!(
+        "Deeptide doctor  v{}",
+        env!("CARGO_PKG_VERSION")
+    ));
+    lines.push(String::from("================================================"));
+    lines.push(format!("workspace : {}", cwd.display()));
+    lines.push(format!(
+        "platform  : {} {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    lines.push(String::new());
+
+    lines.push(String::from("[ config files ]"));
+    for (label, path) in [
+        ("global ", ConfigStore::global_path()),
+        ("project", ConfigStore::project_path(cwd)),
+        ("local  ", ConfigStore::local_path(cwd)),
+    ] {
+        let status = if path.exists() { "exists" } else { "missing" };
+        lines.push(format!("  {label}  {}  [{status}]", path.display()));
+    }
+    match cli.settings.as_ref() {
+        Some(path) => {
+            let status = if path.exists() { "exists" } else { "MISSING" };
+            lines.push(format!("  --settings  {}  [{status}]", path.display()));
+        }
+        None => lines.push(String::from("  --settings  (not provided)")),
+    }
+    lines.push(String::new());
+
+    lines.push(String::from("[ model ]"));
+    lines.push(format!("  effective  : {}", effective_model(cli)));
+    lines.push(format!("  --model    : {}", cli.model));
+    lines.push(format!(
+        "  env override (DEEPTIDE_MODEL): {}",
+        env_first_non_empty(&["DEEPTIDE_MODEL", "ZERO_CLI_MODEL", "ANTHROPIC_MODEL"])
+            .unwrap_or_else(|| String::from("(not set)"))
+    ));
+    match cli.fallback_model.as_deref() {
+        Some(fallback) => lines.push(format!("  fallback   : {fallback}")),
+        None => lines.push(String::from("  fallback   : (none)")),
+    }
+    lines.push(String::new());
+
+    lines.push(String::from("[ auth ]"));
+    lines.push(format!("  base_url   : {}", effective_base_url(cli)));
+    let credential = effective_credential(cli);
+    match &credential {
+        Some(CloudCredential::ApiKey(_)) => lines.push(String::from(
+            "  credential : api key resolved (--api-key or ZERO_API_KEY / ANTHROPIC_API_KEY)",
+        )),
+        Some(CloudCredential::BearerToken(_)) => lines.push(String::from(
+            "  credential : bearer token resolved (ZERO_CLI_AUTH_TOKEN / ANTHROPIC_AUTH_TOKEN)",
+        )),
+        None => lines.push(String::from(
+            "  credential : NOT RESOLVED — set --api-key, ZERO_API_KEY, or ANTHROPIC_API_KEY before running a turn.",
+        )),
+    }
+    // Env var presence breakdown — never reveals the value, just shows
+    // length so users can confirm they exported the right variable.
+    for name in [
+        "ZERO_API_KEY",
+        "ZERO_CLI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ZERO_CLI_AUTH_TOKEN",
+    ] {
+        match std::env::var(name) {
+            Ok(value) if !value.trim().is_empty() => {
+                lines.push(format!(
+                    "    env {name}  = present (len={})",
+                    value.trim().len()
+                ));
+            }
+            _ => lines.push(format!("    env {name}  = (unset)")),
+        }
+    }
+    lines.push(String::new());
+
+    lines.push(String::from("[ baseline ]"));
+    lines.push(format!("  permission_mode : {}", cli.permission_mode));
+    lines.push(format!(
+        "  yolo            : {}",
+        if cli.yolo { "ON" } else { "off" }
+    ));
+    lines.push(format!(
+        "  stream          : {}",
+        if cli.stream { "ON" } else { "off" }
+    ));
+    lines.push(format!(
+        "  prompt cache    : {}",
+        if cli.no_prompt_cache { "DISABLED" } else { "enabled" }
+    ));
+    lines.push(format!("  max_output_tokens: {}", cli.max_output_tokens));
+    lines.push(format!("  max_turns        : {}", cli.max_turns));
+    lines.push(String::new());
+
+    lines.push(String::from("[ sessions ]"));
+    let sessions = deeptide_core::SessionStore::list(cwd);
+    lines.push(format!("  saved for this cwd: {}", sessions.len()));
+    if let Some(most_recent) = sessions.first() {
+        lines.push(format!(
+            "  most-recent       : {} ({} messages)",
+            most_recent.session_id, most_recent.message_count
+        ));
+    }
+    lines.push(String::new());
+
+    lines.push(String::from("[ optional tools detected on PATH ]"));
+    // Each entry is `(binary, platform-note)`. We surface the platform
+    // note so a Linux user doesn't see "pbcopy ✗" as a problem.
+    let probes: &[(&str, &str)] = &[
+        ("git",            ""),
+        ("rg",             "(recommended for fast grep)"),
+        ("pbpaste",        "(macOS clipboard read)"),
+        ("pbcopy",         "(macOS clipboard write)"),
+        ("wl-paste",       "(Wayland clipboard read)"),
+        ("xclip",          "(X11 clipboard)"),
+        ("xsel",           "(X11 clipboard fallback)"),
+        ("notify-send",    "(Linux desktop notifications)"),
+        ("osascript",      "(macOS scripting / notifications)"),
+        ("screencapture",  "(macOS screen capture)"),
+        ("ffmpeg",         "(audio/video transcribe)"),
+        ("powershell",     "(Windows clipboard / notifications)"),
+    ];
+    for (bin, note) in probes {
+        let mark = if which_on_path(bin).is_some() { "✓" } else { "✗" };
+        let suffix = if note.is_empty() {
+            String::new()
+        } else {
+            format!(" {note}")
+        };
+        lines.push(format!("  [{mark}] {bin}{suffix}"));
+    }
+    lines.push(String::new());
+
+    if credential.is_none() {
+        lines.push(String::from(
+            "WARNING: no credential resolved. The CLI will refuse to make API calls until one is set.",
+        ));
+    } else {
+        lines.push(String::from(
+            "Looks healthy. Run `deeptide -p 'hello'` to verify end-to-end connectivity.",
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Lightweight `which`-style probe that walks `$PATH` and reports the
+/// first absolute path of an executable named `binary`, or `None`. We
+/// deliberately don't shell out to system `which` because Windows
+/// PowerShell's `which` alias is `Get-Command` with different semantics
+/// — rolling our own keeps `--doctor` self-contained.
+fn which_on_path(binary: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        // On Windows the binary may end with `.exe`/`.cmd`/`.bat`; on
+        // other platforms a bare name is enough. We try the bare name
+        // first because that's what 90% of users have on Unix.
+        let candidate = dir.join(binary);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            for ext in ["exe", "cmd", "bat", "ps1"] {
+                let candidate = dir.join(format!("{binary}.{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Render the catalog of models for `--list-models`. Each row shows
 /// per-million-token prices for input, output, cache-create, and
 /// cache-read (USD), plus a flag marking the default. Aligned by name
@@ -1339,6 +1546,7 @@ mod tests {
             resume: None,
             list_sessions: false,
             list_models: false,
+            doctor: false,
             no_session_persistence: false,
             settings: None,
             add_dir: Vec::new(),
@@ -2019,6 +2227,162 @@ mod tests {
         // Footer points users at the override paths.
         assert!(out.contains("--model"));
         assert!(out.contains("DEEPTIDE_MODEL"));
+    }
+
+    #[test]
+    fn doctor_report_does_not_leak_credential_values() {
+        let _g = env_guard();
+        // Use a unique unlikely-to-collide secret. We want to verify it
+        // appears nowhere in the doctor report even if the env var is set.
+        let secret = "sk-deeptide-doctor-test-XYZZY-DO-NOT-LEAK-12345";
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", secret);
+        }
+        let cli = sample_cli();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = super::run_doctor(&cli, dir.path());
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+
+        assert!(
+            !report.contains(secret),
+            "doctor report leaked the secret value: {report}"
+        );
+        // The report must still confirm the credential is present and
+        // surface a useful length so the user can sanity-check it.
+        assert!(
+            report.contains("ANTHROPIC_API_KEY  = present (len="),
+            "doctor must report ANTHROPIC_API_KEY presence + length"
+        );
+        assert!(
+            report.contains(&format!("len={})", secret.len())),
+            "doctor must report the exact length of the env var; got: {report}"
+        );
+    }
+
+    #[test]
+    fn doctor_report_announces_missing_credential_when_no_env_set() {
+        let _g = env_guard();
+        for name in [
+            "ZERO_API_KEY",
+            "ZERO_CLI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ZERO_CLI_AUTH_TOKEN",
+        ] {
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+        let mut cli = sample_cli();
+        cli.api_key = None;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = super::run_doctor(&cli, dir.path());
+        assert!(
+            report.contains("credential : NOT RESOLVED"),
+            "doctor must call out missing credential prominently; got: {report}"
+        );
+        assert!(
+            report.contains("WARNING: no credential resolved"),
+            "doctor must emit a closing warning when no credential is set"
+        );
+    }
+
+    #[test]
+    fn doctor_report_surfaces_each_config_scope_with_existence_state() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Create only the project scope; global and local should report
+        // as missing, project as exists.
+        let project_dir = dir.path().join(".deeptide");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        std::fs::write(project_dir.join("settings.json"), "{}").expect("project file");
+
+        let cli = sample_cli();
+        let report = super::run_doctor(&cli, dir.path());
+
+        // Look at the project line specifically.
+        let project_line = report
+            .lines()
+            .find(|line| line.contains(".deeptide/settings.json") && line.contains("project"))
+            .expect("project line present");
+        assert!(
+            project_line.ends_with("[exists]"),
+            "project scope must be marked existing: {project_line}"
+        );
+        let local_line = report
+            .lines()
+            .find(|line| line.contains("settings.local.json"))
+            .expect("local line present");
+        assert!(
+            local_line.ends_with("[missing]"),
+            "local scope must be marked missing: {local_line}"
+        );
+    }
+
+    #[test]
+    fn doctor_report_marks_settings_override_path_existence() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = dir.path().join("custom.json");
+        std::fs::write(&settings, "{}").expect("write");
+        let mut cli = sample_cli();
+        cli.settings = Some(settings.clone());
+        let report = super::run_doctor(&cli, dir.path());
+        assert!(
+            report.contains(&format!("--settings  {}  [exists]", settings.display())),
+            "doctor must mark an existing --settings file as [exists]; got: {report}"
+        );
+
+        // Now point at a non-existent file — the report should say MISSING
+        // (uppercase) so it stands out as a likely misconfiguration.
+        let mut cli2 = sample_cli();
+        cli2.settings = Some(dir.path().join("nope.json"));
+        let report2 = super::run_doctor(&cli2, dir.path());
+        assert!(
+            report2.contains("[MISSING]"),
+            "doctor must mark a bad --settings path as [MISSING] (uppercase)"
+        );
+    }
+
+    #[test]
+    fn doctor_report_probes_path_for_known_optional_tools() {
+        let _g = env_guard();
+        let cli = sample_cli();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = super::run_doctor(&cli, dir.path());
+
+        // Every probe must appear; their detection state varies by host
+        // and is not asserted here, but the *catalog* must be exhaustive
+        // so users can't be surprised by a missing entry.
+        for probe in [
+            "git", "rg", "pbpaste", "pbcopy", "wl-paste", "xclip", "xsel",
+            "notify-send", "osascript", "screencapture", "ffmpeg", "powershell",
+        ] {
+            assert!(
+                report.contains(probe),
+                "doctor PATH-probe section missing entry for {probe}; got: {report}"
+            );
+        }
+    }
+
+    #[test]
+    fn which_on_path_finds_a_known_binary_or_returns_none() {
+        // `sh` is present on every Unix host the CI matrix supports;
+        // on Windows we don't run this assertion at all.
+        #[cfg(unix)]
+        {
+            assert!(
+                super::which_on_path("sh").is_some(),
+                "PATH probe failed to find sh — env may be misconfigured"
+            );
+        }
+        // A guaranteed-absent binary must return None.
+        assert!(
+            super::which_on_path("deeptide-doctor-definitely-does-not-exist-xyz").is_none(),
+            "PATH probe must return None for clearly absent binaries"
+        );
     }
 
     #[test]

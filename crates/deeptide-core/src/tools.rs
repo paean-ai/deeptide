@@ -846,8 +846,18 @@ impl Tool for AgentTool {
             .unwrap_or("(inherit parent model)");
         let tool_policy = invocation.definition.tool_policy_label();
 
+        // This fallback only fires when something dispatches `Agent`
+        // straight through the `ToolRegistry` without going through
+        // `AgentLoop::execute_tool_call`, which intercepts `Agent` calls
+        // and routes them through the registered subagent backend factory.
+        // The CLI wires one up automatically; if you see this message,
+        // either a custom embedder is calling the registry directly or a
+        // test forgot to call `AgentLoop::with_subagent_backend_factory`.
         ToolResult::error(format!(
-            "Sub-agent execution is not available in this Rust build yet.\n\
+            "Agent tool reached the registry fallback path. The hosting AgentLoop did not\n\
+             register a subagent backend factory; call `AgentLoop::with_subagent_backend_factory(...)`\n\
+             before `run()`, or dispatch this tool call through `AgentLoop::execute_tool_call`\n\
+             instead of `ToolRegistry::call` directly.\n\n\
              Requested: {}\n\
              Type: {}\n\
              Model: {model}\n\
