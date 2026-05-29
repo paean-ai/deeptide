@@ -689,7 +689,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "Glob",
-            description: "Find files by glob pattern. Use this when you need to discover file paths before reading.",
+            description: "Fast file pattern matching that works with any codebase size.\n- Supports glob patterns like \"**/*.rs\" or \"src/**/*.ts\".\n- Returns matching file paths sorted by modification time.\n- Use this when you need to find files by name patterns before reading them.\n- Results are capped at 100 files; use a more specific path or pattern if the output is truncated.\n- For open-ended exploration that may need multiple rounds of globbing and grepping, use the Agent tool instead.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -702,7 +702,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "Grep",
-            description: "Search text files using a regular expression.",
+            description: "A powerful content search tool built on regular expressions.\n- ALWAYS use Grep for content search; never invoke grep or rg through Bash - Grep is optimized for correct permissions and output formatting.\n- Supports full regex syntax (e.g. \"log.*Error\", \"function\\\\s+\\\\w+\").\n- Filter files with the glob parameter (e.g. \"*.rs\") or the type parameter (e.g. \"rust\", \"py\", \"ts\") - type is more efficient than glob for standard file types.\n- Output modes: \"content\" shows matching lines (supports -A/-B/-C context and line numbers), \"files_with_matches\" shows file paths only (default), \"count\" shows match counts per file.\n- Pagination: head_limit caps results (default 250, 0 for unlimited); offset skips entries to paginate.\n- Pattern syntax is regex, not POSIX grep - literal braces need escaping (e.g. \"interface\\\\{\\\\}\").\n- Multiline: patterns match within a single line by default; set multiline=true for cross-line patterns.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1355,7 +1355,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "Write",
-            description: "Write complete UTF-8 file contents to the current workspace. Use only when the user asked to create or replace a file.",
+            description: "Writes a file to the local filesystem.\n- Required input keys are exactly file_path and content; do not call Write with path, filename, target, or an empty object.\n- Relative file_path values resolve against the current workspace. Use the exact output filename the user requested (e.g. summary.json, Dockerfile, report.md). For deliverables a user or verifier will inspect, prefer a relative path over /tmp unless that path was explicitly requested.\n- This tool overwrites an existing file at the path. Read existing files first, and prefer the Edit tool for targeted changes - only use Write to create new files or for full rewrites.\n- NEVER create documentation files (*.md) or README files unless explicitly requested by the user.\n- Only add emojis if the user explicitly requests it.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1368,7 +1368,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "Edit",
-            description: "Perform an exact string replacement in an existing file. Read the file first; old_string must match current contents exactly and be unique unless replace_all is true.",
+            description: "Performs exact string replacements in files.\n- Relative file_path values resolve against the current workspace.\n- Read the file first so old_string matches the current content exactly. When copying from Read output, preserve the exact indentation (tabs/spaces) as it appears AFTER the line-number prefix (line number + tab) and never include any part of that prefix in old_string or new_string.\n- ALWAYS prefer editing existing files; never write new files unless explicitly required.\n- Only add emojis if the user explicitly requests it.\n- The edit FAILS if old_string is not unique: provide a larger surrounding string to make it unique, or set replace_all to change every occurrence.\n- If you see \"old_string not found\", the file may have changed since your last Read - re-read it and retry; this is a normal recovery path, not a dead end.\n- Use replace_all to rename a symbol across the whole file.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1383,7 +1383,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "Bash",
-            description: "Execute a single-line shell command in the current workspace. Prefer Read/Edit/Write/Glob/Grep for file work; use Bash for builds, tests, git, package managers, and shell-only operations. With run_in_background=true the command is parked in the background and you must later read its output with BashOutput or stop it with KillBash.",
+            description: "Executes a given shell command in the current workspace and returns its output.\n\nThe working directory persists between commands, but shell state does not. The shell environment is initialized from the user's profile (bash or zsh). The command field MUST be a single physical line - do not include newline characters, even for long git commits, heredocs, quoted strings, or multi-step workflows. Use && for dependent steps and ; for independent sequential steps.\n\nIMPORTANT: Avoid using this tool to run find, grep, cat, head, tail, sed, awk, or echo unless explicitly instructed, or after you have verified that a dedicated tool cannot accomplish the task. Prefer the dedicated tools - they give the user a better experience and make tool calls easier to review:\n- File search: use Glob (not find or ls)\n- Content search: use Grep (not grep or rg)\n- Read files: use Read (not cat/head/tail)\n- Edit files: use Edit (not sed/awk)\n- Write files: use Write (not echo > or cat <<EOF)\n- Communication: output text directly (not echo/printf)\n\nInstructions:\n- If the command creates new directories or files, first run ls to verify the parent directory exists and is the intended location.\n- Always quote file paths that contain spaces (e.g. cd \"path with spaces/file.txt\").\n- Maintain your working directory by using absolute paths and avoiding cd; never prepend cd <cwd> to a git command.\n- Set timeout (milliseconds, max 600000) for long-running builds.\n- With run_in_background=true the command is parked in the background and returns a shell_id; read its output later with BashOutput or stop it with KillBash.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1773,6 +1773,27 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    #[test]
+    fn core_tool_descriptions_carry_detailed_guidance() {
+        let tools = tool_schemas();
+        let describe = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .map(|tool| tool.description)
+                .unwrap_or_else(|| panic!("{name} tool schema should be declared"))
+        };
+        // Cloud-mode Swift sends each tool's detailed prompt() as the wire
+        // description; these assertions lock the ported guidance so the rich
+        // text is not silently reverted to terse one-liners.
+        assert!(describe("Bash").contains("single physical line"));
+        assert!(describe("Bash").contains("use Glob (not find or ls)"));
+        assert!(describe("Glob").contains("capped at 100 files"));
+        assert!(describe("Grep").contains("head_limit caps results (default 250"));
+        assert!(describe("Edit").contains("old_string not found"));
+        assert!(describe("Write").contains("NEVER create documentation files"));
     }
 
     #[test]
