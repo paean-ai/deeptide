@@ -472,33 +472,79 @@ pub fn strip_frontmatter(raw: &str) -> String {
     lines.join("\n").trim().to_owned()
 }
 
+/// Cap the memory block injected into the system prompt to a deterministic,
+/// **line-aligned**, byte-stable prefix.
+///
+/// Cutting only on line boundaries (never mid-line) is what makes the kept
+/// block byte-identical as long as the leading lines are unchanged — and a
+/// byte-identical prefix is what lets DeepSeek's automatic prefix cache hit on
+/// it every turn. `benchmarks/cache_memory_bench.py` measures this against the
+/// live API: a stable prefix sustains ~95% cache-hit (≈10× cheaper input)
+/// across turns, versus 0% the moment the prefix shifts. So appending new
+/// memory entries (which land at the end of the index) must never perturb the
+/// retained head — this function guarantees that.
+///
+/// Overflow is **relocated, not lost**: the notice always points the agent at
+/// `MemorySearch`, which retrieves the full memory files on demand (two-tier
+/// memory — a cached core plus an on-demand long tail), and reports how many
+/// lines were dropped from the core. The count is in *lines* rather than
+/// entries because the only production caller ([`load_memory_index`]) expands
+/// each index entry into the referenced file's body before this runs, so by
+/// the time we truncate there are no entry boundaries left to count — the cut
+/// lands inside concatenated bodies.
 pub fn truncate_memory(text: &str) -> String {
     let lines = text.split('\n').collect::<Vec<_>>();
-    let mut out = if lines.len() > MEMORY_MAX_LINES {
-        lines[..MEMORY_MAX_LINES].join("\n")
-    } else {
-        text.to_owned()
-    };
-    let truncated_by_lines = lines.len() > MEMORY_MAX_LINES;
 
-    let mut truncated_by_bytes = false;
-    if out.len() > MEMORY_MAX_BYTES {
-        let mut end = MEMORY_MAX_BYTES;
-        while end > 0 && !out.is_char_boundary(end) {
-            end -= 1;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut bytes = 0usize;
+    let mut cut_at: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
+        // +1 for the '\n' that rejoins this line to the previous one.
+        let added = if kept.is_empty() {
+            line.len()
+        } else {
+            line.len() + 1
+        };
+        // Always retain at least the first line, even if it alone exceeds the
+        // byte cap — cutting on the line boundary keeps the prefix cache-stable,
+        // and dropping the whole block to leave only the notice would lose more
+        // than it saves. (The old mid-line byte cut produced a non-line-aligned,
+        // cache-busting prefix; we accept a slightly over-cap single line over
+        // that.)
+        if !kept.is_empty() && (kept.len() >= MEMORY_MAX_LINES || bytes + added > MEMORY_MAX_BYTES)
+        {
+            cut_at = Some(i);
+            break;
         }
-        out.truncate(end);
-        truncated_by_bytes = true;
+        bytes += added;
+        kept.push(line);
     }
 
-    if truncated_by_lines || truncated_by_bytes {
-        let why = if truncated_by_bytes {
-            "25 KB"
+    let mut out = kept.join("\n");
+
+    if let Some(i) = cut_at {
+        // How many non-empty lines were cut from the cached core. They aren't
+        // lost — they still live in the memory files MemorySearch retrieves.
+        let dropped = lines[i..].iter().filter(|l| !l.trim().is_empty()).count();
+        let by_lines = kept.len() >= MEMORY_MAX_LINES;
+        let why = if by_lines {
+            format!("{MEMORY_MAX_LINES} lines")
         } else {
-            "200 lines"
+            format!("{} KB", MEMORY_MAX_BYTES / 1024)
+        };
+        // Always point at MemorySearch; include the dropped-line count only when
+        // real content was cut (a cut through trailing blank lines drops 0 and
+        // "0 more lines" would read oddly).
+        let tail = if dropped > 0 {
+            format!(
+                "{dropped} more line{} available via MemorySearch",
+                if dropped == 1 { "" } else { "s" }
+            )
+        } else {
+            String::from("more available via MemorySearch")
         };
         out.push_str(&format!(
-            "\n\n...(memory truncated at {why} per tide-spec/0.1 section 13.1)..."
+            "\n\n...(memory core capped at {why} per tide-spec/0.1 section 13.1; {tail})..."
         ));
     }
 
@@ -625,4 +671,130 @@ fn fnv1a_hex_prefix(value: &str, length: usize) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:x}").chars().take(length).collect()
+}
+
+#[cfg(test)]
+mod cache_alignment_tests {
+    use super::*;
+
+    /// Build a synthetic MEMORY.md index with `n` entries.
+    fn index_with(n: usize) -> String {
+        let mut s = String::from("# memory\n");
+        for i in 0..n {
+            s.push_str(&format!("- [Entry {i}](file-{i}.md) — hook number {i}\n"));
+        }
+        s
+    }
+
+    #[test]
+    fn short_memory_is_unchanged() {
+        let text = "- [A](a.md) — x\n- [B](b.md) — y";
+        assert_eq!(truncate_memory(text), text);
+    }
+
+    #[test]
+    fn truncation_cuts_on_line_boundaries_never_mid_line() {
+        // Far more than the byte cap so a cut is forced.
+        let text = index_with(5000);
+        let out = truncate_memory(&text);
+        let body = out.split("\n\n...").next().expect("body before notice");
+        // Every retained line must be an exact, complete original line.
+        let originals: std::collections::HashSet<&str> = text.lines().collect();
+        for line in body.lines() {
+            assert!(
+                originals.contains(line),
+                "partial / corrupted line retained: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncation_is_deterministic() {
+        let text = index_with(5000);
+        assert_eq!(truncate_memory(&text), truncate_memory(&text));
+    }
+
+    /// The cache property: appending new entries at the END of the index must
+    /// not change the retained core, so DeepSeek's prefix cache keeps hitting.
+    #[test]
+    fn retained_core_is_prefix_stable_when_entries_appended() {
+        let small = index_with(5000);
+        let larger = index_with(7000); // same leading lines, more appended
+        let core_small = truncate_memory(&small);
+        let core_larger = truncate_memory(&larger);
+        let body_small = core_small
+            .split("\n\n...")
+            .next()
+            .expect("body before notice");
+        let body_larger = core_larger
+            .split("\n\n...")
+            .next()
+            .expect("body before notice");
+        assert_eq!(
+            body_small, body_larger,
+            "retained core shifted when entries were appended — would bust the prefix cache"
+        );
+    }
+
+    #[test]
+    fn overflow_points_at_memory_search_with_a_count() {
+        let out = truncate_memory(&index_with(5000));
+        assert!(
+            out.contains("via MemorySearch"),
+            "missing retrieval pointer: {out:?}"
+        );
+        assert!(
+            out.contains("more line"),
+            "missing dropped-line count: {out:?}"
+        );
+    }
+
+    /// Regression guard for the real production path: `load_memory_index`
+    /// expands each `- [..](x.md)` index line into the referenced file's *body*
+    /// before `truncate_memory` runs, so the cut lands inside concatenated
+    /// bodies — not on index lines. This drives that exact path into overflow
+    /// and asserts the MemorySearch relocation pointer still fires (it used to
+    /// be keyed on index-line shape that never reaches `truncate_memory`, so it
+    /// silently never fired in production).
+    #[test]
+    fn real_index_expansion_path_relocates_overflow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index = dir.path().join(MEMORY_INDEX_FILE);
+        // Each referenced file has a body large enough that the concatenation
+        // overflows the byte cap.
+        let big_body = "lorem ipsum dolor sit amet consectetur. ".repeat(800);
+        let mut idx = String::from("# memory\n");
+        for i in 0..3 {
+            let fname = format!("mem-{i}.md");
+            std::fs::write(dir.path().join(&fname), &big_body).expect("write body");
+            idx.push_str(&format!("- [Entry {i}]({fname}) — hook {i}\n"));
+        }
+        std::fs::write(&index, idx).expect("write index");
+
+        let expanded = load_memory_index(&index).expect("index loads + expands");
+        let out = truncate_memory(&expanded);
+        assert!(
+            out.contains("via MemorySearch"),
+            "real expansion path must relocate overflow to MemorySearch: {}",
+            &out[out.len().saturating_sub(200)..]
+        );
+    }
+
+    #[test]
+    fn line_cap_is_respected() {
+        let out = truncate_memory(&index_with(5000));
+        let body = out.split("\n\n...").next().expect("body before notice");
+        assert!(body.lines().count() <= MEMORY_MAX_LINES);
+    }
+
+    /// A single line longer than the byte cap is kept whole (line-aligned),
+    /// not dropped to leave only the notice — otherwise an over-long leading
+    /// line would erase the entire block.
+    #[test]
+    fn over_long_single_line_is_kept_whole() {
+        let huge = "x".repeat(MEMORY_MAX_BYTES * 2);
+        let out = truncate_memory(&huge);
+        let body = out.split("\n\n...").next().expect("body before notice");
+        assert_eq!(body, huge, "over-long single line must be retained whole");
+    }
 }

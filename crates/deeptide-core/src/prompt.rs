@@ -256,6 +256,38 @@ mod tests {
         );
     }
 
+    /// Cache-hygiene guard. The system prompt is the cacheable prefix of every
+    /// request. `benchmarks/cache_memory_bench.py` shows that a single volatile
+    /// token (a date or clock) at the front collapses DeepSeek's prefix
+    /// cache-hit rate from ~95% to 0% — a ~10× input-cost regression. This test
+    /// fails if anyone injects a date/clock into the prompt, before it ships.
+    #[test]
+    fn system_prompt_has_no_volatile_date_or_clock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompt = build_system_prompt(temp.path());
+        let iso_date = regex::Regex::new(r"\d{4}-\d{2}-\d{2}").expect("date regex");
+        let clock = regex::Regex::new(r"\d{2}:\d{2}:\d{2}").expect("clock regex");
+        assert!(
+            !iso_date.is_match(&prompt),
+            "system prompt contains an ISO date — busts the DeepSeek prefix cache: {prompt}"
+        );
+        assert!(
+            !clock.is_match(&prompt),
+            "system prompt contains a clock time — busts the DeepSeek prefix cache: {prompt}"
+        );
+    }
+
+    /// The prefix must be byte-stable across builds for the cache to hit.
+    #[test]
+    fn system_prompt_is_deterministic() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            build_system_prompt(temp.path()),
+            build_system_prompt(temp.path()),
+            "system prompt is not deterministic — would bust the prefix cache"
+        );
+    }
+
     #[test]
     fn build_system_prompt_includes_claude_md_if_present() {
         let temp = tempfile::tempdir().expect("tempdir");

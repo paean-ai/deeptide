@@ -996,8 +996,56 @@ fn run_interactive(
                 continue;
             }
             Err(ReadlineError::Eof) => {
-                // Ctrl+D on empty line — exit gracefully
+                // Ctrl+D on empty line — the most common way to leave the REPL.
+                // Run the same end-of-session consolidation pass as a typed
+                // `/exit` so durable facts are captured here too. Without this,
+                // capture only fired on the literal `/exit` command and silently
+                // skipped every Ctrl-D exit. `finalize_session` emits Output
+                // events only (it never returns Exit), so we render and break.
                 writeln!(stdout).map_err(|error| error.to_string())?;
+
+                // The pass runs an agent round-trip; animate the same spinner as
+                // a normal turn so it isn't a silent hang. (No-op without color;
+                // the 150ms grace means it never flashes when there's no pass.)
+                did_stream.store(false, Ordering::Relaxed);
+                output_started.store(false, Ordering::Relaxed);
+                spinner_stop.store(false, Ordering::Relaxed);
+                let spinner_handle = if use_color {
+                    let stop = Arc::clone(&spinner_stop);
+                    let started = Arc::clone(&output_started);
+                    let lock = Arc::clone(&spinner_lock);
+                    Some(thread::spawn(move || {
+                        run_spinner(&stop, &started, &lock, true)
+                    }))
+                } else {
+                    None
+                };
+
+                let events = repl.finalize_session();
+
+                spinner_stop.store(true, Ordering::Relaxed);
+                if let Some(handle) = spinner_handle {
+                    let _ = handle.join();
+                }
+
+                for event in events {
+                    if let ReplEvent::Output(text) = event {
+                        if did_stream.swap(false, Ordering::Relaxed) {
+                            writeln!(stdout).map_err(|error| error.to_string())?;
+                        } else {
+                            writeln!(
+                                stdout,
+                                "{}",
+                                tui::render_output_panel(
+                                    &text,
+                                    terminal_width().unwrap_or(100),
+                                    use_color,
+                                )
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
+                    }
+                }
                 break;
             }
             Err(error) => return Err(error.to_string()),
