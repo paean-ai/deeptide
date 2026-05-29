@@ -9,10 +9,53 @@ bun.lockb
 .env.*
 .idea/
 .vscode/
+
+# === Agent / IDE / CLI session scratch directories ===========================
+#
+# Every modern coding-agent CLI and AI-aware IDE drops per-session
+# sandboxes, worktrees, indexes, or cache somewhere. When those land
+# in the repo root they get visually noisy on GitHub *and* risk
+# leaking scratch artifacts into commits via `git add -A`.
+#
+# Historical incident: PR #20 (squash-merged 2026-05-28) brought two
+# stray files under `.claire/worktrees/...` and `.clone/worktrees/...`
+# into the index because neither pattern was ignored at the time. See
+# the post-mortem note in commit message of the patch that added these
+# expanded entries.
+#
+# Patterns below are the union of dot-dirs that have shown up across
+# coding agents (Cursor, Cursor's "Claire", clone-of variants, Claude
+# Code, Cline, Codex, Continue, Aider, Windsurf, Qoder, …) plus the
+# CLIs in this repo's own ecosystem (clide, tide, deeptide). Anything
+# matching is per-developer or per-session and should never be
+# committed.
 .clide/
 .clideignore
 .tide/
 .claude/
+.claire/
+.clone/
+.cursor-server/
+.cline/
+.codex/
+.continue/
+.aider*/
+.windsurf/
+.qoder/
+# Defensive wildcards for variants we haven't enumerated yet. Many
+# agent CLIs name their per-session sandbox `agent-<hash>/`; we
+# match those only when they live under a `worktrees/` parent (the
+# observed historical shape) so a real project directory called
+# e.g. `agent-runtime/` is not accidentally swallowed.
+**/worktrees/agent-*/
+# Note on intentional non-ignores: `.deeptide/` and `.cursor/` are
+# NOT in this list. They hold team-shared, intentionally-committed
+# content (`.deeptide/settings.json` for project config, `.cursor/
+# rules/*.mdc` for shared AI rules). Their per-developer overrides
+# (`.deeptide/settings.local.json`) live next to the shared file and
+# are handled by the more specific entries below.
+.deeptide/settings.local.json
+# =============================================================================
 target/
 **/*.rs.bk
 
