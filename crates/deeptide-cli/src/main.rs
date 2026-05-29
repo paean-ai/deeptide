@@ -1299,18 +1299,22 @@ fn run_doctor(cli: &Cli, cwd: &Path) -> String {
     let credential = effective_credential(cli);
     match &credential {
         Some(CloudCredential::ApiKey(_)) => lines.push(String::from(
-            "  credential : api key resolved (--api-key or ZERO_API_KEY / ANTHROPIC_API_KEY)",
+            "  credential : api key resolved (--api-key or DEEPTIDE_API_KEY; legacy ZERO_API_KEY / ANTHROPIC_API_KEY also accepted)",
         )),
         Some(CloudCredential::BearerToken(_)) => lines.push(String::from(
-            "  credential : bearer token resolved (ZERO_CLI_AUTH_TOKEN / ANTHROPIC_AUTH_TOKEN)",
+            "  credential : bearer token resolved (DEEPTIDE_AUTH_TOKEN; legacy ZERO_CLI_AUTH_TOKEN / ANTHROPIC_AUTH_TOKEN also accepted)",
         )),
         None => lines.push(String::from(
-            "  credential : NOT RESOLVED — set --api-key, ZERO_API_KEY, or ANTHROPIC_API_KEY before running a turn.",
+            "  credential : NOT RESOLVED — set DEEPTIDE_API_KEY (or pass --api-key) before running a turn. Legacy ZERO_API_KEY / ANTHROPIC_API_KEY also accepted for backward compatibility.",
         )),
     }
     // Env var presence breakdown — never reveals the value, just shows
-    // length so users can confirm they exported the right variable.
+    // length so users can confirm they exported the right variable. The
+    // canonical DEEPTIDE_* names are listed first so users new to the
+    // project see them prominently; legacy names follow for migrators.
     for name in [
+        "DEEPTIDE_API_KEY",
+        "DEEPTIDE_AUTH_TOKEN",
         "ZERO_API_KEY",
         "ZERO_CLI_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -1538,16 +1542,34 @@ fn resolve_system_prompt(cli: &Cli) -> Result<Option<String>, String> {
 }
 
 fn effective_credential(cli: &Cli) -> Option<CloudCredential> {
+    // Canonical Deeptide env names take priority. The legacy ZERO_* /
+    // ANTHROPIC_* names are preserved as fallbacks so users migrating from
+    // zero-cli or other Anthropic-compatible tooling don't have to re-export
+    // anything.
+    //
+    // Note: `cli.api_key` is also clap-bound to `DEEPTIDE_API_KEY` (see the
+    // `#[arg(... env = "DEEPTIDE_API_KEY")]` declaration), so the explicit
+    // `DEEPTIDE_API_KEY` entry below is only consulted on code paths that
+    // bypass clap (unit tests building `Cli` directly, library embeds).
     let api_key = cli.api_key.clone().or_else(|| {
-        env_first_non_empty(&["ZERO_API_KEY", "ZERO_CLI_API_KEY", "ANTHROPIC_API_KEY"])
+        env_first_non_empty(&[
+            "DEEPTIDE_API_KEY",
+            "ZERO_API_KEY",
+            "ZERO_CLI_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ])
     });
     if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
         return Some(CloudCredential::ApiKey(api_key));
     }
 
     if has_provider_base_url(cli) {
-        return env_first_non_empty(&["ZERO_CLI_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"])
-            .map(CloudCredential::BearerToken);
+        return env_first_non_empty(&[
+            "DEEPTIDE_AUTH_TOKEN",
+            "ZERO_CLI_AUTH_TOKEN",
+            "ANTHROPIC_AUTH_TOKEN",
+        ])
+        .map(CloudCredential::BearerToken);
     }
 
     None
@@ -1704,6 +1726,10 @@ mod tests {
     fn clear_api_env() {
         unsafe {
             for name in [
+                "DEEPTIDE_API_KEY",
+                "DEEPTIDE_AUTH_TOKEN",
+                "DEEPTIDE_BASE_URL",
+                "DEEPTIDE_MODEL",
                 "ZERO_API_KEY",
                 "ZERO_CLI_API_KEY",
                 "ANTHROPIC_API_KEY",
@@ -2405,17 +2431,7 @@ mod tests {
     #[test]
     fn doctor_report_announces_missing_credential_when_no_env_set() {
         let _g = env_guard();
-        for name in [
-            "ZERO_API_KEY",
-            "ZERO_CLI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ZERO_CLI_AUTH_TOKEN",
-        ] {
-            unsafe {
-                std::env::remove_var(name);
-            }
-        }
+        clear_api_env();
         let mut cli = sample_cli();
         cli.api_key = None;
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2427,6 +2443,115 @@ mod tests {
         assert!(
             report.contains("WARNING: no credential resolved"),
             "doctor must emit a closing warning when no credential is set"
+        );
+        // The recovery hint must lead with the canonical Deeptide env name,
+        // not the legacy ones the project inherited from zero-cli — that
+        // was the prior bug where users following --help (which advertises
+        // DEEPTIDE_API_KEY) saw a doctor message that only suggested the
+        // legacy names.
+        assert!(
+            report.contains("set DEEPTIDE_API_KEY"),
+            "doctor's recovery hint must lead with DEEPTIDE_API_KEY; got: {report}"
+        );
+    }
+
+    #[test]
+    fn deeptide_auth_token_resolves_a_bearer_credential_against_provider_base_url() {
+        let _g = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("DEEPTIDE_AUTH_TOKEN", "deeptide-bearer-token");
+        }
+        let mut cli = sample_cli();
+        cli.api_key = None;
+        // Bearer-token resolution only applies when the base URL has been
+        // pointed at a custom provider (not the Anthropic default). Use the
+        // standard custom-provider shape we test elsewhere.
+        cli.base_url = "https://api.example.test".to_owned();
+
+        let credential = super::effective_credential(&cli);
+        match credential {
+            Some(super::CloudCredential::BearerToken(token)) => {
+                assert_eq!(token, "deeptide-bearer-token");
+            }
+            Some(super::CloudCredential::ApiKey(_)) => {
+                panic!("DEEPTIDE_AUTH_TOKEN should yield BearerToken, not ApiKey")
+            }
+            None => panic!("DEEPTIDE_AUTH_TOKEN should yield a BearerToken credential, got None"),
+        }
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn deeptide_api_key_takes_priority_over_legacy_env_names() {
+        let _g = env_guard();
+        clear_api_env();
+        unsafe {
+            std::env::set_var("DEEPTIDE_API_KEY", "deeptide-canonical");
+            std::env::set_var("ANTHROPIC_API_KEY", "legacy-anthropic");
+            std::env::set_var("ZERO_API_KEY", "legacy-zero");
+        }
+        let mut cli = sample_cli();
+        // Force the test through the env-fallback branch (clap normally
+        // populates cli.api_key from DEEPTIDE_API_KEY itself).
+        cli.api_key = None;
+
+        let credential = super::effective_credential(&cli);
+        match credential {
+            Some(super::CloudCredential::ApiKey(key)) => {
+                assert_eq!(
+                    key, "deeptide-canonical",
+                    "DEEPTIDE_API_KEY must win over legacy ZERO_/ANTHROPIC_ names"
+                );
+            }
+            Some(super::CloudCredential::BearerToken(_)) => {
+                panic!("expected ApiKey credential; got BearerToken")
+            }
+            None => panic!("expected ApiKey credential; got None"),
+        }
+
+        clear_api_env();
+    }
+
+    #[test]
+    fn doctor_report_probes_deeptide_env_namespace() {
+        let _g = env_guard();
+        clear_api_env();
+        let cli = sample_cli();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = super::run_doctor(&cli, dir.path());
+
+        // Every probed env var must appear in the report — both the
+        // canonical DEEPTIDE_* names AND the legacy aliases — so a user
+        // who exported the "wrong" variable can spot which one they
+        // actually set.
+        for name in [
+            "DEEPTIDE_API_KEY",
+            "DEEPTIDE_AUTH_TOKEN",
+            "ZERO_API_KEY",
+            "ZERO_CLI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ZERO_CLI_AUTH_TOKEN",
+        ] {
+            assert!(
+                report.contains(name),
+                "doctor probe table is missing {name}; report:\n{report}"
+            );
+        }
+
+        // DEEPTIDE_* names must appear before any legacy name so they read
+        // as the canonical choice in the report.
+        let deeptide_pos = report
+            .find("DEEPTIDE_API_KEY")
+            .expect("DEEPTIDE_API_KEY must be in the report");
+        let legacy_pos = report
+            .find("ZERO_API_KEY")
+            .expect("ZERO_API_KEY must be in the report");
+        assert!(
+            deeptide_pos < legacy_pos,
+            "DEEPTIDE_API_KEY must be listed before ZERO_API_KEY so the report leads with the canonical name"
         );
     }
 
