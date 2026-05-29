@@ -647,13 +647,65 @@ impl ConfigStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Tests that mutate `TIDE_CONFIG_DIR` must serialise — the env var is
+    /// process-global and `tide_config_dir()` reads it on every call, so two
+    /// parallel tests could see each other's tempdirs and flake.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        &LOCK
+    }
+
+    /// RAII guard that pins `TIDE_CONFIG_DIR` to `path` for the lifetime of
+    /// the guard so the lib's `global_path()` resolves under a tempdir rather
+    /// than the operator's real `~/.config/tide/`. Without this, any
+    /// developer who has actually run `deeptide` locally would see this
+    /// test panic because their global settings file is non-empty.
+    struct TideConfigDirGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TideConfigDirGuard {
+        fn pin(path: &Path) -> Self {
+            let lock = env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var_os("TIDE_CONFIG_DIR");
+            // SAFETY: serialised against other env-touching tests in this
+            // module via `env_lock`. The guard restores the previous value
+            // (or removes the var) on drop.
+            unsafe {
+                std::env::set_var("TIDE_CONFIG_DIR", path);
+            }
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for TideConfigDirGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var("TIDE_CONFIG_DIR", value),
+                    None => std::env::remove_var("TIDE_CONFIG_DIR"),
+                }
+            }
+        }
+    }
 
     #[test]
     fn load_with_override_merges_explicit_settings_file_on_top() {
         let temp = tempfile::tempdir().expect("tempdir");
         let cwd = temp.path();
+        let global_dir = temp.path().join("global");
+        std::fs::create_dir_all(&global_dir).expect("global dir");
+        let _guard = TideConfigDirGuard::pin(&global_dir);
 
-        // No override → same as load (empty in a bare tempdir).
+        // No override + empty global dir → all fields default.
         assert!(ConfigStore::load_with_override(cwd, None).model.is_none());
 
         // An explicit settings file's values take precedence.
