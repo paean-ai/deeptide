@@ -3,58 +3,127 @@ package-lock.json
 yarn.lock
 pnpm-lock.yaml
 bun.lockb
-.DS_Store
 *.log
+
+# === Credentials / secrets ===================================================
+#
+# Open-source repo: assume nothing under these patterns is ever safe
+# to commit, regardless of which subdir it lives in. Refuse first,
+# whitelist exceptions explicitly if ever needed.
 .env
 .env.*
-.idea/
-.vscode/
+!.env.example
+!.env.*.example
+.netrc
+*.pem
+*.key
+!*.pub.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+known_hosts
+*.token
+*.secret
+secrets.*
+credentials.*
+auth.json
+service-account*.json
+gcp-key*.json
+*.local.json
+*.local.toml
+*.local.yaml
+*.local.yml
 
-# === Agent / IDE / CLI session scratch directories ===========================
+# === OS / editor scratch =====================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*~
+*.bak
+*.swp
+*.swo
+.#*
+\#*\#
+
+# === Shell / REPL history (commonly auto-dropped in $CWD) ====================
+.bash_history
+.zsh_history
+.python_history
+.node_repl_history
+.lesshst
+.viminfo
+
+# === IDE config dirs =========================================================
 #
-# Every modern coding-agent CLI and AI-aware IDE drops per-session
-# sandboxes, worktrees, indexes, or cache somewhere. When those land
-# in the repo root they get visually noisy on GitHub *and* risk
-# leaking scratch artifacts into commits via `git add -A`.
+# Open-source posture: blanket-ignore every IDE config dir, then
+# whitelist only known-safe shared content (`.cursor/rules/*.mdc`
+# is the de-facto place for team-shared AI rules). All other files
+# inside (mcp.json, cli-config.json, workspace.xml, etc.) routinely
+# contain API tokens, MCP server credentials, or personal prefs and
+# must never be committed.
+.idea/
+# Use `dir/*` instead of `dir/` so the re-includes below can punch
+# back through. (Git won't re-include a path whose parent directory
+# was excluded.)
+.vscode/*
+!.vscode/extensions.json
+.cursor/*
+!.cursor/rules/
+.cursor/rules/*
+!.cursor/rules/**/*.mdc
+!.cursor/rules/**/
+.cursor-server/
+
+# === Agent / CLI session scratch directories =================================
+#
+# Every modern coding-agent CLI drops per-session sandboxes,
+# worktrees, chat history, indexes, or cache somewhere. Anything
+# inside these is per-developer or per-session AND frequently
+# contains the agent's stored API token. Never committed.
 #
 # Historical incident: PR #20 (squash-merged 2026-05-28) brought two
 # stray files under `.claire/worktrees/...` and `.clone/worktrees/...`
-# into the index because neither pattern was ignored at the time. See
-# the post-mortem note in commit message of the patch that added these
-# expanded entries.
+# into the index because neither pattern was ignored at the time.
+# The first attempt to fix (cf01980) only removed the files from the
+# index but failed to actually update .gitignore; this section is
+# the consolidated, more-aggressive fix.
 #
-# Patterns below are the union of dot-dirs that have shown up across
-# coding agents (Cursor, Cursor's "Claire", clone-of variants, Claude
-# Code, Cline, Codex, Continue, Aider, Windsurf, Qoder, …) plus the
-# CLIs in this repo's own ecosystem (clide, tide, deeptide). Anything
-# matching is per-developer or per-session and should never be
-# committed.
-.clide/
+# Patterns match BOTH `.foo/` (directory variants) AND `.foo*` (loose
+# files some agents drop at repo root, e.g. `.aider.chat.history.md`,
+# `.claude.json`).
+.clide*
 .clideignore
-.tide/
-.claude/
-.claire/
-.clone/
-.cursor-server/
-.cline/
-.codex/
-.continue/
-.aider*/
-.windsurf/
-.qoder/
-# Defensive wildcards for variants we haven't enumerated yet. Many
-# agent CLIs name their per-session sandbox `agent-<hash>/`; we
-# match those only when they live under a `worktrees/` parent (the
-# observed historical shape) so a real project directory called
-# e.g. `agent-runtime/` is not accidentally swallowed.
+.tide*
+.deeptide/
+!.deeptide/.gitkeep
+.claude*
+.claire*
+.clone*
+.cline*
+.codex*
+.continue*
+.aider*
+.windsurf*
+.qoder*
+.opencode*
+.gemini*
+.copilot*
+.zed*
+# Defensive wildcard for the historical leak shape — any agent CLI
+# that drops a per-session sandbox under a `worktrees/` parent we
+# haven't enumerated above.
 **/worktrees/agent-*/
-# Note on intentional non-ignores: `.deeptide/` and `.cursor/` are
-# NOT in this list. They hold team-shared, intentionally-committed
-# content (`.deeptide/settings.json` for project config, `.cursor/
-# rules/*.mdc` for shared AI rules). Their per-developer overrides
-# (`.deeptide/settings.local.json`) live next to the shared file and
-# are handled by the more specific entries below.
-.deeptide/settings.local.json
 # =============================================================================
 target/
 **/*.rs.bk
