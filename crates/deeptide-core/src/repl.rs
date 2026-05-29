@@ -73,6 +73,16 @@ pub struct ReplSession {
     /// non-empty, non-slash submissions — slash commands like `/help` should
     /// not advance the dream cadence counter.
     user_turn_count: usize,
+    /// Run one memory-consolidation pass when the session ends (on `/exit` or
+    /// host teardown via [`finalize_session`]). On by default; the scheduled
+    /// `/dream` loop is the in-session counterpart. This is what lets durable
+    /// facts get captured without the user invoking `/remember` by hand.
+    ///
+    /// [`finalize_session`]: ReplSession::finalize_session
+    session_end_capture: bool,
+    /// Guards against firing the end-of-session pass twice (e.g. `/exit`
+    /// followed by a host teardown call).
+    session_consolidated: bool,
     /// Whether conversation turns are autosaved to disk. Disabled by
     /// `--no-session-persistence` for privacy / scratch sessions.
     session_persistence: bool,
@@ -134,6 +144,8 @@ impl ReplSession {
             dream_schedule: DreamSchedule::default(),
             user_turn_count: 0,
             session_persistence: true,
+            session_end_capture: true,
+            session_consolidated: false,
         }
     }
 
@@ -184,6 +196,45 @@ impl ReplSession {
     pub fn with_session_persistence(mut self, enabled: bool) -> Self {
         self.session_persistence = enabled;
         self
+    }
+
+    /// Enable or disable the end-of-session memory-consolidation pass.
+    pub fn with_session_end_capture(mut self, enabled: bool) -> Self {
+        self.session_end_capture = enabled;
+        self
+    }
+
+    /// Run the end-of-session memory-consolidation pass, if warranted, and
+    /// return its events. The host should call this once when the session is
+    /// ending for any reason — typed `/exit`, Ctrl-D / EOF, or signal — so
+    /// durable facts are captured without the user invoking `/remember`. The
+    /// in-crate `/exit` command routes through this too.
+    ///
+    /// Fires at most once per session, and only when capture is enabled, the
+    /// session persists turns, and at least one user turn happened. A scheduled
+    /// `/dream` pass that already fired on this exact turn count is treated as
+    /// the consolidation, so we don't double-run.
+    pub fn finalize_session(&mut self) -> Vec<ReplEvent> {
+        if self.session_consolidated
+            || !self.session_end_capture
+            || !self.session_persistence
+            || self.user_turn_count == 0
+        {
+            return Vec::new();
+        }
+        self.session_consolidated = true;
+
+        // If a scheduled dream already consolidated at the current turn count,
+        // there's nothing new to capture — skip the redundant pass.
+        if self.dream_schedule.last_user_turn_count == self.user_turn_count {
+            return Vec::new();
+        }
+
+        let mut events = vec![ReplEvent::Output(String::from(
+            "[session end] consolidating memory…",
+        ))];
+        events.extend(self.run_dream_consolidation_once());
+        events
     }
 
     /// Pre-register additional context directories (from `--add-dir`), resolving
@@ -458,7 +509,9 @@ impl ReplSession {
         let args = parts.next().unwrap_or_default();
 
         if matches!(name.as_str(), "exit" | "quit" | "q") {
-            return vec![ReplEvent::Exit];
+            let mut events = self.finalize_session();
+            events.push(ReplEvent::Exit);
+            return events;
         }
 
         let context = self.command_context();

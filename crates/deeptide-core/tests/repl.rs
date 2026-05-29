@@ -1722,3 +1722,72 @@ fn repl_with_appended_system_prompt_ignores_blank() {
         .map(ToOwned::to_owned);
     assert_eq!(base, appended, "blank append must not change the prompt");
 }
+
+#[test]
+fn session_end_capture_fires_once_after_a_user_turn() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let _ = repl.submit("do some work");
+
+    // First finalize runs the consolidation pass (StaticBackend answers it).
+    let first = repl.finalize_session();
+    assert!(
+        first
+            .iter()
+            .any(|e| matches!(e, ReplEvent::Output(t) if t.contains("consolidating memory"))),
+        "first finalize should run the end-of-session consolidation: {first:?}"
+    );
+
+    // Idempotent: a second teardown call does nothing.
+    assert!(
+        repl.finalize_session().is_empty(),
+        "consolidation must fire at most once per session"
+    );
+}
+
+#[test]
+fn session_end_capture_skipped_with_no_user_turns() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    assert!(
+        repl.finalize_session().is_empty(),
+        "nothing to consolidate when no user turn happened"
+    );
+}
+
+#[test]
+fn session_end_capture_can_be_disabled() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_session_end_capture(false);
+    let _ = repl.submit("do some work");
+    assert!(
+        repl.finalize_session().is_empty(),
+        "disabled end-of-session capture must not fire"
+    );
+}
+
+#[test]
+fn exit_command_triggers_capture_then_exits() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let _ = repl.submit("do some work");
+
+    let events = repl.submit("/exit");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ReplEvent::Output(t) if t.contains("consolidating memory"))),
+        "/exit should consolidate before exiting: {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(ReplEvent::Exit)),
+        "the last event must be Exit: {events:?}"
+    );
+}
+
+#[test]
+fn exit_with_no_turns_just_exits() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let events = repl.submit("/exit");
+    assert_eq!(
+        events,
+        vec![ReplEvent::Exit],
+        "no turns → plain exit, no pass"
+    );
+}
