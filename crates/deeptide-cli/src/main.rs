@@ -936,9 +936,8 @@ fn run_interactive(
                     if !trailing.is_empty() {
                         let _ = stdout.write_all(trailing.as_bytes());
                     }
-                    *renderer = StreamingMarkdownRenderer::new(MarkdownRenderOptions {
-                        color: use_color,
-                    });
+                    *renderer =
+                        StreamingMarkdownRenderer::new(MarkdownRenderOptions { color: use_color });
                 }
 
                 for event in events {
@@ -1863,8 +1862,8 @@ fn summarize_tool_call_for_prompt(tool_call: &ToolCall) -> String {
         _ => None,
     };
 
-    let raw = extracted
-        .unwrap_or_else(|| serde_json::to_string(&tool_call.input).unwrap_or_default());
+    let raw =
+        extracted.unwrap_or_else(|| serde_json::to_string(&tool_call.input).unwrap_or_default());
 
     // Single-line, trimmed to MAX_LEN characters (not bytes) for the prompt.
     let collapsed: String = raw
@@ -2017,8 +2016,8 @@ mod tests {
         effective_model, next_permission_mode, normalize_embedded_mode, paean_token_resolved,
         summarize_tool_call_for_prompt, use_color, validate_formats,
     };
-    use deeptide_core::permissions::PermissionMode;
     use clap::Parser;
+    use deeptide_core::permissions::PermissionMode;
     use deeptide_core::{AnthropicAuthMode, ConfigData, ProviderProfile, ThinkingConfig};
     use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -3149,7 +3148,10 @@ mod tests {
             "Bash",
             serde_json::json!({"command": long_cmd}),
         ));
-        assert!(summary.ends_with('…'), "expected ellipsis, got: {summary:?}");
+        assert!(
+            summary.ends_with('…'),
+            "expected ellipsis, got: {summary:?}"
+        );
         assert!(summary.chars().count() <= 141);
     }
 

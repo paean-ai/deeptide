@@ -80,10 +80,7 @@ impl StreamingMarkdownRenderer {
                 continue;
             }
 
-            out.push_str(&MarkdownRenderer::render_with_options(
-                &line,
-                self.options,
-            ));
+            out.push_str(&MarkdownRenderer::render_with_options(&line, self.options));
             out.push('\n');
         }
 
@@ -788,7 +785,10 @@ mod tests {
         let mut r = StreamingMarkdownRenderer::new(MarkdownRenderOptions { color: true });
         let out = r.push("Hello **world**\n");
         // Bold escape must appear somewhere in the rendered output.
-        assert!(out.contains("\x1b[1m"), "expected bold escape, got: {out:?}");
+        assert!(
+            out.contains("\x1b[1m"),
+            "expected bold escape, got: {out:?}"
+        );
         // And the inner text is preserved literally inside the escapes.
         assert!(out.contains("world"));
     }
