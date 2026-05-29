@@ -28,12 +28,20 @@ Cost is negligible (max_tokens=8; we only read the usage field).
 import argparse
 import json
 import os
+import secrets
 import sys
 import time
 import urllib.request
 
 API = "https://api.deepseek.com/chat/completions"
 MODEL = "deepseek-chat"
+
+# A per-run nonce mixed into the stable prefix. Without it, runs share DeepSeek's
+# account-level content-keyed cache, so a second run hits the first run's warmed
+# prefix and every layout looks ~equally cached — masking the real effect. A
+# fresh salt each run forces a cold start, isolating the within-run layout
+# difference we actually want to measure. Set in main().
+RUN_SALT = ""
 
 
 def post(key, body):
@@ -53,12 +61,15 @@ def post(key, body):
 # --- synthetic-but-realistic prefix pieces -------------------------------
 
 def base_system(seed_units=120):
-    """Stand-in for the stable system prompt + tool-schema block (~few KB)."""
+    """Stand-in for the stable system prompt + tool-schema block (~few KB).
+
+    The per-run RUN_SALT is constant within a run (so the prefix can still cache
+    across turns) but unique across runs (so runs don't share cache)."""
     line = (
         "You are a senior coding agent operating in a terminal. Follow project "
         "conventions exactly, prefer existing patterns, and keep edits minimal. "
     )
-    return (line * seed_units).strip()
+    return (f"[build {RUN_SALT}] " + (line * seed_units)).strip()
 
 
 def memory_entries():
@@ -114,12 +125,15 @@ def build_aligned(turn, entries):
     return msgs
 
 
-def run_variant(key, name, builder, turns, entries_for_turn):
+def run_variant(key, name, builder, turns, entries_for_turn, model=MODEL):
     rows = []
+    # The reasoner emits separate reasoning tokens before the answer, so give it
+    # headroom; we still only read the usage/cache fields, never the output.
+    max_tokens = 64 if "reason" in model else 8
     for turn in range(1, turns + 1):
         body = {
-            "model": MODEL,
-            "max_tokens": 8,
+            "model": model,
+            "max_tokens": max_tokens,
             "messages": builder(turn, entries_for_turn(turn)),
         }
         u = post(key, body)["usage"]
@@ -145,6 +159,10 @@ def print_table(name, rows):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--turns", type=int, default=5)
+    ap.add_argument("--model", default=MODEL,
+                    help="DeepSeek model id, e.g. deepseek-chat or deepseek-reasoner (pro)")
+    ap.add_argument("--salt", default=None,
+                    help="run nonce (default: random) — keeps runs from sharing cache")
     args = ap.parse_args()
 
     key = os.environ.get("DEEPSEEK_API_KEY")
@@ -152,12 +170,15 @@ def main():
         print("DEEPSEEK_API_KEY not set", file=sys.stderr)
         sys.exit(1)
 
+    global RUN_SALT
+    RUN_SALT = args.salt or secrets.token_hex(8)
+    print(f"model under test: {args.model}  |  run salt: {RUN_SALT}")
     stable_entries = memory_entries()
 
     # Naive layout A: volatile prefix line.
     naive_rows = run_variant(
         key, "NAIVE (volatile line first)", build_naive, args.turns,
-        lambda _turn: stable_entries,
+        lambda _turn: stable_entries, model=args.model,
     )
 
     # Naive layout B: memory order shuffled each turn (another common cache-buster),
@@ -170,13 +191,13 @@ def main():
     naive_shuffle_rows = run_variant(
         key, "NAIVE (memory reordered each turn)",
         lambda t, e: [{"role": "system", "content": base_system() + "\n" + memory_block(e)}] + conversation(t),
-        args.turns, shuffled,
+        args.turns, shuffled, model=args.model,
     )
 
     # Aligned layout: stable system+memory first, volatile content last.
     aligned_rows = run_variant(
         key, "ALIGNED (stable prefix, volatile last)", build_aligned, args.turns,
-        lambda _turn: stable_entries,
+        lambda _turn: stable_entries, model=args.model,
     )
 
     a = print_table("NAIVE — volatile line first", naive_rows)
