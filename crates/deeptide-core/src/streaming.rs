@@ -159,7 +159,10 @@ pub fn parse_streaming_response<R: Read>(
                 ensure_index(&mut blocks, payload.index);
                 match payload.content_block {
                     StreamContentBlock::Text { text } => {
-                        blocks[payload.index] = BlockAccumulator::Text { text };
+                        blocks[payload.index] = BlockAccumulator::Text {
+                            text,
+                            stop_seen: false,
+                        };
                         if let Some(handler) = handler {
                             handler(&StreamingEvent::TextBlockStart {
                                 index: payload.index,
@@ -179,6 +182,7 @@ pub fn parse_streaming_response<R: Read>(
                             id: id.clone(),
                             name: name.clone(),
                             partial_input: initial,
+                            stop_seen: false,
                         };
                         if let Some(handler) = handler {
                             handler(&StreamingEvent::ToolUseStart {
@@ -195,6 +199,7 @@ pub fn parse_streaming_response<R: Read>(
                         // so it serialises to nothing on the final pass.
                         blocks[payload.index] = BlockAccumulator::Text {
                             text: String::new(),
+                            stop_seen: false,
                         };
                     }
                 }
@@ -205,7 +210,8 @@ pub fn parse_streaming_response<R: Read>(
                 ensure_index(&mut blocks, payload.index);
                 match payload.delta {
                     StreamDelta::TextDelta { text } => {
-                        if let BlockAccumulator::Text { text: buf } = &mut blocks[payload.index] {
+                        if let BlockAccumulator::Text { text: buf, .. } = &mut blocks[payload.index]
+                        {
                             buf.push_str(&text);
                         }
                         if let Some(handler) = handler {
@@ -234,6 +240,13 @@ pub fn parse_streaming_response<R: Read>(
             "content_block_stop" => {
                 let payload: IndexEvent = serde_json::from_str(&event.data)
                     .map_err(|e| format!("invalid content_block_stop event: {e}"))?;
+                if let Some(slot) = blocks.get_mut(payload.index) {
+                    match slot {
+                        BlockAccumulator::Text { stop_seen, .. }
+                        | BlockAccumulator::ToolUse { stop_seen, .. } => *stop_seen = true,
+                        BlockAccumulator::Empty => {}
+                    }
+                }
                 if let Some(handler) = handler {
                     handler(&StreamingEvent::BlockStop {
                         index: payload.index,
@@ -279,7 +292,7 @@ pub fn parse_streaming_response<R: Read>(
     for block in blocks {
         match block {
             BlockAccumulator::Empty => {}
-            BlockAccumulator::Text { text } => {
+            BlockAccumulator::Text { text, .. } => {
                 if !text.is_empty() {
                     text_parts.push(text);
                 }
@@ -288,14 +301,13 @@ pub fn parse_streaming_response<R: Read>(
                 id,
                 name,
                 partial_input,
+                stop_seen,
             } => {
                 let input: serde_json::Value = if partial_input.trim().is_empty() {
                     serde_json::json!({})
                 } else {
                     serde_json::from_str(&partial_input).map_err(|e| {
-                        format!(
-                            "tool_use {name}#{id} input JSON did not assemble cleanly: {e}; partial={partial_input}"
-                        )
+                        format_tool_input_error(&name, &id, &partial_input, &e, stop_seen)
                     })?
                 };
                 tool_calls.push(ToolCall::new(id, name, input));
@@ -321,15 +333,25 @@ pub fn parse_streaming_response<R: Read>(
 /// Accumulator state for one content block index. Slots stay `Empty` only
 /// until we observe the corresponding `content_block_start`; we keep them
 /// reserved so out-of-order indices stay distinct.
+///
+/// `stop_seen` tracks whether the corresponding `content_block_stop` event
+/// arrived. When the SSE stream is interrupted mid-flight (network blip,
+/// upstream model server hiccup, proxy disconnect) we exit the loop with
+/// `stop_seen == false`, and the partial buffer becomes a broken JSON
+/// object that we surface as a *truncation* error rather than an opaque
+/// "EOF while parsing a string" — much easier for the user to diagnose
+/// and retry.
 enum BlockAccumulator {
     Empty,
     Text {
         text: String,
+        stop_seen: bool,
     },
     ToolUse {
         id: String,
         name: String,
         partial_input: String,
+        stop_seen: bool,
     },
 }
 
@@ -337,6 +359,82 @@ fn ensure_index(blocks: &mut Vec<BlockAccumulator>, index: usize) {
     while blocks.len() <= index {
         blocks.push(BlockAccumulator::Empty);
     }
+}
+
+/// Format the actionable error message we surface when a `tool_use` block's
+/// accumulated `partial_input` doesn't parse as JSON.
+///
+/// We distinguish three failure modes so the user gets a useful next step
+/// instead of an opaque parse error:
+///
+/// 1. **Mid-stream truncation** (`!stop_seen`) — the upstream server cut
+///    the SSE connection before sending `content_block_stop` for this
+///    block. The partial JSON is necessarily incomplete (no closing
+///    quote / brace). Suggest retry or `--no-stream`.
+/// 2. **UTF-8 corruption** (`partial_input` contains U+FFFD) — some hop
+///    in the chain (proxy, load balancer, model server's own streamer)
+///    lossily decoded a chunked UTF-8 sequence and replaced the bad
+///    bytes with `\u{FFFD}`. The JSON string then either fails to
+///    decode or, if salvageable, holds garbage CJK / emoji. Surface the
+///    diagnosis so the user knows it's upstream, not their input.
+/// 3. **Otherwise** — genuinely malformed JSON. Fall back to the
+///    original parse error.
+///
+/// `partial_input` is truncated to a reasonable preview length so a 12 KB
+/// HTML write call doesn't dump its entire body into the error message.
+fn format_tool_input_error(
+    name: &str,
+    id: &str,
+    partial_input: &str,
+    parse_err: &serde_json::Error,
+    stop_seen: bool,
+) -> String {
+    const PREVIEW_BYTES: usize = 240;
+
+    let has_replacement = partial_input.contains('\u{FFFD}');
+    let total_chars = partial_input.chars().count();
+    let preview = truncate_preview(partial_input, PREVIEW_BYTES);
+
+    if !stop_seen {
+        let utf8_note = if has_replacement {
+            " (also contains U+FFFD replacement chars — upstream UTF-8 corruption)"
+        } else {
+            ""
+        };
+        format!(
+            "tool_use {name}#{id} stream truncated before content_block_stop ({total_chars} chars assembled){utf8_note}. \
+             Retry the prompt, or run with --no-stream if the issue persists. Partial input preview: {preview}"
+        )
+    } else if has_replacement {
+        format!(
+            "tool_use {name}#{id} input JSON contains U+FFFD replacement characters — upstream UTF-8 corruption in the streaming payload. \
+             Retry the prompt; if it recurs the upstream API is mis-chunking multibyte sequences. Underlying parse error: {parse_err}. Preview: {preview}"
+        )
+    } else {
+        format!(
+            "tool_use {name}#{id} input JSON did not assemble cleanly: {parse_err}; partial={preview}"
+        )
+    }
+}
+
+/// Truncate a UTF-8 string to roughly `max_bytes` bytes for inclusion in
+/// an error message. Respects char boundaries so the preview stays valid
+/// UTF-8 even when the cut falls mid-multibyte-sequence, and appends an
+/// `…` marker plus the total length so the reader knows it's not the
+/// whole payload.
+fn truncate_preview(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}… ({} more chars)",
+        &text[..cut],
+        text.chars().count() - text[..cut].chars().count()
+    )
 }
 
 #[derive(Default)]
@@ -792,6 +890,134 @@ mod tests {
         let (result, _) = drive(payload);
         let err = result.expect_err("malformed JSON must surface");
         assert!(err.contains("tool_use") && err.contains("Read"));
+    }
+
+    #[test]
+    fn tool_stream_truncated_before_block_stop_yields_distinct_error() {
+        // Real-world failure mode: the upstream server (or a proxy) cuts
+        // the SSE connection mid-tool-call. We saw the `tool_use` start,
+        // received some `input_json_delta`s, but never got the matching
+        // `content_block_stop` or any `message_stop`.
+        //
+        // Old behaviour: opaque "EOF while parsing a string at column N"
+        //   leaking the partial JSON into the user's terminal.
+        // New behaviour: structured "stream truncated before
+        //   content_block_stop" with a chars-assembled count and a
+        //   bounded preview so the user knows it's an upstream issue
+        //   they can retry.
+        let payload = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_x\",\"name\":\"Write\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\":\\\"a.html\\\",\\\"content\\\":\\\"<html>...\"}}\n\n",
+            // ← intentionally no content_block_stop, no message_stop
+        );
+        let (result, _) = drive(payload);
+        let err = result.expect_err("truncated tool stream must error");
+        assert!(
+            err.contains("stream truncated before content_block_stop"),
+            "expected truncation framing, got: {err}"
+        );
+        assert!(err.contains("Write") && err.contains("toolu_x"));
+        assert!(
+            err.contains("Retry the prompt"),
+            "error must give actionable next step: {err}"
+        );
+    }
+
+    #[test]
+    fn tool_input_with_replacement_chars_is_flagged_as_utf8_corruption() {
+        // Upstream UTF-8 mis-chunking: the server replaced bad bytes
+        // with U+FFFD inside the streamed JSON. The block DID close
+        // cleanly (stop_seen=true) so this is distinct from the
+        // truncation case — we surface a different diagnosis because
+        // the user can't fix it by waiting longer.
+        let payload = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_y\",\"name\":\"Write\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            // Three U+FFFD chars inside the `content` value → still
+            // valid JSON syntactically (FFFD is a legal Unicode scalar)
+            // but the trailing `,` makes it unparsable, so we still
+            // route through `format_tool_input_error`.
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"content\\\":\\\"\u{FFFD}\u{FFFD}\u{FFFD}\\\",\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let (result, _) = drive(payload);
+        let err = result.expect_err("FFFD-tainted JSON must error");
+        assert!(
+            err.contains("U+FFFD replacement characters"),
+            "expected FFFD framing, got: {err}"
+        );
+        assert!(
+            err.contains("upstream UTF-8 corruption"),
+            "error must blame upstream, not the user: {err}"
+        );
+    }
+
+    #[test]
+    fn truncation_with_replacement_chars_mentions_both_in_diagnosis() {
+        // The pathological case the user actually hit: BOTH upstream
+        // UTF-8 corruption AND mid-stream truncation. We prioritise
+        // the truncation framing (more actionable — retry might fix
+        // it) but tack on a note that UTF-8 mojibake is also present.
+        let payload = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_z\",\"name\":\"Write\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"content\\\":\\\"无尽地\u{FFFD}\u{FFFD}\u{FFFD}\"}}\n\n",
+            // No stop events.
+        );
+        let (result, _) = drive(payload);
+        let err = result.expect_err("truncated+corrupt must error");
+        assert!(err.contains("stream truncated"), "got: {err}");
+        assert!(
+            err.contains("U+FFFD"),
+            "should also mention UTF-8 corruption: {err}"
+        );
+    }
+
+    #[test]
+    fn large_partial_input_is_previewed_not_dumped_into_error_message() {
+        // A 12 KB HTML write (the screenshot's failure size) must NOT
+        // splat the whole body into the error string — that's how the
+        // old failure mode wallpapered the terminal. Verify the error
+        // stays small AND mentions that it's truncated.
+        let mut huge_partial = String::from("{\\\"content\\\":\\\"");
+        for _ in 0..3_000 {
+            huge_partial.push_str("ABCD");
+        }
+        let payload = format!(
+            concat!(
+                "event: message_start\n",
+                "data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m\",\"model\":\"m\"}}}}\n\n",
+                "event: content_block_start\n",
+                "data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"tool_use\",\"id\":\"toolu_h\",\"name\":\"Write\",\"input\":{{}}}}}}\n\n",
+                "event: content_block_delta\n",
+                "data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}}}\n\n",
+            ),
+            huge_partial
+        );
+        let (result, _) = drive(&payload);
+        let err = result.expect_err("must error");
+        assert!(
+            err.len() < 2_000,
+            "error message must stay bounded, got {} bytes",
+            err.len()
+        );
+        assert!(
+            err.contains("more chars"),
+            "preview must show elision: {err}"
+        );
     }
 
     #[test]
