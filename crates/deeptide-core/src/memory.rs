@@ -472,34 +472,71 @@ pub fn strip_frontmatter(raw: &str) -> String {
     lines.join("\n").trim().to_owned()
 }
 
+/// Whether a line is a `MEMORY.md` index entry (`- [Title](file.md) — hook`).
+/// Used to count what overflows the cached core so the notice can point at
+/// on-demand retrieval instead of silently dropping it.
+fn is_index_entry(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("- [") && t.contains("](") && t.contains(".md")
+}
+
+/// Cap the memory block injected into the system prompt to a deterministic,
+/// **line-aligned**, byte-stable prefix.
+///
+/// Cutting only on line boundaries (never mid-line) is what makes the kept
+/// block byte-identical as long as the leading lines are unchanged — and a
+/// byte-identical prefix is what lets DeepSeek's automatic prefix cache hit on
+/// it every turn. `benchmarks/cache_memory_bench.py` measures this against the
+/// live API: a stable prefix sustains ~95% cache-hit (≈10× cheaper input)
+/// across turns, versus 0% the moment the prefix shifts. So appending new
+/// memory entries (which land at the end of the index) must never perturb the
+/// retained head — this function guarantees that.
+///
+/// Overflow is **relocated, not lost**: the notice reports how many entries
+/// were left out so the agent can pull them with `MemorySearch` (two-tier
+/// memory — a cached core plus an on-demand long tail).
 pub fn truncate_memory(text: &str) -> String {
     let lines = text.split('\n').collect::<Vec<_>>();
-    let mut out = if lines.len() > MEMORY_MAX_LINES {
-        lines[..MEMORY_MAX_LINES].join("\n")
-    } else {
-        text.to_owned()
-    };
-    let truncated_by_lines = lines.len() > MEMORY_MAX_LINES;
 
-    let mut truncated_by_bytes = false;
-    if out.len() > MEMORY_MAX_BYTES {
-        let mut end = MEMORY_MAX_BYTES;
-        while end > 0 && !out.is_char_boundary(end) {
-            end -= 1;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut bytes = 0usize;
+    let mut cut_at: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
+        // +1 for the '\n' that rejoins this line to the previous one.
+        let added = if kept.is_empty() {
+            line.len()
+        } else {
+            line.len() + 1
+        };
+        if kept.len() >= MEMORY_MAX_LINES || bytes + added > MEMORY_MAX_BYTES {
+            cut_at = Some(i);
+            break;
         }
-        out.truncate(end);
-        truncated_by_bytes = true;
+        bytes += added;
+        kept.push(line);
     }
 
-    if truncated_by_lines || truncated_by_bytes {
-        let why = if truncated_by_bytes {
-            "25 KB"
+    let mut out = kept.join("\n");
+
+    if let Some(i) = cut_at {
+        let dropped_entries = lines[i..].iter().filter(|l| is_index_entry(l)).count();
+        let by_lines = kept.len() >= MEMORY_MAX_LINES;
+        let why = if by_lines {
+            format!("{MEMORY_MAX_LINES} lines")
         } else {
-            "200 lines"
+            format!("{} KB", MEMORY_MAX_BYTES / 1024)
         };
-        out.push_str(&format!(
-            "\n\n...(memory truncated at {why} per tide-spec/0.1 section 13.1)..."
-        ));
+        if dropped_entries > 0 {
+            out.push_str(&format!(
+                "\n\n...(memory core capped at {why} per tide-spec/0.1 section 13.1; \
+                 {dropped_entries} more entr{} available via MemorySearch)...",
+                if dropped_entries == 1 { "y" } else { "ies" }
+            ));
+        } else {
+            out.push_str(&format!(
+                "\n\n...(memory truncated at {why} per tide-spec/0.1 section 13.1)..."
+            ));
+        }
     }
 
     out
@@ -625,4 +662,88 @@ fn fnv1a_hex_prefix(value: &str, length: usize) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:x}").chars().take(length).collect()
+}
+
+#[cfg(test)]
+mod cache_alignment_tests {
+    use super::*;
+
+    /// Build a synthetic MEMORY.md index with `n` entries.
+    fn index_with(n: usize) -> String {
+        let mut s = String::from("# memory\n");
+        for i in 0..n {
+            s.push_str(&format!("- [Entry {i}](file-{i}.md) — hook number {i}\n"));
+        }
+        s
+    }
+
+    #[test]
+    fn short_memory_is_unchanged() {
+        let text = "- [A](a.md) — x\n- [B](b.md) — y";
+        assert_eq!(truncate_memory(text), text);
+    }
+
+    #[test]
+    fn truncation_cuts_on_line_boundaries_never_mid_line() {
+        // Far more than the byte cap so a cut is forced.
+        let text = index_with(5000);
+        let out = truncate_memory(&text);
+        let body = out.split("\n\n...").next().expect("body before notice");
+        // Every retained line must be an exact, complete original line.
+        let originals: std::collections::HashSet<&str> = text.lines().collect();
+        for line in body.lines() {
+            assert!(
+                originals.contains(line),
+                "partial / corrupted line retained: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncation_is_deterministic() {
+        let text = index_with(5000);
+        assert_eq!(truncate_memory(&text), truncate_memory(&text));
+    }
+
+    /// The cache property: appending new entries at the END of the index must
+    /// not change the retained core, so DeepSeek's prefix cache keeps hitting.
+    #[test]
+    fn retained_core_is_prefix_stable_when_entries_appended() {
+        let small = index_with(5000);
+        let larger = index_with(7000); // same leading lines, more appended
+        let core_small = truncate_memory(&small);
+        let core_larger = truncate_memory(&larger);
+        let body_small = core_small
+            .split("\n\n...")
+            .next()
+            .expect("body before notice");
+        let body_larger = core_larger
+            .split("\n\n...")
+            .next()
+            .expect("body before notice");
+        assert_eq!(
+            body_small, body_larger,
+            "retained core shifted when entries were appended — would bust the prefix cache"
+        );
+    }
+
+    #[test]
+    fn overflow_points_at_memory_search_with_a_count() {
+        let out = truncate_memory(&index_with(5000));
+        assert!(
+            out.contains("via MemorySearch"),
+            "missing retrieval pointer: {out:?}"
+        );
+        assert!(
+            out.contains("more entr"),
+            "missing dropped-entry count: {out:?}"
+        );
+    }
+
+    #[test]
+    fn line_cap_is_respected() {
+        let out = truncate_memory(&index_with(5000));
+        let body = out.split("\n\n...").next().expect("body before notice");
+        assert!(body.lines().count() <= MEMORY_MAX_LINES);
+    }
 }
