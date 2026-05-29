@@ -1166,7 +1166,7 @@ fn plan_mode_tools_return_approval_flow_text() {
     let enter = EnterPlanModeTool.call(serde_json::json!({}), &ToolContext::new("."));
     assert!(!enter.is_error);
     assert!(enter.content.contains("Plan mode activated"));
-    assert!(enter.content.contains("Do not modify project files"));
+    assert!(enter.content.contains("Do NOT modify project files"));
 
     let exit = ExitPlanModeTool.call(
         serde_json::json!({

@@ -1368,7 +1368,7 @@ impl Tool for EnterPlanModeTool {
              2. Identify the files and components involved\n\
              3. Design an implementation approach\n\
              4. Present your plan to the user for approval using ExitPlanMode\n\
-             File edits, writes, sub-agents, MCP calls, clipboard writes, and shell commands with side effects are blocked until you exit plan mode or the user changes permission mode. Do not modify project files until the user approves your plan.",
+             File edits, writes, sub-agents, MCP calls, clipboard writes, and shell commands with side effects are blocked until you exit plan mode or the user changes permission mode. Do NOT modify project files until the user approves your plan.",
         )
     }
 }
