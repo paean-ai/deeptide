@@ -990,7 +990,7 @@ fn tool_schemas() -> Vec<WireTool> {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "tool": {"type": "string", "description": "The tool this prompt applies to."},
+                                "tool": {"type": "string", "description": "The tool this prompt applies to.", "enum": ["Bash"]},
                                 "prompt": {"type": "string", "description": "Semantic description of the action."}
                             },
                             "required": ["tool", "prompt"]
@@ -2038,6 +2038,12 @@ mod tests {
         assert_eq!(
             exit_plan_mode.input_schema["properties"]["planWasEdited"]["type"],
             serde_json::json!("boolean")
+        );
+        assert_eq!(
+            exit_plan_mode.input_schema["properties"]["allowedPrompts"]["items"]["properties"]["tool"]
+                ["enum"],
+            serde_json::json!(["Bash"]),
+            "ExitPlanMode allowedPrompts.tool must be constrained to Bash to match Swift"
         );
 
         for name in [
