@@ -417,6 +417,17 @@ impl ReplSession {
     }
 
     pub fn status_line(&self) -> StatusLine {
+        self.status_line_with_auth(None)
+    }
+
+    /// Build the status line with an optional auth segment inserted at its
+    /// canonical priority slot (between `ctx` and `turns`).
+    ///
+    /// Segments are listed from highest to lowest survival priority. The
+    /// renderer drops trailing segments first when the terminal is narrow, so
+    /// the must-show items (model, mode, cwd, git, ctx, auth) stay visible
+    /// while `turns` and `cost` fall off first.
+    pub fn status_line_with_auth(&self, auth: Option<StatusSegment>) -> StatusLine {
         let summary = self.agent_loop.cost_tracker().summary();
         let context_tokens = estimate_repl_context_tokens(self.agent_loop.messages());
         let window = model_context_window(self.agent_loop.model()) as usize;
@@ -425,18 +436,28 @@ impl ReplSession {
             .checked_div(window)
             .unwrap_or(0);
         let branch = git_branch(&self.tool_context.cwd).unwrap_or_else(|| String::from("no-git"));
+        let cwd = format_cwd_for_status(&self.tool_context.cwd);
 
-        StatusLine::new([
+        let mut segments = vec![
             StatusSegment::new("model", self.agent_loop.model()),
             StatusSegment::new("mode", self.agent_loop.permission_mode().label()),
-            StatusSegment::new("ctx", format!("{context_pct}%")),
-            StatusSegment::new(
-                "turns",
-                format!("{}/{}", summary.turns.len(), self.agent_loop.max_turns()),
-            ),
+            StatusSegment::new("cwd", cwd),
             StatusSegment::new("git", branch),
-            StatusSegment::new("cost", CostTracker::format_usd(summary.total_cost_usd)),
-        ])
+            StatusSegment::new("ctx", format!("{context_pct}%")),
+        ];
+        if let Some(auth) = auth {
+            segments.push(auth);
+        }
+        segments.push(StatusSegment::new(
+            "turns",
+            format!("{}/{}", summary.turns.len(), self.agent_loop.max_turns()),
+        ));
+        segments.push(StatusSegment::new(
+            "cost",
+            CostTracker::format_usd(summary.total_cost_usd),
+        ));
+
+        StatusLine::new(segments)
     }
 
     pub fn agent_loop(&self) -> &AgentLoop {
@@ -2592,6 +2613,42 @@ fn git_branch(cwd: &std::path::Path) -> Option<String> {
     (!branch.is_empty()).then_some(branch)
 }
 
+/// Compact the absolute working-directory path for the status bar.
+///
+/// We substitute `$HOME` with `~` and, when the remaining string is still
+/// wide enough to crowd the bar on an 80-column terminal, collapse it to the
+/// basename. This keeps the most identifying piece of information visible
+/// without hijacking the bar with deep nested paths.
+pub(crate) fn format_cwd_for_status(cwd: &std::path::Path) -> String {
+    const MAX_DISPLAY_CHARS: usize = 28;
+
+    let raw = cwd.display().to_string();
+    let with_tilde = match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() => raw
+            .strip_prefix(&home)
+            .map(|rest| {
+                if rest.is_empty() {
+                    String::from("~")
+                } else if rest.starts_with('/') {
+                    format!("~{rest}")
+                } else {
+                    raw.clone()
+                }
+            })
+            .unwrap_or(raw),
+        _ => raw,
+    };
+
+    if with_tilde.chars().count() <= MAX_DISPLAY_CHARS {
+        return with_tilde;
+    }
+
+    cwd.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or(with_tilde)
+}
+
 fn last_user_prompt(messages: &[ConversationMessage]) -> Option<String> {
     messages
         .iter()
@@ -2963,4 +3020,62 @@ fn split_shell_like(input: &str) -> Vec<String> {
     }
 
     parts
+}
+
+#[cfg(test)]
+mod cwd_format_tests {
+    use super::format_cwd_for_status;
+    use std::path::PathBuf;
+
+    fn with_home<T>(home: &str, body: impl FnOnce() -> T) -> T {
+        // Tests in this crate already serialize env access via `serial_test`
+        // elsewhere; this helper only mutates `HOME`, restoring it on exit.
+        let previous = std::env::var("HOME").ok();
+        // SAFETY: process-wide env mutation; restored below. Acceptable in a
+        // single-threaded unit test that does not run alongside other env
+        // probes (no other test in this module touches HOME).
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        let out = body();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        out
+    }
+
+    #[test]
+    fn collapses_home_prefix_to_tilde() {
+        with_home("/Users/ryan", || {
+            let formatted = format_cwd_for_status(&PathBuf::from("/Users/ryan/projects/foo"));
+            assert_eq!(formatted, "~/projects/foo");
+        });
+    }
+
+    #[test]
+    fn long_path_falls_back_to_basename() {
+        with_home("/Users/ryan", || {
+            let formatted = format_cwd_for_status(&PathBuf::from(
+                "/Users/ryan/a/very/deeply/nested/path/that/exceeds/the/limit/deeptide-npm",
+            ));
+            assert_eq!(formatted, "deeptide-npm");
+        });
+    }
+
+    #[test]
+    fn unrelated_root_is_kept_verbatim_when_short() {
+        with_home("/Users/ryan", || {
+            let formatted = format_cwd_for_status(&PathBuf::from("/opt/work"));
+            assert_eq!(formatted, "/opt/work");
+        });
+    }
+
+    #[test]
+    fn exact_home_collapses_to_tilde() {
+        with_home("/Users/ryan", || {
+            let formatted = format_cwd_for_status(&PathBuf::from("/Users/ryan"));
+            assert_eq!(formatted, "~");
+        });
+    }
 }
