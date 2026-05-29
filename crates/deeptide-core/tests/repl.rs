@@ -1570,3 +1570,35 @@ fn repl_session_saves_and_can_be_resumed() {
         "agent loop should have 2 restored messages"
     );
 }
+
+#[test]
+fn repl_resume_session_method_restores_and_continues_same_id() {
+    use deeptide_core::{SessionStore, new_session_id};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cwd = temp.path();
+
+    let id = new_session_id();
+    let messages = vec![
+        deeptide_core::ConversationMessage::user("hello"),
+        deeptide_core::ConversationMessage::assistant("hi there"),
+    ];
+    SessionStore::save(cwd, &id, "test-model", "2024-01-01T00:00:00Z", &messages);
+
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(cwd);
+    let count = repl
+        .resume_session(&id)
+        .expect("resume_session should succeed");
+    assert_eq!(count, 2);
+    assert_eq!(repl.agent_loop().messages().len(), 2);
+
+    // A subsequent turn autosaves back to the SAME session (continue, not fork).
+    let _ = repl.submit("another");
+    let sessions = SessionStore::list(cwd);
+    assert_eq!(
+        sessions.len(),
+        1,
+        "resume should continue the same session, not create a fork: {sessions:?}"
+    );
+    assert_eq!(sessions[0].session_id, id);
+}
