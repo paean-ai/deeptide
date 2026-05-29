@@ -87,6 +87,23 @@ function fail(msg, exitCode = 1) {
   process.exit(exitCode)
 }
 
+function assertPort(flag, raw) {
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    fail(`${flag} requires an integer in 1..65535, got: ${JSON.stringify(raw)}`)
+  }
+  return n
+}
+
+function assertPositiveInt(flag, raw, max = Number.MAX_SAFE_INTEGER) {
+  const n = Number(raw)
+  const bounded = max < Number.MAX_SAFE_INTEGER
+  if (!Number.isInteger(n) || n < 1 || n > max) {
+    fail(`${flag} requires a positive integer${bounded ? ` ≤ ${max.toLocaleString('en-US')}` : ''}, got: ${JSON.stringify(raw)}`)
+  }
+  return n
+}
+
 // ---------- argv ----------
 
 function parseArgs(argv) {
@@ -117,11 +134,11 @@ function parseArgs(argv) {
     else if (a === '-y' || a === '--yes') out.yes = true
     else if (a === '--model') out.model = next()
     else if (a.startsWith('--model=')) out.model = a.slice('--model='.length)
-    else if (a === '--ctx') out.ctx = Number(next())
-    else if (a.startsWith('--ctx=')) out.ctx = Number(a.slice('--ctx='.length))
-    else if (a === '--port') out.dsgoPort = Number(next())
-    else if (a.startsWith('--port=')) out.dsgoPort = Number(a.slice('--port='.length))
-    else if (a === '--ds4-port') out.ds4Port = Number(next())
+    else if (a === '--ctx') out.ctx = assertPositiveInt('--ctx', next(), 10_000_000)
+    else if (a.startsWith('--ctx=')) out.ctx = assertPositiveInt('--ctx', a.slice('--ctx='.length), 10_000_000)
+    else if (a === '--port') out.dsgoPort = assertPort('--port', next())
+    else if (a.startsWith('--port=')) out.dsgoPort = assertPort('--port', a.slice('--port='.length))
+    else if (a === '--ds4-port') out.ds4Port = assertPort('--ds4-port', next())
     else if (a === '--no-build') out.noBuild = true
     else if (a === '--no-download') out.noDownload = true
     else if (a === '--no-service') out.noService = true
