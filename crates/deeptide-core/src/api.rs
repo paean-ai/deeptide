@@ -354,13 +354,21 @@ impl AnthropicBackend {
         let status = response.status();
 
         if !status.is_success() {
+            // Capture the server's retry hint before the body is consumed, so a
+            // 429/503/529 error message can name the concrete wait time instead
+            // of a generic "retry later".
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let text = response.text().map_err(|error| ApiFailure {
                 status: status.as_u16(),
                 message: format!("failed to read response body: {error}"),
             })?;
             return Err(ApiFailure {
                 status: status.as_u16(),
-                message: classify_error(status.as_u16(), &text),
+                message: classify_error(status.as_u16(), &text, retry_after.as_deref()),
             });
         }
 
@@ -1617,14 +1625,14 @@ struct ResponseUsage {
     cache_read_input_tokens: Option<usize>,
 }
 
-fn classify_error(status: u16, body: &str) -> String {
+fn classify_error(status: u16, body: &str, retry_after: Option<&str>) -> String {
     let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
     let message = parsed
         .as_ref()
         .and_then(error_message_from_json)
         .unwrap_or_else(|| body.trim().to_owned());
     let error_type = parsed.as_ref().and_then(error_type_from_json);
-    let hint = api_error_hint(status, error_type);
+    let hint = api_error_hint(status, error_type, retry_after);
 
     if message.is_empty() {
         format!("API request failed with HTTP {status}{hint}")
@@ -1664,25 +1672,57 @@ fn error_type_from_json(value: &serde_json::Value) -> Option<&str> {
         .filter(|error_type| !error_type.is_empty())
 }
 
-fn api_error_hint(status: u16, error_type: Option<&str>) -> &'static str {
-    let Some(error_type) = error_type else {
-        return match status {
-            401 | 403 => " Check provider credentials and authentication mode.",
-            429 => " Retry after quota resets or reduce request rate.",
-            529 => " Retry later or switch to another available provider/model.",
-            _ => "",
-        };
-    };
+fn api_error_hint(status: u16, error_type: Option<&str>, retry_after: Option<&str>) -> String {
+    let is_auth = matches!(status, 401 | 403)
+        || matches!(
+            error_type,
+            Some("authentication_error" | "permission_error")
+        );
+    let is_rate_limit = status == 429 || error_type == Some("rate_limit_error");
+    // 503 and 529 are both transient upstream-overload statuses (see
+    // is_retryable_overload); give them the same actionable hint.
+    let is_overload = matches!(status, 503 | 529) || error_type == Some("overloaded_error");
 
-    match (status, error_type) {
-        (401 | 403, _) | (_, "authentication_error" | "permission_error") => {
-            " Check provider credentials and authentication mode."
+    // A server-provided Retry-After lets us name the concrete wait instead of a
+    // vague "retry later". The header is either delta-seconds or an HTTP-date.
+    let when = retry_after.map(format_retry_after);
+
+    if is_auth {
+        String::from(" Check provider credentials and authentication mode.")
+    } else if is_rate_limit {
+        match when {
+            Some(when) => format!(" Retry after {when} or reduce request rate."),
+            None => String::from(" Retry after quota resets or reduce request rate."),
         }
-        (429, _) | (_, "rate_limit_error") => " Retry after quota resets or reduce request rate.",
-        (529, _) | (_, "overloaded_error") => {
-            " Retry later or switch to another available provider/model."
+    } else if is_overload {
+        match when {
+            Some(when) => {
+                format!(" Retry after {when} or switch to another available provider/model.")
+            }
+            None => String::from(" Retry later or switch to another available provider/model."),
         }
-        _ => "",
+    } else {
+        String::new()
+    }
+}
+
+/// Render a `Retry-After` header value for humans. A bare integer is
+/// delta-seconds (formatted as `90s` / `1m30s`); anything else (an HTTP-date)
+/// is passed through trimmed.
+fn format_retry_after(raw: &str) -> String {
+    let trimmed = raw.trim();
+    match trimmed.parse::<u64>() {
+        Ok(secs) if secs >= 60 => {
+            let minutes = secs / 60;
+            let seconds = secs % 60;
+            if seconds == 0 {
+                format!("{minutes}m")
+            } else {
+                format!("{minutes}m{seconds}s")
+            }
+        }
+        Ok(secs) => format!("{secs}s"),
+        Err(_) => trimmed.to_owned(),
     }
 }
 
@@ -1899,6 +1939,7 @@ mod tests {
         let error = classify_error(
             429,
             r#"{"type":"error","error":{"type":"rate_limit_error","message":"Quota exceeded"}}"#,
+            None,
         );
 
         assert_eq!(
@@ -1912,16 +1953,49 @@ mod tests {
         let auth = classify_error(
             401,
             r#"{"errors":[{"type":"authentication_error","message":"bad token"}]}"#,
+            None,
         );
         assert_eq!(
             auth,
             "API request failed with HTTP 401 (authentication_error): bad token Check provider credentials and authentication mode."
         );
 
-        let plain = classify_error(529, "upstream unavailable");
+        let plain = classify_error(529, "upstream unavailable", None);
         assert_eq!(
             plain,
             "API request failed with HTTP 529: upstream unavailable Retry later or switch to another available provider/model."
+        );
+    }
+
+    #[test]
+    fn classifies_rate_limit_with_retry_after_seconds() {
+        let error = classify_error(
+            429,
+            r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#,
+            Some("90"),
+        );
+        assert_eq!(
+            error,
+            "API request failed with HTTP 429 (rate_limit_error): slow down Retry after 1m30s or reduce request rate."
+        );
+
+        // A sub-minute delay stays in seconds; a 503 overload uses the same hint.
+        let overload = classify_error(503, "upstream busy", Some("20"));
+        assert_eq!(
+            overload,
+            "API request failed with HTTP 503: upstream busy Retry after 20s or switch to another available provider/model."
+        );
+    }
+
+    #[test]
+    fn retry_after_passes_through_http_date_and_formats_seconds() {
+        assert_eq!(super::format_retry_after("45"), "45s");
+        assert_eq!(super::format_retry_after("120"), "2m");
+        assert_eq!(super::format_retry_after("3661"), "61m1s");
+        // Non-numeric values (HTTP-date form) are passed through trimmed.
+        assert_eq!(
+            super::format_retry_after(" Wed, 21 Oct 2025 07:28:00 GMT "),
+            "Wed, 21 Oct 2025 07:28:00 GMT"
         );
     }
 
