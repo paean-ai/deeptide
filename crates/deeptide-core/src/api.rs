@@ -644,7 +644,7 @@ fn tool_schemas() -> Vec<WireTool> {
     vec![
         WireTool {
             name: "Read",
-            description: "Read a text file from the current workspace. Relative paths are resolved against the current working directory.",
+            description: "Reads a file from the local filesystem and returns its contents with line numbers.\n- The file_path may be absolute or relative; relative paths resolve against the current workspace.\n- By default reads up to 2000 lines from the start of the file. Use offset (1-based) and limit to read a specific range; when you already know the part you need, read only that range.\n- Results are returned in \"line number + tab\" format - everything after the tab is the actual file content. Never include the line-number prefix when constructing old_string for the Edit tool.\n- This tool reads text files only, not directories. To list a directory use Glob; to search inside files use Grep.\n- Output is self-bounded and never silently cropped: if a range is too large the tool returns a clear error - retry with a smaller offset/limit, or use Grep to locate content first. When the default 2000-line limit is reached, the result reports the next offset to continue from.\n- If the file does not exist, the error suggests a Glob pattern to locate it.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -673,7 +673,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "ReadFiles",
-            description: "Read multiple text files in one ordered result. Use this when inspecting several known paths.",
+            description: "Reads multiple text files in one ordered result.\n- Provide paths as an array of file paths; relative paths resolve against the current workspace.\n- Up to 50 files per call; split larger sets into multiple calls.\n- Each file is returned under a \"===== path =====\" separator with line numbers, up to 2000 lines per file.\n- The combined output is capped (~60000 estimated tokens); once the cap is reached the remaining files are skipped with a notice.\n- Prefer this over many parallel Read calls when inspecting several known paths before acting.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -727,7 +727,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "WebFetch",
-            description: "Fetch web content over HTTP or HTTPS and return readable text with response diagnostics.",
+            description: "Fetches content from a URL, converts HTML to readable text, and returns it with response diagnostics.\n- The url must be a fully-formed http or https URL; the prompt describes what to extract from the page.\n- This tool is read-only and does not modify files.\n- The result includes the HTTP status, the final URL after redirects, the content type, and selected response headers.\n- Non-2xx responses are returned as tool errors with status, headers, final URL, and a short diagnostic - use those details to diagnose failures rather than assuming the page was fetched.\n- When a URL redirects to a different host, the final URL is reported; make a new WebFetch call with it if you need the redirected content.\n- For GitHub URLs, prefer the gh CLI via Bash (e.g. gh pr view, gh issue view, gh api) - faster and structured.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -740,7 +740,7 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "WebSearch",
-            description: "Search the web using configured Brave Search or Serper credentials.",
+            description: "Searches the web and returns results.\n- The query parameter is required and should be a descriptive search query.\n- Use allowed_domains and blocked_domains to restrict or exclude result domains.\n- Requires configured Brave Search or Serper credentials.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1794,6 +1794,11 @@ mod tests {
         assert!(describe("Grep").contains("head_limit caps results (default 250"));
         assert!(describe("Edit").contains("old_string not found"));
         assert!(describe("Write").contains("NEVER create documentation files"));
+        assert!(describe("Read").contains("line number + tab"));
+        assert!(describe("Read").contains("up to 2000 lines"));
+        assert!(describe("ReadFiles").contains("Up to 50 files per call"));
+        assert!(describe("WebFetch").contains("final URL after redirects"));
+        assert!(describe("WebSearch").contains("allowed_domains and blocked_domains"));
     }
 
     #[test]
