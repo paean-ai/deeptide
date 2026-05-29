@@ -2773,6 +2773,7 @@ fn search_memory(query: &str, scope: &str, max_results: usize, cwd: &Path) -> To
     for (scope_label, dir) in dirs {
         collect_memory_hits(scope_label, &dir, &needle, &mut hits);
     }
+    // Stable de-dup by path before ranking (path order keeps it deterministic).
     hits.sort_by(|left, right| {
         left.scope
             .cmp(right.scope)
@@ -2784,22 +2785,52 @@ fn search_memory(query: &str, scope: &str, max_results: usize, cwd: &Path) -> To
         return ToolResult::text("No matching Deeptide memory files found.");
     }
 
+    // Rank by BM25 + a mild recency nudge. Newest file → recency 1.0, oldest →
+    // 0.0; single-file corpora get 1.0. The ranker drops zero-overlap docs, so
+    // irrelevant files never surface — same guarantee as the old substring
+    // filter, but now ordered by relevance instead of path.
+    let (min_mtime, max_mtime) = hits.iter().fold((f64::MAX, f64::MIN), |(lo, hi), h| {
+        (lo.min(h.mtime_secs), hi.max(h.mtime_secs))
+    });
+    let span = (max_mtime - min_mtime).max(1.0);
+    let docs: Vec<crate::memory_rank::RankDoc> = hits
+        .iter()
+        .map(|h| crate::memory_rank::RankDoc {
+            id: h.path.display().to_string(),
+            text: h.text.clone(),
+            recency: if max_mtime <= min_mtime {
+                1.0
+            } else {
+                (h.mtime_secs - min_mtime) / span
+            },
+        })
+        .collect();
+
+    let ranked = crate::memory_rank::rank(query, &docs, max_results);
+    if ranked.is_empty() {
+        return ToolResult::text("No matching Deeptide memory files found.");
+    }
+
     ToolResult::text(
-        hits.into_iter()
-            .take(max_results)
-            .map(render_memory_hit)
+        ranked
+            .into_iter()
+            .map(|(idx, _score)| render_memory_hit(hits[idx].clone()))
             .collect::<Vec<_>>()
             .join("\n\n"),
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct MemorySearchHit {
     scope: &'static str,
     path: PathBuf,
     title: String,
     description: Option<String>,
     matching_line: Option<String>,
+    /// Full searchable text (title + description + body), for BM25 ranking.
+    text: String,
+    /// Modification time in seconds since the epoch, for the recency nudge.
+    mtime_secs: f64,
 }
 
 fn memory_search_dirs(scope: &str, cwd: &Path) -> Vec<(&'static str, PathBuf)> {
@@ -2841,9 +2872,16 @@ fn collect_memory_hits(
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        if !content.to_ascii_lowercase().contains(needle) {
-            continue;
-        }
+        // No substring pre-filter: collect every candidate and let BM25 ranking
+        // (in search_memory) decide relevance and order. Zero-overlap docs are
+        // dropped by the ranker, so irrelevant files still never surface.
+        let mtime_secs = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
         let frontmatter = extract_frontmatter(&path);
         let title = frontmatter
             .iter()
@@ -2861,12 +2899,18 @@ fn collect_memory_hits(
             .find(|(key, _)| key == "description")
             .map(|(_, value)| value.to_owned());
         let matching_line = first_matching_memory_line(needle, &content);
+        let text = format!(
+            "{title}\n{}\n{content}",
+            description.as_deref().unwrap_or("")
+        );
         hits.push(MemorySearchHit {
             scope,
             path,
             title,
             description,
             matching_line,
+            text,
+            mtime_secs,
         });
     }
 }
