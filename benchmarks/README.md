@@ -13,20 +13,19 @@ and **real ¥ cost/session** against the live API.
 DEEPSEEK_API_KEY=sk-... python3 benchmarks/auto_capture_bench.py
 ```
 
-### Measured result (2026-05-29, deepseek-v4-flash, 3 sessions)
+### Measured result (2026-05-29, 3 sessions) — flash vs pro
 
-```
-durable-fact recall : 7/7 = 100%
-false-positive rate : 0/5 = 0%      (skipped "fix line 42", "restart staging", "2+2", "token expires today")
-tokens              : in=649  out=530
-est. cost           : ¥0.0010 / session
-VERDICT: GOOD — accurate and cheap enough to run every session
-```
+| Model | recall | false-pos | out tokens | ¥/session |
+|-------|-------:|----------:|-----------:|----------:|
+| `deepseek-v4-flash` (default) | 7/7 = 100% | 0/5 = 0% | 530 | **¥0.0010** |
+| `deepseek-v4-pro`             | 7/7 = 100% | 0/5 = 0% | 990 | ¥0.0048 |
 
-Token counts are authoritative (from the API `usage` field); the ¥ figure uses
-listed flash pricing. ~¥0.001/session is far below the ¥0.01 dashboard display
-resolution, so it won't move the balance visibly — but it's real and trivially
-affordable. Auto-capture runs on the cheap `deepseek-v4-flash` tier by design.
+Both skip the ephemeral distractors ("fix line 42", "restart staging", "2+2",
+"token expires today"). **Identical quality — pro costs ~5× more (verbose +
+pricier) for no gain**, which is exactly why auto-capture runs on the cheap
+`deepseek-v4-flash` tier. Token counts are authoritative (API `usage`); ¥ uses
+listed pricing. ~¥0.001/session is below the ¥0.01 dashboard resolution — real
+but trivially affordable to run every session.
 
 ---
 

@@ -17,18 +17,22 @@ Usage:
     DEEPSEEK_API_KEY=sk-... python3 benchmarks/auto_capture_bench.py
 """
 
+import argparse
 import json
 import os
 import sys
 import urllib.request
 
 API = "https://api.deepseek.com/chat/completions"
-MODEL = "deepseek-v4-flash"  # auto-capture is a cheap background task
+DEFAULT_MODEL = "deepseek-v4-flash"  # auto-capture is a cheap background task
 
-# deepseek-v4-flash published pricing (¥ per 1M tokens). Adjust if it changes;
-# the token counts below are authoritative regardless.
-PRICE_IN_PER_M = 2.0
-PRICE_OUT_PER_M = 3.0
+# Published pricing (¥ per 1M tokens). Adjust if it changes; token counts are
+# authoritative regardless. Pro is pricier — the comparison shows whether its
+# quality justifies the cost for a per-session background task.
+PRICE = {
+    "deepseek-v4-flash": (2.0, 3.0),
+    "deepseek-v4-pro": (4.0, 12.0),
+}
 
 
 def post(key, body):
@@ -100,6 +104,13 @@ def contains_any(haystack, phrases):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help="deepseek-v4-flash (default, cheap) or deepseek-v4-pro")
+    args = ap.parse_args()
+    MODEL = args.model
+    price_in, price_out = PRICE.get(MODEL, (2.0, 3.0))
+
     key = os.environ.get("DEEPSEEK_API_KEY")
     if not key:
         print("DEEPSEEK_API_KEY not set", file=sys.stderr)
@@ -147,7 +158,7 @@ def main():
 
     recall = total_recalled / total_planted if total_planted else 0.0
     fp_rate = total_fp / total_captured if total_captured else 0.0
-    cost = total_in / 1e6 * PRICE_IN_PER_M + total_out / 1e6 * PRICE_OUT_PER_M
+    cost = total_in / 1e6 * price_in + total_out / 1e6 * price_out
     per_session = cost / len(SESSIONS)
 
     print("\n================ RESULT ================")
@@ -155,7 +166,7 @@ def main():
     print(f"false-positive rate : {total_fp}/{total_captured} = {fp_rate:.0%}")
     print(f"tokens              : in={total_in}  out={total_out}  ({len(SESSIONS)} sessions)")
     print(f"est. cost           : ¥{cost:.4f} total  =>  ¥{per_session:.4f}/session")
-    print("(token counts are authoritative; ¥ uses listed flash pricing — confirm via dashboard delta)")
+    print(f"(token counts authoritative; ¥ uses listed {MODEL} pricing {price_in}/{price_out} per 1M — confirm via dashboard delta)")
     verdict_ok = recall >= 0.8 and fp_rate <= 0.2 and per_session < 0.01
     print("VERDICT:", "GOOD — accurate and cheap enough to run every session"
           if verdict_ok else "NEEDS REVIEW — check recall / false-pos / cost above")
