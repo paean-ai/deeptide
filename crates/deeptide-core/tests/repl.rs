@@ -1604,6 +1604,38 @@ fn repl_resume_session_method_restores_and_continues_same_id() {
 }
 
 #[test]
+fn repl_with_additional_dirs_registers_existing_and_skips_non_dirs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(temp.path().join("sub")).expect("mkdir sub");
+
+    let mut repl = ReplSession::new(Box::new(StaticBackend))
+        .with_cwd(temp.path())
+        .with_additional_dirs(&[
+            std::path::PathBuf::from("sub"),
+            std::path::PathBuf::from("does-not-exist"),
+            // Duplicate of the first; must not register twice.
+            std::path::PathBuf::from("sub"),
+        ]);
+
+    // /add-dir with no args lists the registered dirs.
+    let listing = only_output(repl.submit("/add-dir"));
+    assert!(
+        listing.contains("sub"),
+        "existing dir should be registered: {listing}"
+    );
+    assert!(
+        !listing.contains("does-not-exist"),
+        "non-directory must be skipped: {listing}"
+    );
+    // Registered exactly once (dedup): only one path line mentioning the sub dir.
+    assert_eq!(
+        listing.matches("/sub").count(),
+        1,
+        "duplicate --add-dir must register once: {listing}"
+    );
+}
+
+#[test]
 fn repl_no_session_persistence_skips_autosave() {
     use deeptide_core::SessionStore;
 

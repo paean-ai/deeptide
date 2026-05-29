@@ -186,6 +186,19 @@ impl ReplSession {
         self
     }
 
+    /// Pre-register additional context directories (from `--add-dir`), resolving
+    /// each against the session cwd. Non-directories and duplicates are skipped.
+    /// Mirrors registering them via the `/add-dir` command at startup.
+    pub fn with_additional_dirs(mut self, dirs: &[std::path::PathBuf]) -> Self {
+        for dir in dirs {
+            let resolved = resolve_session_dir(&dir.to_string_lossy(), &self.tool_context.cwd);
+            if resolved.is_dir() && !self.additional_dirs.contains(&resolved) {
+                self.additional_dirs.push(resolved);
+            }
+        }
+        self
+    }
+
     /// Append `text` after the current system prompt (from
     /// `--append-system-prompt`). Empty/whitespace text is ignored.
     pub fn with_appended_system_prompt(mut self, text: &str) -> Self {
