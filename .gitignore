@@ -16,6 +16,12 @@ bun.lockb
 target/
 **/*.rs.bk
 
+# `deeptide-rs` npm package: the postinstall downloader drops the
+# platform-specific Rust binary into npm/deeptide-rs/binary/ on
+# `npm install`. Tracking it would balloon the repo and is the
+# release pipeline's responsibility, not git's.
+npm/deeptide-rs/binary/
+
 # Native runtime build outputs. Source under native/ is intentionally tracked.
 native/ds4/ds4
 native/ds4/ds4-server

@@ -18,25 +18,34 @@
 
 ---
 
-## Two flavors, same team
+## Three flavors, same team
 
-| | DeepTide for macOS | DeepTide CLI |
-|---|---|---|
-| **Form factor** | Native macOS app | Cross-platform terminal CLI |
-| **Runtime** | Swift 6 native binary, ~15 MB idle | Bun, ~50 MB resident |
-| **Platforms** | macOS 15+ | Linux · Windows · macOS |
-| **Install** | `curl -fsSL https://deeptide.sh/install.sh \| sh` | `bun add -g deeptide` (this package) |
-| **Lineage** | 100% authored by DeepSeek V4 | Powered by open-source [Zero CLI](https://github.com/a8e-ai/zero-cli) |
-| **Best for** | macOS users who want a tuned native experience | Linux/Windows users, CI, SSH sessions, headless boxes |
+| | DeepTide for macOS | DeepTide CLI (`deeptide`) | DeepTide CLI Rust (`deeptide-rs`) |
+|---|---|---|---|
+| **Form factor** | Native macOS app | Cross-platform terminal CLI | Cross-platform terminal CLI |
+| **Runtime** | Swift 6 native binary, ~15 MB idle | Bun, ~50 MB resident | Native Rust binary, ~10 MB on disk, no runtime |
+| **Platforms** | macOS 15+ | Linux · Windows · macOS | Linux · Windows · macOS |
+| **Install** | `curl -fsSL https://deeptide.sh/install.sh \| sh` | `bun add -g deeptide` (this package) | `npm install -g deeptide-rs` |
+| **CLI name(s)** | DeepTide.app | `deeptide`, `tide` | `deeptide-rs` |
+| **Lineage** | 100% authored by DeepSeek V4 | Powered by open-source [Zero CLI](https://github.com/a8e-ai/zero-cli) | Authored under [`crates/`](./crates) in this repo |
+| **Best for** | macOS users who want a tuned native experience | Existing users; richest plugin surface | Headless CI, slow laptops, single-binary deploys |
 
-This repository is the **community front door for both** — docs, FAQ, issue
-tracking — and is the home of the npm `deeptide` package that ships the
-cross-platform CLI.
+This repository is the **community front door for all three** — docs, FAQ,
+issue tracking — and is the home of two npm packages:
 
-An experimental Rust workspace now also lives under [`crates/`](./crates).
-That port is intended to replace the current Bun-based cross-platform CLI over
-time, with behavior matched against the Swift Deeptide implementation in small,
-reviewable increments.
+- [`deeptide`](./package.json) — the current TypeScript/Bun CLI (forwards to
+  [`@paean-ai/zero-cli`](https://www.npmjs.com/package/@paean-ai/zero-cli))
+- [`deeptide-rs`](./npm/deeptide-rs) — the Rust CLI (ships a native binary
+  via GitHub Releases postinstall)
+
+The two CLI packages **do not conflict** — they expose different binary
+names (`deeptide`/`tide` vs `deeptide-rs`) so you can install both and
+switch between them freely while we mature the Rust port.
+
+The Rust port lives under [`crates/`](./crates). It is intended to grow
+into the canonical cross-platform CLI over time, but the `deeptide` package
+will remain available as long as users find value in it — there is no
+forced migration.
 
 It also contains the open-source native local inference runtime under
 [`native/`](./native): a hard-forked `ds4` DeepSeek V4 Flash Metal engine plus

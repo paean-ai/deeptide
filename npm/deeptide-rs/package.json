@@ -1,0 +1,48 @@
+{
+  "name": "deeptide-rs",
+  "version": "0.1.0",
+  "description": "DeepTide CLI — Rust implementation. Cross-platform native binary. Sibling to the `deeptide` (TypeScript/Bun) package; install either side-by-side without conflict.",
+  "type": "module",
+  "bin": {
+    "deeptide-rs": "./bin.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js",
+    "test:install": "node install.js",
+    "check:npm-files": "npm pack --dry-run"
+  },
+  "files": [
+    "bin.js",
+    "install.js",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paean-ai/deeptide.git",
+    "directory": "npm/deeptide-rs"
+  },
+  "homepage": "https://github.com/paean-ai/deeptide/tree/deeptide-rs/npm/deeptide-rs#readme",
+  "bugs": {
+    "url": "https://github.com/paean-ai/deeptide/issues"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "coding-agent",
+    "agent",
+    "terminal",
+    "deeptide",
+    "tide",
+    "rust",
+    "anthropic-protocol",
+    "deepseek"
+  ],
+  "author": "a8e",
+  "license": "MIT",
+  "preferUnplugged": true
+}

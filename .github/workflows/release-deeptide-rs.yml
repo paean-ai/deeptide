@@ -1,0 +1,243 @@
+name: Release deeptide-rs
+
+# Builds platform-specific Rust binaries for the `deeptide-rs` npm
+# package and uploads them to a GitHub Release. The npm package's
+# postinstall script (`npm/deeptide-rs/install.js`) downloads from
+# `https://github.com/paean-ai/deeptide/releases/download/
+# deeptide-rs-v<version>/deeptide-rs-<os>-<arch>.<ext>` so the
+# release tag MUST be of the form `deeptide-rs-v<version>` for the
+# downloader to find its artifacts.
+#
+# Trigger via:
+#   * Push of a tag matching `deeptide-rs-v*` (recommended path)
+#   * `workflow_dispatch` with `version` input (manual / dry-run)
+#
+# Required secrets when `publish_npm: true`:
+#   * NPM_TOKEN — npm "Automation" token scoped to `deeptide-rs` only
+
+on:
+  push:
+    tags: ['deeptide-rs-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 0.1.0). For tag pushes this is derived automatically."
+        required: false
+        type: string
+      publish_npm:
+        description: "Publish the npm package after the release is created."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write   # for creating the GitHub Release
+  id-token: write   # for npm provenance attestations
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-aarch64
+            runner: macos-14
+            rust_target: aarch64-apple-darwin
+            archive: tar.gz
+          - target: darwin-x86_64
+            runner: macos-13
+            rust_target: x86_64-apple-darwin
+            archive: tar.gz
+          - target: linux-x86_64
+            runner: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - target: linux-aarch64
+            runner: ubuntu-latest
+            rust_target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
+          - target: windows-x86_64
+            runner: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -eu
+          tag="${{ github.ref_name }}"
+          if [[ "$tag" == deeptide-rs-v* ]]; then
+            version="${tag#deeptide-rs-v}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          if [ -z "$version" ]; then
+            echo "Could not resolve a version (no tag, no inputs.version)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Target version: $version"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Per-target cache: prevents one matrix leg's artifacts from
+          # leaking into another and causing spurious "wrong ELF class"
+          # link errors when cross-compiling between Linux glibc and
+          # musl-style targets.
+          key: ${{ matrix.rust_target }}
+
+      - name: Install cross (for non-host Linux targets)
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -eu
+          if [ "${{ matrix.cross || false }}" = "true" ]; then
+            cross build --release --target ${{ matrix.rust_target }} -p deeptide-cli
+          else
+            cargo build --release --target ${{ matrix.rust_target }} -p deeptide-cli
+          fi
+
+      - name: Package artifact
+        id: pkg
+        shell: bash
+        run: |
+          set -eu
+          version="${{ steps.ver.outputs.version }}"
+          target="${{ matrix.target }}"
+          archive="${{ matrix.archive }}"
+          out="deeptide-rs-${target}.${archive}"
+          stage="$(mktemp -d)"
+          # The downloader expects the binary at the archive root,
+          # named `deeptide` (or `deeptide.exe` on Windows). We do
+          # NOT include extra metadata files — the npm package
+          # already ships LICENSE / NOTICE / README to the install
+          # target, so duplicating them here would just bloat the
+          # download.
+          if [ "${{ matrix.target }}" = "windows-x86_64" ]; then
+            cp target/${{ matrix.rust_target }}/release/deeptide.exe "$stage/deeptide.exe"
+            ( cd "$stage" && 7z a -tzip "${GITHUB_WORKSPACE}/$out" deeptide.exe )
+          else
+            cp target/${{ matrix.rust_target }}/release/deeptide "$stage/deeptide"
+            chmod +x "$stage/deeptide"
+            tar -C "$stage" -czf "$out" deeptide
+          fi
+          # Emit a sha256 so users can verify out-of-band downloads.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$out" > "$out.sha256"
+          else
+            shasum -a 256 "$out" > "$out.sha256"
+          fi
+          echo "archive=$out" >> "$GITHUB_OUTPUT"
+          ls -lh "$out" "$out.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deeptide-rs-${{ matrix.target }}
+          path: |
+            ${{ steps.pkg.outputs.archive }}
+            ${{ steps.pkg.outputs.archive }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -eu
+          tag="${{ github.ref_name }}"
+          if [[ "$tag" == deeptide-rs-v* ]]; then
+            version="${tag#deeptide-rs-v}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          if [ -z "$version" ]; then
+            echo "Could not resolve a version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: deeptide-rs-v${{ steps.ver.outputs.version }}
+          name: "deeptide-rs v${{ steps.ver.outputs.version }}"
+          # The body is short by design — the npm README is the
+          # source of truth for what the package is and how to use
+          # it. The release page just lists the assets.
+          body: |
+            Rust implementation of the DeepTide CLI.
+
+            **npm:**
+            ```
+            npm install -g deeptide-rs@${{ steps.ver.outputs.version }}
+            ```
+
+            **Manual install:** download the matching archive below
+            and extract `deeptide` into a directory on your `PATH`.
+            Verify against the matching `.sha256` file.
+          files: |
+            artifacts/*
+
+  publish-npm:
+    name: Publish to npm
+    needs: release
+    if: ${{ inputs.publish_npm || startsWith(github.ref, 'refs/tags/deeptide-rs-v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -eu
+          tag="${{ github.ref_name }}"
+          if [[ "$tag" == deeptide-rs-v* ]]; then
+            version="${tag#deeptide-rs-v}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Sync package.json version to release tag
+        working-directory: npm/deeptide-rs
+        run: |
+          set -eu
+          npm pkg set version="${{ steps.ver.outputs.version }}"
+          # Show the result so it's visible in the run log.
+          npm pkg get version
+
+      - name: Publish
+        working-directory: npm/deeptide-rs
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
