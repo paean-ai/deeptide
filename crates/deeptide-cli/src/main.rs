@@ -248,6 +248,13 @@ struct Cli {
         help = "Do not autosave conversation turns to disk (privacy / scratch sessions)."
     )]
     no_session_persistence: bool,
+
+    #[arg(
+        long = "settings",
+        value_name = "PATH",
+        help = "Merge an explicit settings.json file on top of the global/project/local scopes."
+    )]
+    settings: Option<PathBuf>,
 }
 
 fn main() {
@@ -276,9 +283,15 @@ fn run(mut cli: Cli) -> Result<(), String> {
         return Ok(());
     }
 
-    // Load settings.json (global ← project ← local) and apply as fallbacks.
-    // Explicit CLI flags and environment variables always take precedence.
-    let cfg = ConfigStore::load(&cwd);
+    // Load settings.json (global ← project ← local), plus an explicit
+    // --settings file on top, then apply as fallbacks. Explicit CLI flags and
+    // environment variables always take precedence.
+    if let Some(path) = cli.settings.as_ref()
+        && !path.exists()
+    {
+        return Err(format!("--settings file not found: {}", path.display()));
+    }
+    let cfg = ConfigStore::load_with_override(&cwd, cli.settings.as_deref());
     cfg.apply_env();
     apply_config_fallbacks(&mut cli, &cfg);
 
@@ -1203,6 +1216,7 @@ mod tests {
             resume: None,
             list_sessions: false,
             no_session_persistence: false,
+            settings: None,
         }
     }
 

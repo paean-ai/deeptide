@@ -404,6 +404,17 @@ impl ConfigStore {
         global.merge(project).merge(local)
     }
 
+    /// Like [`load`], but merges an explicit settings file on top of the
+    /// canonical scopes (highest precedence). Used by the `--settings <file>`
+    /// flag for ad-hoc or CI configurations.
+    pub fn load_with_override(cwd: &Path, settings_file: Option<&Path>) -> ConfigData {
+        let base = Self::load(cwd);
+        match settings_file {
+            Some(path) => base.merge(Self::read_file(path)),
+            None => base,
+        }
+    }
+
     fn read_file(path: &Path) -> ConfigData {
         std::fs::read_to_string(path)
             .ok()
@@ -636,6 +647,23 @@ impl ConfigStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_with_override_merges_explicit_settings_file_on_top() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cwd = temp.path();
+
+        // No override → same as load (empty in a bare tempdir).
+        assert!(ConfigStore::load_with_override(cwd, None).model.is_none());
+
+        // An explicit settings file's values take precedence.
+        let settings = temp.path().join("custom.json");
+        std::fs::write(&settings, r#"{"model":"from-settings-file","max_turns":7}"#)
+            .expect("write settings");
+        let merged = ConfigStore::load_with_override(cwd, Some(&settings));
+        assert_eq!(merged.model.as_deref(), Some("from-settings-file"));
+        assert_eq!(merged.max_turns, Some(7));
+    }
 
     #[test]
     fn config_data_merge_other_wins() {
