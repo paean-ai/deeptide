@@ -532,10 +532,19 @@ pub fn truncate_memory(text: &str) -> String {
         } else {
             format!("{} KB", MEMORY_MAX_BYTES / 1024)
         };
+        // Always point at MemorySearch; include the dropped-line count only when
+        // real content was cut (a cut through trailing blank lines drops 0 and
+        // "0 more lines" would read oddly).
+        let tail = if dropped > 0 {
+            format!(
+                "{dropped} more line{} available via MemorySearch",
+                if dropped == 1 { "" } else { "s" }
+            )
+        } else {
+            String::from("more available via MemorySearch")
+        };
         out.push_str(&format!(
-            "\n\n...(memory core capped at {why} per tide-spec/0.1 section 13.1; \
-             {dropped} more line{} available via MemorySearch)...",
-            if dropped == 1 { "" } else { "s" }
+            "\n\n...(memory core capped at {why} per tide-spec/0.1 section 13.1; {tail})..."
         ));
     }
 

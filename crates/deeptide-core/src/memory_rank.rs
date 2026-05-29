@@ -44,6 +44,24 @@ pub fn tokenize(text: &str) -> Vec<String> {
     out
 }
 
+/// High-frequency closed-class words that carry no retrieval signal. Filtered
+/// from the *query* before scoring so a document can't surface merely because
+/// it shares a word like `is` / `to` / `on` with the query. Applied only here,
+/// not in [`tokenize`] — `memory_hygiene` reuses `tokenize` for duplicate
+/// detection, where these words still legitimately count toward overlap.
+const STOPWORDS: &[&str] = &[
+    "the", "an", "and", "or", "but", "if", "is", "are", "was", "were", "be", "been", "to", "of",
+    "in", "on", "at", "by", "for", "with", "from", "into", "as", "it", "its", "this", "that",
+    "these", "those", "do", "does", "did", "you", "we", "they", "he", "she", "my", "me", "our",
+    "us", "your", "what", "which", "who", "when", "where", "how", "why", "can", "will", "would",
+    "should", "could", "has", "have", "had", "not", "no", "so", "than", "then", "there", "here",
+    "about", "over", "under",
+];
+
+fn is_stopword(term: &str) -> bool {
+    STOPWORDS.contains(&term)
+}
+
 /// BM25 weight given to the recency nudge. Deliberately tiny: recency is
 /// normalized relative to the matched set, so a sub-second mtime gap can span
 /// the full `[0, 1]` range. Keeping the weight well below a single matched
@@ -61,10 +79,23 @@ pub fn rank(query: &str, docs: &[RankDoc], k: usize) -> Vec<(usize, f64)> {
     if docs.is_empty() {
         return Vec::new();
     }
-    let query_terms = tokenize(query);
-    if query_terms.is_empty() {
+    let all_terms = tokenize(query);
+    if all_terms.is_empty() {
         return Vec::new();
     }
+    // Drop stopwords so a doc can't match purely on a shared `is`/`to`/`on`.
+    // If the query is *all* stopwords, fall back to the raw terms so a
+    // degenerate query still behaves rather than silently returning nothing.
+    let content_terms: Vec<String> = all_terms
+        .iter()
+        .filter(|t| !is_stopword(t))
+        .cloned()
+        .collect();
+    let query_terms = if content_terms.is_empty() {
+        all_terms
+    } else {
+        content_terms
+    };
 
     let doc_terms: Vec<Vec<String>> = docs.iter().map(|d| tokenize(&d.text)).collect();
     let doc_len: Vec<f64> = doc_terms.iter().map(|t| t.len() as f64).collect();

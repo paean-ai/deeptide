@@ -181,6 +181,35 @@ fn irrelevant_query_returns_nothing() {
     assert!(ranked.is_empty(), "should not surface unrelated entries");
 }
 
+/// A document that overlaps the query only on stopwords (`the`/`is`/`on`) must
+/// not surface — even with maximal recency — while the document sharing the one
+/// content word does. Without query-side stopword filtering the stopword-only
+/// doc would score > 0 and leak in (this test fails on that regression).
+#[test]
+fn stopword_only_overlap_does_not_surface() {
+    let docs = vec![
+        RankDoc {
+            id: "content-match".to_owned(),
+            text: "Vectorize embeddings live in the index.".to_owned(),
+            recency: 0.0,
+        },
+        RankDoc {
+            id: "stopword-only".to_owned(),
+            text: "The build is on the runner over there.".to_owned(),
+            recency: 1.0,
+        },
+    ];
+    let ids: Vec<&str> = rank("what is the vectorize on the disk", &docs, 10)
+        .into_iter()
+        .map(|(i, _)| docs[i].id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["content-match"],
+        "stopword-only overlap must not surface a document; got {ids:?}"
+    );
+}
+
 #[test]
 fn ranking_is_deterministic() {
     let docs = corpus();

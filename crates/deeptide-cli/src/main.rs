@@ -900,7 +900,32 @@ fn run_interactive(
                 // skipped every Ctrl-D exit. `finalize_session` emits Output
                 // events only (it never returns Exit), so we render and break.
                 writeln!(stdout).map_err(|error| error.to_string())?;
-                for event in repl.finalize_session() {
+
+                // The pass runs an agent round-trip; animate the same spinner as
+                // a normal turn so it isn't a silent hang. (No-op without color;
+                // the 150ms grace means it never flashes when there's no pass.)
+                did_stream.store(false, Ordering::Relaxed);
+                output_started.store(false, Ordering::Relaxed);
+                spinner_stop.store(false, Ordering::Relaxed);
+                let spinner_handle = if use_color {
+                    let stop = Arc::clone(&spinner_stop);
+                    let started = Arc::clone(&output_started);
+                    let lock = Arc::clone(&spinner_lock);
+                    Some(thread::spawn(move || {
+                        run_spinner(&stop, &started, &lock, true)
+                    }))
+                } else {
+                    None
+                };
+
+                let events = repl.finalize_session();
+
+                spinner_stop.store(true, Ordering::Relaxed);
+                if let Some(handle) = spinner_handle {
+                    let _ = handle.join();
+                }
+
+                for event in events {
                     if let ReplEvent::Output(text) = event {
                         if did_stream.swap(false, Ordering::Relaxed) {
                             writeln!(stdout).map_err(|error| error.to_string())?;
