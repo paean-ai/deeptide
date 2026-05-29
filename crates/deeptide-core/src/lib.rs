@@ -10,6 +10,7 @@ pub mod embedded_protocol;
 pub mod hooks;
 pub mod markdown;
 pub mod memory;
+pub mod memory_hygiene;
 pub mod memory_rank;
 pub mod permissions;
 pub mod prompt;
