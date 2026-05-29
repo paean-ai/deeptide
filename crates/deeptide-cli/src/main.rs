@@ -13,7 +13,7 @@ use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
     CommandCompletionSource, CompletionEngine, LocalEchoBackend, ModelPricing, ReplEvent,
-    ReplSession, StreamingEvent, StreamingHandler, ThinkingConfig, tui,
+    ReplSession, StatusSegment, StreamingEvent, StreamingHandler, ThinkingConfig, tui,
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -792,6 +792,14 @@ fn run_interactive(
         status_bar::rustyline_safe(&raw_prompt, status_bar::palette::PROMPT, use_color)
     };
 
+    // Auth indicator state. `is_configured` (computed from
+    // `effective_credential`) is the inference-side API key result and is
+    // stable for the lifetime of the session. The Paean publish token is
+    // probed each repaint because it's environmental and could in principle
+    // change mid-session; the call is just env-var reads and is cheap.
+    let api_key_resolved = is_configured;
+    let mut auth_paint_tick: u64 = 0;
+
     loop {
         // Paint the status bar (anchored at row N, OR inline above the
         // prompt as a safe fallback when anchoring isn't available).
@@ -799,7 +807,12 @@ fn run_interactive(
             .as_ref()
             .map(status_bar::AnchoredStatusBar::cols)
             .unwrap_or_else(|| terminal_width().unwrap_or(100));
-        let bar_text = repl.status_line().render(bar_width);
+        let auth_segment =
+            build_auth_segment(api_key_resolved, paean_token_resolved(), auth_paint_tick);
+        auth_paint_tick = auth_paint_tick.wrapping_add(1);
+        let bar_text = repl
+            .status_line_with_auth(Some(auth_segment))
+            .render(bar_width);
         let bar_styled = status_bar::dim(&bar_text, use_color);
         if let Some(bar) = anchored.as_mut() {
             bar.repaint(&bar_styled, &spinner_lock);
@@ -1616,6 +1629,44 @@ fn effective_credential(cli: &Cli) -> Option<CloudCredential> {
     None
 }
 
+/// Returns `true` when a Paean publishing token is exported in the
+/// environment. Paean today only powers `/publish` (skill upload to
+/// api.paean.ai); inference still routes through Anthropic-compatible
+/// providers via the regular API key chain. The status bar surfaces this so
+/// users can see at a glance whether `/publish` will work without re-reading
+/// `--doctor`.
+fn paean_token_resolved() -> bool {
+    env_first_non_empty(&["PAEAN_API_TOKEN", "PAEAN_TOKEN", "CLIDE_API_TOKEN"]).is_some()
+}
+
+/// Build the status-bar auth segment, rotating between the inference API key
+/// indicator and the Paean publish-token indicator when both are present.
+///
+/// Rotation logic:
+/// - both keys resolved → alternate every paint between `key ok` / `paean ok`
+/// - only API key      → `key ok`
+/// - only Paean token  → `paean ok`
+/// - neither           → `auth —`
+///
+/// `tick` is a monotonically increasing counter (one per status-bar paint).
+/// We don't tie it to wall-clock time because the bar only repaints between
+/// turns; tying to paints keeps the cycle smooth and predictable from the
+/// user's perspective.
+fn build_auth_segment(api_key_resolved: bool, paean_resolved: bool, tick: u64) -> StatusSegment {
+    match (api_key_resolved, paean_resolved) {
+        (true, true) => {
+            if tick.is_multiple_of(2) {
+                StatusSegment::new("key", "ok")
+            } else {
+                StatusSegment::new("paean", "ok")
+            }
+        }
+        (true, false) => StatusSegment::new("key", "ok"),
+        (false, true) => StatusSegment::new("paean", "ok"),
+        (false, false) => StatusSegment::new("auth", "—"),
+    }
+}
+
 fn subagent_backend_factory(
     config: Option<AnthropicConfig>,
 ) -> impl Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static {
@@ -1707,8 +1758,9 @@ impl EnumValue for OutputFormat {
 mod tests {
     use super::{
         Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
-        collect_prompt, configured_backend, effective_base_url, effective_model,
-        normalize_embedded_mode, use_color, validate_formats,
+        build_auth_segment, collect_prompt, configured_backend, effective_base_url,
+        effective_model, normalize_embedded_mode, paean_token_resolved, use_color,
+        validate_formats,
     };
     use clap::Parser;
     use deeptide_core::{AnthropicAuthMode, ConfigData, ProviderProfile, ThinkingConfig};
@@ -1781,6 +1833,9 @@ mod tests {
                 "ANTHROPIC_AUTH_TOKEN",
                 "ZERO_CLI_MODEL",
                 "ANTHROPIC_MODEL",
+                "PAEAN_API_TOKEN",
+                "PAEAN_TOKEN",
+                "CLIDE_API_TOKEN",
             ] {
                 std::env::remove_var(name);
             }
@@ -2748,5 +2803,74 @@ mod tests {
             out.contains("$ 1.10/M") || out.contains("$1.10/M"),
             "expected output price scaled to per-million tokens; got: {out}"
         );
+    }
+
+    #[test]
+    fn auth_segment_shows_key_ok_when_only_api_key_resolved() {
+        let segment = build_auth_segment(true, false, 0);
+        assert_eq!(segment.label, "key");
+        assert_eq!(segment.value, "ok");
+        // Same shape regardless of tick: with no paean token, there's
+        // nothing to rotate to.
+        let segment_later = build_auth_segment(true, false, 999);
+        assert_eq!(segment_later.label, "key");
+    }
+
+    #[test]
+    fn auth_segment_shows_paean_when_only_paean_resolved() {
+        let segment = build_auth_segment(false, true, 0);
+        assert_eq!(segment.label, "paean");
+        assert_eq!(segment.value, "ok");
+    }
+
+    #[test]
+    fn auth_segment_warns_when_neither_resolved() {
+        let segment = build_auth_segment(false, false, 0);
+        assert_eq!(segment.label, "auth");
+        // Em-dash, not the regular minus.
+        assert_eq!(segment.value, "—");
+    }
+
+    #[test]
+    fn auth_segment_rotates_when_both_resolved() {
+        let even = build_auth_segment(true, true, 0);
+        let odd = build_auth_segment(true, true, 1);
+        assert_eq!(even.label, "key");
+        assert_eq!(odd.label, "paean");
+        // Wrap-around at u64::MAX preserves the alternating contract.
+        assert_eq!(build_auth_segment(true, true, u64::MAX).label, "paean");
+        assert_eq!(build_auth_segment(true, true, 2).label, "key");
+    }
+
+    #[test]
+    fn paean_token_resolved_detects_any_supported_env_name() {
+        let _guard = env_guard();
+        clear_api_env();
+        assert!(!paean_token_resolved());
+
+        unsafe {
+            std::env::set_var("PAEAN_TOKEN", "fixture");
+        }
+        assert!(paean_token_resolved());
+
+        clear_api_env();
+        unsafe {
+            std::env::set_var("CLIDE_API_TOKEN", "fixture");
+        }
+        assert!(paean_token_resolved());
+
+        clear_api_env();
+        unsafe {
+            std::env::set_var("PAEAN_API_TOKEN", "fixture");
+        }
+        assert!(paean_token_resolved());
+
+        clear_api_env();
+        // Empty string should not be treated as a resolved token.
+        unsafe {
+            std::env::set_var("PAEAN_API_TOKEN", "");
+        }
+        assert!(!paean_token_resolved());
+        clear_api_env();
     }
 }
