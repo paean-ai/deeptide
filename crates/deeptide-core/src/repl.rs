@@ -73,6 +73,9 @@ pub struct ReplSession {
     /// non-empty, non-slash submissions — slash commands like `/help` should
     /// not advance the dream cadence counter.
     user_turn_count: usize,
+    /// Whether conversation turns are autosaved to disk. Disabled by
+    /// `--no-session-persistence` for privacy / scratch sessions.
+    session_persistence: bool,
 }
 
 /// Configuration + bookkeeping for the persistent dream loop. Default state
@@ -130,6 +133,7 @@ impl ReplSession {
                 .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z")),
             dream_schedule: DreamSchedule::default(),
             user_turn_count: 0,
+            session_persistence: true,
         }
     }
 
@@ -172,6 +176,13 @@ impl ReplSession {
         disallowed: Vec<String>,
     ) -> Self {
         self.agent_loop = self.agent_loop.with_tool_restrictions(allowed, disallowed);
+        self
+    }
+
+    /// Enable or disable autosaving conversation turns to disk. Disabled by
+    /// `--no-session-persistence`.
+    pub fn with_session_persistence(mut self, enabled: bool) -> Self {
+        self.session_persistence = enabled;
         self
     }
 
@@ -372,6 +383,9 @@ impl ReplSession {
     }
 
     fn autosave_session(&self) {
+        if !self.session_persistence {
+            return;
+        }
         SessionStore::save(
             &self.tool_context.cwd,
             &self.session_id,
