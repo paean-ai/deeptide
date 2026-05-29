@@ -164,6 +164,15 @@ impl ToolRegistry {
     pub fn names(&self) -> Vec<&'static str> {
         self.tools.keys().copied().collect()
     }
+
+    /// Each registered tool paired with its read-only flag, in name order.
+    /// Used to render the system prompt's tool index.
+    pub fn tool_index(&self) -> Vec<(&'static str, bool)> {
+        self.tools
+            .values()
+            .map(|tool| (tool.name(), tool.is_read_only()))
+            .collect()
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
