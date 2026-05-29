@@ -149,6 +149,14 @@ struct Cli {
     system_prompt_file: Option<PathBuf>,
 
     #[arg(
+        long = "append-system-prompt",
+        env = "DEEPTIDE_APPEND_SYSTEM_PROMPT",
+        value_name = "TEXT",
+        help = "Text appended after the base system prompt (project + memory, or --system-prompt). Combine with the default prompt rather than replacing it."
+    )]
+    append_system_prompt: Option<String>,
+
+    #[arg(
         long = "no-prompt-cache",
         env = "DEEPTIDE_NO_PROMPT_CACHE",
         action = ArgAction::SetTrue,
@@ -581,6 +589,9 @@ fn run_interactive(
         .with_tool_restrictions(allowed_tools, disallowed_tools)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
+    if let Some(append) = cli.append_system_prompt.as_deref() {
+        repl = repl.with_appended_system_prompt(append);
+    }
 
     let rl_config = rustyline::config::Config::builder()
         .history_ignore_space(true)
@@ -912,17 +923,28 @@ enum CloudCredential {
 /// or `--system-prompt`. Whitespace-only files/values are treated as "no
 /// prompt" — `AnthropicConfig::with_system_prompt` does the same upstream,
 /// but reporting it here gives clearer error semantics for typo-ed paths.
-/// Decide the project system prompt to install on the print-mode agent loop.
+/// Build the system prompt to install on the print-mode agent loop.
 ///
-/// Returns `None` when the user supplied an explicit `--system-prompt` /
-/// `--system-prompt-file` (that override is applied to the backend config and
-/// must win), otherwise `Some(build_system_prompt(cwd))` so non-interactive
-/// runs get the same CLAUDE.md/memory context as the interactive REPL.
+/// The base is the explicit `--system-prompt` / `--system-prompt-file` when
+/// given, otherwise the project prompt (CLAUDE.md/memory) so non-interactive
+/// runs match the interactive REPL. `--append-system-prompt` text, when set, is
+/// appended after the base. Always returns `Some` so the loop carries the
+/// combined prompt directly.
 fn print_mode_system_prompt(cli: &Cli, cwd: &Path) -> Result<Option<String>, String> {
-    if resolve_system_prompt(cli)?.is_some() {
-        return Ok(None);
+    let mut prompt = match resolve_system_prompt(cli)? {
+        Some(explicit) => explicit,
+        None => deeptide_core::build_system_prompt(cwd),
+    };
+    if let Some(append) = cli
+        .append_system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        prompt.push_str("\n\n");
+        prompt.push_str(append);
     }
-    Ok(Some(deeptide_core::build_system_prompt(cwd)))
+    Ok(Some(prompt))
 }
 
 /// Parse the `--allowed-tools` / `--disallowed-tools` comma-separated flags into
@@ -1114,6 +1136,7 @@ mod tests {
             max_turns: 25,
             system_prompt: None,
             system_prompt_file: None,
+            append_system_prompt: None,
             no_prompt_cache: false,
             no_color: false,
             debug: false,
@@ -1650,17 +1673,38 @@ mod tests {
     }
 
     #[test]
-    fn print_mode_defers_to_explicit_system_prompt_flag() {
+    fn print_mode_uses_explicit_system_prompt_flag() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cli = sample_cli();
         cli.system_prompt = Some("custom override".to_owned());
-        // With an explicit flag the loop installs no project prompt; the flag is
-        // applied to the backend config instead and therefore wins.
-        assert!(
-            super::print_mode_system_prompt(&cli, dir.path())
-                .expect("ok")
-                .is_none()
-        );
+        let prompt = super::print_mode_system_prompt(&cli, dir.path())
+            .expect("ok")
+            .expect("explicit prompt is installed on the loop");
+        assert_eq!(prompt, "custom override");
+        // The project identity preamble is replaced, not present.
+        assert!(!prompt.contains("You are Deeptide"));
+    }
+
+    #[test]
+    fn print_mode_appends_system_prompt_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cli = sample_cli();
+        cli.append_system_prompt = Some("Always reply in JSON.".to_owned());
+        let prompt = super::print_mode_system_prompt(&cli, dir.path())
+            .expect("ok")
+            .expect("prompt installed");
+        // The project prompt remains, with the appended directive after it.
+        assert!(prompt.contains("You are Deeptide"));
+        assert!(prompt.trim_end().ends_with("Always reply in JSON."));
+
+        // Appends on top of an explicit --system-prompt too.
+        let mut cli2 = sample_cli();
+        cli2.system_prompt = Some("Base prompt.".to_owned());
+        cli2.append_system_prompt = Some("Extra rule.".to_owned());
+        let prompt2 = super::print_mode_system_prompt(&cli2, dir.path())
+            .expect("ok")
+            .expect("prompt installed");
+        assert_eq!(prompt2, "Base prompt.\n\nExtra rule.");
     }
 
     #[test]

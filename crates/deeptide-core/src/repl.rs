@@ -175,6 +175,26 @@ impl ReplSession {
         self
     }
 
+    /// Append `text` after the current system prompt (from
+    /// `--append-system-prompt`). Empty/whitespace text is ignored.
+    pub fn with_appended_system_prompt(mut self, text: &str) -> Self {
+        let text = text.trim();
+        if !text.is_empty() {
+            let base = self
+                .agent_loop
+                .system_prompt()
+                .unwrap_or_default()
+                .to_owned();
+            let combined = if base.is_empty() {
+                text.to_owned()
+            } else {
+                format!("{base}\n\n{text}")
+            };
+            self.agent_loop = self.agent_loop.with_system_prompt(combined);
+        }
+        self
+    }
+
     /// Load a saved session's history into context and continue it (subsequent
     /// autosaves write back to the same session id). Returns the number of
     /// restored messages. Used by `--resume` / `--continue` at startup.

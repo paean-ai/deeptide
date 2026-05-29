@@ -1602,3 +1602,37 @@ fn repl_resume_session_method_restores_and_continues_same_id() {
     );
     assert_eq!(sessions[0].session_id, id);
 }
+
+#[test]
+fn repl_with_appended_system_prompt_keeps_base_and_appends() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repl = ReplSession::new(Box::new(StaticBackend))
+        .with_cwd(temp.path())
+        .with_appended_system_prompt("Always reply in JSON.");
+    let prompt = repl
+        .agent_loop()
+        .system_prompt()
+        .expect("system prompt is set");
+    assert!(
+        prompt.contains("You are Deeptide"),
+        "base prompt is retained"
+    );
+    assert!(prompt.trim_end().ends_with("Always reply in JSON."));
+}
+
+#[test]
+fn repl_with_appended_system_prompt_ignores_blank() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let base = ReplSession::new(Box::new(StaticBackend))
+        .with_cwd(temp.path())
+        .agent_loop()
+        .system_prompt()
+        .map(ToOwned::to_owned);
+    let appended = ReplSession::new(Box::new(StaticBackend))
+        .with_cwd(temp.path())
+        .with_appended_system_prompt("   ")
+        .agent_loop()
+        .system_prompt()
+        .map(ToOwned::to_owned);
+    assert_eq!(base, appended, "blank append must not change the prompt");
+}
