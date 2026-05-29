@@ -23,6 +23,13 @@ serde_json = "1.0.140"
 tempfile = "3.20.0"
 terminal_size = "0.4.3"
 thiserror = "2.0.12"
+# `unicode-width` ships an EAW-aware width table that's the de-facto Rust
+# crate. We pin to 0.2 (latest as of 2026-05) which fixes the EAW=W
+# classification of recent CJK extensions and adds VS-15/VS-16 awareness.
+# rustyline 14 transitively pulls in 0.1 — we add a direct dep so our own
+# wrapping/truncation/status-bar code agrees with what the terminal will
+# actually render.
+unicode-width = "0.2"
 time = { version = "0.3.41", features = ["formatting"] }
 zip = { version = "6.0.0", default-features = false, features = ["deflate"] }
 
