@@ -1574,6 +1574,27 @@ fn skill_tool_expands_builtin_skill_prompts_and_reports_unknown_names() {
     assert!(unknown.content.contains("Unknown skill: missing"));
     assert!(unknown.content.contains("commit"));
     assert!(unknown.content.contains("publish"));
+
+    // The init/batch/publish/update-config prompts carry Swift's detailed
+    // multi-phase guidance, not the earlier condensed summaries.
+    let init = SkillTool.call(serde_json::json!({"skill": "init"}), &context);
+    assert!(!init.is_error);
+    assert!(init.content.contains("Phase 1 - explore"));
+    assert!(init.content.contains("keep total length 60-120 lines"));
+
+    let batch = SkillTool.call(serde_json::json!({"skill": "batch"}), &context);
+    assert!(!batch.is_error);
+    assert!(batch.content.contains("subagent_type: Explore"));
+    assert!(batch.content.contains(".deeptide-worktrees/"));
+
+    let update_config = SkillTool.call(serde_json::json!({"skill": "update-config"}), &context);
+    assert!(!update_config.is_error);
+    assert!(update_config.content.contains("default: 4096"));
+    assert!(
+        update_config
+            .content
+            .contains("permission_mode: default, accept-edits, plan, bypass")
+    );
 }
 
 #[test]
