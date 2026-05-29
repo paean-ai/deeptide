@@ -163,6 +163,18 @@ impl ReplSession {
         self
     }
 
+    /// Restrict which tools the agent may call (from `--allowed-tools` /
+    /// `--disallowed-tools`). A `None` allowlist with an empty denylist leaves
+    /// every tool available.
+    pub fn with_tool_restrictions(
+        mut self,
+        allowed: Option<Vec<String>>,
+        disallowed: Vec<String>,
+    ) -> Self {
+        self.agent_loop = self.agent_loop.with_tool_restrictions(allowed, disallowed);
+        self
+    }
+
     pub fn with_pricing_overrides(
         mut self,
         overrides: std::collections::HashMap<String, crate::ModelPricing>,

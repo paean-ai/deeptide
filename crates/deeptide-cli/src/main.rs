@@ -187,6 +187,28 @@ struct Cli {
         help = "Request streamed SSE responses from the Anthropic Messages API. Required by some proxy providers (openrouter, custom relays)."
     )]
     stream: bool,
+
+    #[arg(
+        long = "allowed-tools",
+        value_name = "NAMES",
+        help = "Restrict the agent to these tools (comma-separated). Only the listed tools are advertised and callable."
+    )]
+    allowed_tools: Option<String>,
+
+    #[arg(
+        long = "disallowed-tools",
+        value_name = "NAMES",
+        help = "Forbid these tools (comma-separated). Takes precedence over --allowed-tools."
+    )]
+    disallowed_tools: Option<String>,
+
+    #[arg(
+        short = 'y',
+        long = "yolo",
+        action = ArgAction::SetTrue,
+        help = "Bypass all permission checks (equivalent to --permission-mode bypass)."
+    )]
+    yolo: bool,
 }
 
 fn main() {
@@ -211,8 +233,14 @@ fn run(mut cli: Cli) -> Result<(), String> {
     cfg.apply_env();
     apply_config_fallbacks(&mut cli, &cfg);
 
-    let Some(permission_mode) = PermissionMode::parse(&cli.permission_mode) else {
-        return Err(format!("invalid permission mode: {}", cli.permission_mode));
+    let permission_mode = if cli.yolo {
+        // --yolo is a convenience alias for the bypass permission mode.
+        PermissionMode::Bypass
+    } else {
+        match PermissionMode::parse(&cli.permission_mode) {
+            Some(mode) => mode,
+            None => return Err(format!("invalid permission mode: {}", cli.permission_mode)),
+        }
     };
 
     validate_formats(&cli)?;
@@ -522,6 +550,10 @@ fn run_interactive(
 
     let configured = configured_backend_with_handler(cli, Some(streaming_handler))?;
     let is_configured = configured.is_configured;
+    let (allowed_tools, disallowed_tools) = parse_tool_restrictions(
+        cli.allowed_tools.as_deref(),
+        cli.disallowed_tools.as_deref(),
+    );
     let mut repl = ReplSession::new(configured.backend)
         .with_model(configured.model)
         .with_permission_mode(permission_mode)
@@ -530,6 +562,7 @@ fn run_interactive(
         .with_debug(cli.debug)
         .with_fast_mode(cli.fast)
         .with_hooks(hooks)
+        .with_tool_restrictions(allowed_tools, disallowed_tools)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
@@ -733,11 +766,16 @@ fn run_prompt(
     hooks: deeptide_core::HookEngine,
 ) -> Result<String, String> {
     let configured = configured_backend(cli)?;
+    let (allowed_tools, disallowed_tools) = parse_tool_restrictions(
+        cli.allowed_tools.as_deref(),
+        cli.disallowed_tools.as_deref(),
+    );
     let mut loop_ = AgentLoop::new(configured.backend)
         .with_model(configured.model)
         .with_permission_mode(permission_mode)
         .with_max_turns(cli.max_turns)
         .with_hooks(hooks)
+        .with_tool_restrictions(allowed_tools, disallowed_tools)
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
 
     // Give print mode the same project context (CLAUDE.md/TIDE.md/AGENTS.md +
@@ -852,6 +890,26 @@ fn print_mode_system_prompt(cli: &Cli, cwd: &Path) -> Result<Option<String>, Str
         return Ok(None);
     }
     Ok(Some(deeptide_core::build_system_prompt(cwd)))
+}
+
+/// Parse the `--allowed-tools` / `--disallowed-tools` comma-separated flags into
+/// the form `AgentLoop::with_tool_restrictions` expects: an optional allowlist
+/// and a denylist. Whitespace is trimmed and empty entries dropped.
+fn parse_tool_restrictions(
+    allowed: Option<&str>,
+    disallowed: Option<&str>,
+) -> (Option<Vec<String>>, Vec<String>) {
+    fn split(value: &str) -> Vec<String> {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+    let allowed = allowed.map(split).filter(|list| !list.is_empty());
+    let disallowed = disallowed.map(split).unwrap_or_default();
+    (allowed, disallowed)
 }
 
 fn resolve_system_prompt(cli: &Cli) -> Result<Option<String>, String> {
@@ -1007,6 +1065,9 @@ mod tests {
             debug: false,
             fast: false,
             stream: false,
+            allowed_tools: None,
+            disallowed_tools: None,
+            yolo: false,
         }
     }
 
@@ -1495,6 +1556,29 @@ mod tests {
         let mut cli = sample_cli();
         cli.system_prompt_file = Some(path);
         assert!(super::resolve_system_prompt(&cli).expect("ok").is_none());
+    }
+
+    #[test]
+    fn parse_tool_restrictions_splits_trims_and_drops_empties() {
+        let (allowed, disallowed) =
+            super::parse_tool_restrictions(Some(" Read , Grep ,,"), Some("Bash"));
+        assert_eq!(
+            allowed,
+            Some(vec![String::from("Read"), String::from("Grep")])
+        );
+        assert_eq!(disallowed, vec![String::from("Bash")]);
+    }
+
+    #[test]
+    fn parse_tool_restrictions_absent_flags_yield_no_restriction() {
+        let (allowed, disallowed) = super::parse_tool_restrictions(None, None);
+        assert!(allowed.is_none());
+        assert!(disallowed.is_empty());
+
+        // An all-whitespace allowlist collapses to no allowlist rather than an
+        // empty one that would forbid every tool.
+        let (allowed, _) = super::parse_tool_restrictions(Some("  , "), None);
+        assert!(allowed.is_none());
     }
 
     #[test]
