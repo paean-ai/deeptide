@@ -220,14 +220,25 @@ const DEFAULT_CONTEXT_WINDOW: usize = 128_000;
 /// `CompactionManager.maxMessagesBeforeCompact`.
 const MAX_MESSAGES_BEFORE_COMPACT: usize = 200;
 
-/// Outcome of an interactive permission prompt. The REPL surfaces a `[y]es /
-/// [n]o / [a]llow-and-bypass` prompt and returns one of these so the agent
-/// loop can both decide on the current tool call AND adjust the session
-/// permission mode in one round-trip.
+/// Outcome of an interactive permission prompt. The REPL surfaces a
+/// `[y]es / [n]o / [t]his-tool / [a]llow-and-bypass` prompt and returns
+/// one of these so the agent loop can both decide on the current tool
+/// call AND adjust session-wide permissions (mode or rules) in one
+/// round-trip.
 #[derive(Debug, Clone)]
 pub enum AskOutcome {
     /// Approve this single tool call. Session permission mode is unchanged.
     Allow,
+    /// Approve this call AND install a session-scoped allow rule for every
+    /// subsequent invocation of the **same tool name** (e.g. all `Write`
+    /// calls for the rest of this REPL session). The rule is not persisted
+    /// to disk — closing the session removes it. Use this when the user
+    /// wants to stop being prompted for a specific tool without flipping
+    /// the entire session into Bypass.
+    AllowAllSession {
+        /// The exact tool name (e.g. `"Write"`, `"Bash"`) to whitelist.
+        tool_name: String,
+    },
     /// Approve this single tool call AND switch the session to the given
     /// mode so subsequent calls of comparable risk don't re-prompt.
     AllowAndSetMode(PermissionMode),
@@ -764,6 +775,16 @@ impl AgentLoop {
         let outcome = callback(tool_call);
         match outcome {
             AskOutcome::Allow => self.dispatch_approved_tool_call(tool_call),
+            AskOutcome::AllowAllSession { tool_name } => {
+                // Wildcard pattern bound to the tool name: matches every
+                // future call to this tool regardless of arguments. The
+                // rule lives in the session_allow_list (in-memory only) so
+                // it disappears at REPL exit — users can't accidentally
+                // grant durable trust by accepting one prompt.
+                self.permission_manager
+                    .add_session_rule(true, &tool_name, "*");
+                self.dispatch_approved_tool_call(tool_call)
+            }
             AskOutcome::AllowAndSetMode(mode) => {
                 self.permission_manager.set_mode(mode);
                 self.dispatch_approved_tool_call(tool_call)

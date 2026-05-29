@@ -192,6 +192,111 @@ fn ask_callback_deny_blocks_the_tool_and_reports_reason() {
 }
 
 #[test]
+fn ask_callback_allow_all_session_installs_session_rule_and_executes_call() {
+    // The user picked "[t] always for this tool" at the prompt. The agent
+    // loop should:
+    //   1. install a session-scoped allow rule keyed on tool_name="Write",
+    //      pattern="*" (no disk persistence — closes when the REPL exits),
+    //   2. execute the current Write call normally.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(WriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3)
+        .with_ask_callback(Arc::new(|_| AskOutcome::AllowAllSession {
+            tool_name: String::from("Write"),
+        }));
+
+    let _ = loop_.run("write notes");
+
+    // The Write call ran (file exists) ...
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("written file"),
+        "hello from agent"
+    );
+
+    // ... and the session_allow_list now carries the wildcard Write rule.
+    // We deliberately check session_allow_list (not allow_list) so the rule
+    // doesn't leak to disk and survive a session exit.
+    let session_allow = loop_.permission_rules().session_allow_list();
+    assert_eq!(session_allow.len(), 1, "got: {session_allow:?}");
+    assert_eq!(session_allow[0].pattern, "*");
+    assert_eq!(session_allow[0].tool.as_deref(), Some("Write"));
+
+    // Persistent allow_list must remain untouched — the "always" choice is
+    // session-scoped, not durable, by design.
+    assert!(
+        loop_.permission_rules().allow_list().is_empty(),
+        "persistent allow_list must stay empty: {:?}",
+        loop_.permission_rules().allow_list()
+    );
+}
+
+#[test]
+fn ask_callback_allow_all_session_skips_prompt_for_second_call_of_same_tool() {
+    // Once the session_allow rule is installed, a subsequent Write call
+    // (same tool, different arguments) must NOT trigger the ask callback
+    // again.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let invocations: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let counter = Arc::clone(&invocations);
+
+    let mut loop_ = AgentLoop::new(Box::new(TwoWriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(5)
+        .with_ask_callback(Arc::new(move |_| {
+            *counter.lock().expect("counter lock") += 1;
+            AskOutcome::AllowAllSession {
+                tool_name: String::from("Write"),
+            }
+        }));
+
+    let _ = loop_.run("write twice");
+
+    // First Write hit the prompt; second was auto-approved by the rule.
+    assert_eq!(*invocations.lock().expect("invocations lock"), 1);
+    // Both files exist — proving the second call was actually executed.
+    assert!(temp.path().join("notes-1.txt").exists());
+    assert!(temp.path().join("notes-2.txt").exists());
+}
+
+#[test]
+fn ask_callback_allow_all_session_only_whitelists_named_tool() {
+    // Whitelisting "Write" must NOT auto-approve other destructive tools
+    // — Edit on a fresh file should still hit the ask callback.
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\n").expect("seed");
+
+    let invocations: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&invocations);
+
+    let mut loop_ = AgentLoop::new(Box::new(WriteThenEditBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(5)
+        .with_ask_callback(Arc::new(move |tool_call: &ToolCall| {
+            recorded
+                .lock()
+                .expect("recorded lock")
+                .push(tool_call.name.clone());
+            // Whitelist Write for the whole session; Edit must still ask.
+            if tool_call.name == "Write" {
+                AskOutcome::AllowAllSession {
+                    tool_name: String::from("Write"),
+                }
+            } else {
+                AskOutcome::Allow
+            }
+        }));
+
+    let _ = loop_.run("write then edit");
+
+    // Both prompts fired — the rule didn't accidentally swallow the Edit.
+    assert_eq!(
+        invocations.lock().expect("invocations lock").as_slice(),
+        &["Write".to_owned(), "Edit".to_owned()]
+    );
+}
+
+#[test]
 fn ask_callback_allow_and_set_mode_persists_for_subsequent_calls() {
     // First call hits the ask path and switches the loop into Bypass mode;
     // observable side effects: tool succeeded, then `permission_mode()`
@@ -916,6 +1021,77 @@ impl AgentBackend for WriteCallingBackend {
             })
         } else {
             Ok(AgentResponse::text("done after write"))
+        }
+    }
+}
+
+/// Emits two Write calls in two consecutive turns, then a final text
+/// reply. Used to verify session-scoped allow rules auto-approve the
+/// second invocation of the same tool.
+#[derive(Default)]
+struct TwoWriteCallingBackend {
+    calls: usize,
+}
+
+impl AgentBackend for TwoWriteCallingBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls <= 2 {
+            Ok(AgentResponse {
+                content: format!("Writing file {}.", self.calls),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    format!("toolu_write_{}", self.calls),
+                    "Write",
+                    serde_json::json!({
+                        "file_path": format!("notes-{}.txt", self.calls),
+                        "content": "hello",
+                    }),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("both files written"))
+        }
+    }
+}
+
+/// Emits a Write then an Edit on consecutive turns. Used to verify that
+/// a session-scoped Write allow-rule does NOT bleed into Edit approval.
+#[derive(Default)]
+struct WriteThenEditBackend {
+    calls: usize,
+}
+
+impl AgentBackend for WriteThenEditBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        match self.calls {
+            1 => Ok(AgentResponse {
+                content: String::from("Writing first."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_write_1",
+                    "Write",
+                    serde_json::json!({
+                        "file_path": "notes.txt",
+                        "content": "alpha\n",
+                    }),
+                )],
+            }),
+            2 => Ok(AgentResponse {
+                content: String::from("Editing now."),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_edit_1",
+                    "Edit",
+                    serde_json::json!({
+                        "file_path": "notes.txt",
+                        "old_string": "alpha",
+                        "new_string": "bravo",
+                    }),
+                )],
+            }),
+            _ => Ok(AgentResponse::text("done")),
         }
     }
 }

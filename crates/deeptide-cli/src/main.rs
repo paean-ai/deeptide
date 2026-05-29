@@ -1887,14 +1887,17 @@ impl ConditionalEventHandler for ShiftTabCycleHandler {
 
 /// Interactive permission prompt invoked by the agent loop when a tool
 /// call needs the user's approval. Stops the spinner, prints a one-line
-/// summary of the pending tool call, reads y/n/a from stdin, and returns
-/// the resulting [`AskOutcome`].
+/// summary of the pending tool call, reads the user's choice from stdin,
+/// and returns the resulting [`AskOutcome`].
 ///
-/// Input grammar:
-/// - empty / `y` / `yes`   → allow this call only
-/// - `n` / `no`            → deny this call
-/// - `a` / `all` / `yolo`  → allow this call AND flip the session to YOLO
-///   (Bypass) so subsequent risky calls don't re-prompt.
+/// Input grammar (see [`parse_permission_response`]):
+/// - empty / `y` / `yes`      → allow this call only
+/// - `n` / `no`               → deny this call
+/// - `t` / `this` / `tool`    → allow this call AND auto-approve every
+///   subsequent call to the **same tool** for the rest of the session
+///   (session-scoped rule, NOT persisted to disk).
+/// - `a` / `all` / `yolo`     → allow this call AND flip the session to
+///   YOLO (Bypass) so subsequent risky calls don't re-prompt either.
 fn handle_permission_prompt(
     tool_call: &ToolCall,
     spinner_lock: &Arc<Mutex<()>>,
@@ -1924,9 +1927,9 @@ fn handle_permission_prompt(
         )
     };
     let prompt = if use_color {
-        "  \x1b[2m[y]es / [n]o / [a]ll-yolo\x1b[0m  > "
+        "  \x1b[2m[y]es / [n]o / [t]his-tool / [a]ll-yolo\x1b[0m  > "
     } else {
-        "  [y]es / [n]o / [a]ll-yolo  > "
+        "  [y]es / [n]o / [t]his-tool / [a]ll-yolo  > "
     };
     let _ = stdout.write_all(header.as_bytes());
     let _ = stdout.write_all(prompt.as_bytes());
@@ -1941,18 +1944,42 @@ fn handle_permission_prompt(
         };
     }
 
-    match response.trim().to_ascii_lowercase().as_str() {
-        "" | "y" | "yes" => AskOutcome::Allow,
-        "n" | "no" => AskOutcome::Deny {
-            reason: String::from("user declined"),
-        },
-        "a" | "all" | "yolo" | "all-yolo" => {
+    let outcome = parse_permission_response(&response, &tool_call.name);
+
+    // Echo a hint when a session-wide effect was triggered so the user
+    // understands why subsequent calls stop prompting.
+    match &outcome {
+        AskOutcome::AllowAndSetMode(_) => {
             let _ = writeln!(
                 stdout,
                 "  (session switched to YOLO mode — Shift+Tab to cycle back)"
             );
-            AskOutcome::AllowAndSetMode(PermissionMode::Bypass)
         }
+        AskOutcome::AllowAllSession { tool_name } => {
+            let _ = writeln!(
+                stdout,
+                "  (session-allowing every {tool_name} call until exit)"
+            );
+        }
+        _ => {}
+    }
+
+    outcome
+}
+
+/// Pure parser for the permission-prompt response. Splitting the I/O
+/// (`handle_permission_prompt`) from the decision logic (this function)
+/// keeps the keyword matching unit-testable without faking stdin.
+fn parse_permission_response(raw: &str, tool_name: &str) -> AskOutcome {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => AskOutcome::Allow,
+        "n" | "no" => AskOutcome::Deny {
+            reason: String::from("user declined"),
+        },
+        "t" | "this" | "tool" | "this-tool" | "always" => AskOutcome::AllowAllSession {
+            tool_name: tool_name.to_owned(),
+        },
+        "a" | "all" | "yolo" | "all-yolo" => AskOutcome::AllowAndSetMode(PermissionMode::Bypass),
         other => AskOutcome::Deny {
             reason: format!("user declined ({other})"),
         },
@@ -2142,9 +2169,11 @@ mod tests {
         Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
         build_auth_segment, collect_prompt, configured_backend, effective_base_url,
         effective_model, next_permission_mode, normalize_embedded_mode, paean_token_resolved,
-        render_system_message, summarize_tool_call_for_prompt, use_color, validate_formats,
+        parse_permission_response, render_system_message, summarize_tool_call_for_prompt,
+        use_color, validate_formats,
     };
     use clap::Parser;
+    use deeptide_core::AskOutcome;
     use deeptide_core::permissions::PermissionMode;
     use deeptide_core::{
         AnthropicAuthMode, ConfigData, ProviderProfile, SystemMessage, ThinkingConfig,
@@ -3229,6 +3258,64 @@ mod tests {
 
     fn tool_call(name: &str, input: serde_json::Value) -> deeptide_core::ToolCall {
         deeptide_core::ToolCall::new("call_test", name, input)
+    }
+
+    #[test]
+    fn permission_response_empty_or_yes_allows() {
+        for input in ["", "\n", "y", "Y\n", "yes", "  YES  "] {
+            assert!(
+                matches!(parse_permission_response(input, "Write"), AskOutcome::Allow),
+                "{input:?} should map to Allow"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_response_no_denies_with_user_declined_reason() {
+        for input in ["n", "N\n", "no", "  NO  "] {
+            let outcome = parse_permission_response(input, "Bash");
+            match outcome {
+                AskOutcome::Deny { reason } => assert_eq!(reason, "user declined"),
+                other => panic!("{input:?} should Deny, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn permission_response_this_tool_installs_session_allow_for_named_tool() {
+        for input in ["t", "T\n", "this", "tool", "this-tool", "  always  "] {
+            match parse_permission_response(input, "Write") {
+                AskOutcome::AllowAllSession { tool_name } => {
+                    assert_eq!(tool_name, "Write", "input={input:?}");
+                }
+                other => panic!("{input:?} should AllowAllSession, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn permission_response_all_flips_session_into_bypass() {
+        for input in ["a", "A\n", "all", "yolo", "all-yolo"] {
+            match parse_permission_response(input, "Write") {
+                AskOutcome::AllowAndSetMode(mode) => {
+                    assert_eq!(mode, PermissionMode::Bypass, "input={input:?}");
+                }
+                other => panic!("{input:?} should AllowAndSetMode, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn permission_response_unknown_token_safely_denies_with_echoed_token() {
+        // Fail closed: an unrecognised response must NOT default to Allow.
+        // The echoed token helps the user retry without re-reading the
+        // tool summary.
+        match parse_permission_response("maybe", "Bash") {
+            AskOutcome::Deny { reason } => {
+                assert!(reason.contains("maybe"), "got: {reason}");
+            }
+            other => panic!("unknown input should Deny, got {other:?}"),
+        }
     }
 
     fn strip_ansi(text: &str) -> String {
