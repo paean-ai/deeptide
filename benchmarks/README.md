@@ -11,9 +11,15 @@ re-sends a large prefix every turn).
 
 ```sh
 DEEPSEEK_API_KEY=sk-... python3 benchmarks/cache_memory_bench.py --turns 5
-# pick the model; deepseek-reasoner is the "pro"/reasoning tier:
-DEEPSEEK_API_KEY=sk-... python3 benchmarks/cache_memory_bench.py --model deepseek-reasoner
+# the account's real model ids (verified via GET /models):
+DEEPSEEK_API_KEY=sk-... python3 benchmarks/cache_memory_bench.py --model deepseek-v4-flash
+DEEPSEEK_API_KEY=sk-... python3 benchmarks/cache_memory_bench.py --model deepseek-v4-pro
 ```
+
+> **Model ids.** `GET /models` returns `deepseek-v4-flash` and `deepseek-v4-pro`.
+> `deepseek-chat` / `deepseek-reasoner` are legacy aliases that bill as
+> `deepseek-v4-flash` — so calling them does **not** exercise the pro tier. Use
+> `deepseek-v4-pro` for a real pro-tier run.
 
 Cost is negligible (only the `usage` field is read).
 
@@ -43,8 +49,8 @@ Metric: `prompt_cache_hit_tokens / prompt_tokens` per turn (warm = turns 2+).
 Identical across the standard and the pro/reasoning tier — prefix caching is an
 input-side mechanism, independent of which model generates the output:
 
-| Layout | `deepseek-chat` | `deepseek-reasoner` (pro) |
-|--------|----------------:|--------------------------:|
+| Layout | `deepseek-v4-flash` | `deepseek-v4-pro` |
+|--------|--------------------:|------------------:|
 | NAIVE — volatile line first | **0.0%** | **0.0%** |
 | NAIVE — memory reordered     | 67.6% | 67.6% |
 | ALIGNED — stable prefix      | **95.5%** | **95.5%** |

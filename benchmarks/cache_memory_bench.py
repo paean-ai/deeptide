@@ -127,9 +127,10 @@ def build_aligned(turn, entries):
 
 def run_variant(key, name, builder, turns, entries_for_turn, model=MODEL):
     rows = []
-    # The reasoner emits separate reasoning tokens before the answer, so give it
-    # headroom; we still only read the usage/cache fields, never the output.
-    max_tokens = 64 if "reason" in model else 8
+    # Reasoning / pro tiers emit separate reasoning tokens before the answer, so
+    # give them headroom; we still only read the usage/cache fields, never the
+    # output.
+    max_tokens = 8 if model in ("deepseek-chat",) else 64
     for turn in range(1, turns + 1):
         body = {
             "model": model,
