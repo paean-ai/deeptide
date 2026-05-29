@@ -525,13 +525,23 @@ fn collect_prompt(cli: &Cli, stdin: Option<&str>) -> Result<String, String> {
 /// using `CompletionEngine` and the REPL's registered command list.
 struct ReplHelper {
     commands: Vec<CommandCompletionSource>,
+    models: Vec<String>,
     use_color: bool,
 }
 
 impl ReplHelper {
     fn new(commands: Vec<CommandCompletionSource>, use_color: bool) -> Self {
+        // Argument completion for `/model <name>`: the built-in catalog plus the
+        // two shorthand aliases the command accepts.
+        let mut models = vec![String::from("flash"), String::from("pro")];
+        models.extend(
+            deeptide_core::known_models()
+                .into_iter()
+                .map(|model| model.name.to_owned()),
+        );
         Self {
             commands,
+            models,
             use_color,
         }
     }
@@ -573,6 +583,22 @@ impl Completer for ReplHelper {
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
         let Some(result) = CompletionEngine::command_completions(line, pos, &self.commands, 8)
         else {
+            // No command-name match: try completing a known command argument,
+            // currently `/model <name>`.
+            let model_refs: Vec<&str> = self.models.iter().map(String::as_str).collect();
+            if let Some(values) =
+                CompletionEngine::value_completions(line, pos, "model", &model_refs, 8)
+            {
+                let pairs = values
+                    .candidates
+                    .iter()
+                    .map(|value| Pair {
+                        display: value.clone(),
+                        replacement: value.clone(),
+                    })
+                    .collect();
+                return Ok((values.token_start, pairs));
+            }
             return Ok((pos, vec![]));
         };
 
