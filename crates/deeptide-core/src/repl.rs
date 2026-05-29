@@ -3089,8 +3089,15 @@ mod cwd_format_tests {
     use std::path::PathBuf;
 
     fn with_home<T>(home: &str, body: impl FnOnce() -> T) -> T {
-        // Tests in this crate already serialize env access via `serial_test`
-        // elsewhere; this helper only mutates `HOME`, restoring it on exit.
+        use std::sync::{Mutex, OnceLock};
+        // `HOME` is process-global and `cargo test` runs these cases in
+        // parallel, so serialize them: without the lock one test's save/restore
+        // interleaves with another's body and it reads the wrong `HOME`.
+        static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = HOME_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var("HOME").ok();
         // SAFETY: process-wide env mutation; restored below. Acceptable in a
         // single-threaded unit test that does not run alongside other env
