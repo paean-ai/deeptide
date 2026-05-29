@@ -136,6 +136,92 @@ impl CompletionEngine {
 
         Replacement { text, cursor }
     }
+
+    /// Complete the single argument of `/<command> <partial>` from a fixed set
+    /// of `values` (e.g. `/model fl` -> `flash`, `deepseek-v4-flash`). Returns
+    /// `None` unless the cursor sits in the lone argument token of exactly that
+    /// command, or nothing matches. Prefix matches rank before substring ones.
+    pub fn value_completions(
+        input: &str,
+        cursor: usize,
+        command: &str,
+        values: &[&str],
+        limit: usize,
+    ) -> Option<ValueCompletionResult> {
+        let chars: Vec<char> = input.chars().collect();
+        if cursor > chars.len() {
+            return None;
+        }
+
+        let mut start = cursor;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        let mut end = cursor;
+        while end < chars.len() && !chars[end].is_whitespace() {
+            end += 1;
+        }
+
+        // Everything before this token must be exactly `/<command>` (plus the
+        // separating whitespace), i.e. this is the command's first argument.
+        let head: String = chars[..start].iter().collect();
+        if !head.trim().eq_ignore_ascii_case(&format!("/{command}")) {
+            return None;
+        }
+
+        let typed: String = chars[start..cursor].iter().collect();
+        let typed = typed.to_lowercase();
+
+        let mut prefix_hits = Vec::new();
+        let mut substring_hits = Vec::new();
+        for value in values {
+            let lowered = value.to_lowercase();
+            if typed.is_empty() || lowered.starts_with(&typed) {
+                prefix_hits.push((*value).to_owned());
+            } else if lowered.contains(&typed) {
+                substring_hits.push((*value).to_owned());
+            }
+        }
+
+        let candidates: Vec<String> = prefix_hits
+            .into_iter()
+            .chain(substring_hits)
+            .take(limit)
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+
+        Some(ValueCompletionResult {
+            token_start: start,
+            token_end: end,
+            typed,
+            candidates,
+        })
+    }
+
+    /// Substitute `value` for the argument token described by `result`.
+    pub fn replacing_value(
+        input: &str,
+        result: &ValueCompletionResult,
+        value: &str,
+    ) -> Replacement {
+        let chars: Vec<char> = input.chars().collect();
+        let prefix: String = chars[..result.token_start].iter().collect();
+        let suffix: String = chars[result.token_end..].iter().collect();
+        let text = format!("{prefix}{value}{suffix}");
+        let cursor = (prefix + value).chars().count();
+
+        Replacement { text, cursor }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueCompletionResult {
+    pub token_start: usize,
+    pub token_end: usize,
+    pub typed: String,
+    pub candidates: Vec<String>,
 }
 
 fn candidate_for(

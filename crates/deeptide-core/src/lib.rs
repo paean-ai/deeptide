@@ -35,7 +35,7 @@ pub use commands::{
 };
 pub use completion::{
     CommandCompletionCandidate, CommandCompletionResult, CommandCompletionSource, CompletionEngine,
-    Replacement,
+    Replacement, ValueCompletionResult,
 };
 pub use config::{
     ConfigData, ConfigScope, ConfigStore, HookEntry, McpServerConfig, ModelPricingConfig,

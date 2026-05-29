@@ -69,6 +69,47 @@ fn command_completion_source_can_be_built_from_slash_command() {
     assert_eq!(source.usage, NewCommand.usage());
 }
 
+const MODELS: &[&str] = &["flash", "pro", "deepseek-v4-pro", "deepseek-v4-flash"];
+
+#[test]
+fn value_completions_complete_model_argument_prefix_first() {
+    let result = match CompletionEngine::value_completions("/model fl", 9, "model", MODELS, 8) {
+        Some(result) => result,
+        None => panic!("expected model-argument completions"),
+    };
+    // Prefix match ("flash") ranks ahead of the substring match
+    // ("deepseek-v4-flash"); both are offered.
+    assert_eq!(result.candidates.first().map(String::as_str), Some("flash"));
+    assert!(result.candidates.iter().any(|c| c == "deepseek-v4-flash"));
+}
+
+#[test]
+fn value_completions_empty_argument_lists_all_models() {
+    let result = match CompletionEngine::value_completions("/model ", 7, "model", MODELS, 8) {
+        Some(result) => result,
+        None => panic!("expected all models for an empty argument"),
+    };
+    assert_eq!(result.candidates.len(), MODELS.len());
+}
+
+#[test]
+fn value_completions_only_apply_to_the_named_command() {
+    // Wrong command, a bare word, and an unmatched value all decline.
+    assert!(CompletionEngine::value_completions("/help fl", 8, "model", MODELS, 8).is_none());
+    assert!(CompletionEngine::value_completions("fl", 2, "model", MODELS, 8).is_none());
+    assert!(CompletionEngine::value_completions("/model zzz", 10, "model", MODELS, 8).is_none());
+}
+
+#[test]
+fn replacing_value_substitutes_the_argument_token() {
+    let result = CompletionEngine::value_completions("/model fl", 9, "model", MODELS, 8)
+        .expect("model completions");
+    let accepted = CompletionEngine::replacing_value("/model fl", &result, "flash");
+
+    assert_eq!(accepted.text, "/model flash");
+    assert_eq!(accepted.cursor, 12);
+}
+
 fn must_complete(input: &str, cursor: usize) -> deeptide_core::CommandCompletionResult {
     match CompletionEngine::command_completions(input, cursor, &commands(), 8) {
         Some(result) => result,
