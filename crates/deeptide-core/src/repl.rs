@@ -282,6 +282,20 @@ impl ReplSession {
         self
     }
 
+    /// Forward an interactive permission callback into the underlying agent
+    /// loop so that tools needing approval (`PermissionDecision::Ask`)
+    /// surface a prompt instead of failing.
+    pub fn with_ask_callback(mut self, callback: crate::PermissionAskCallback) -> Self {
+        self.agent_loop = self.agent_loop.with_ask_callback(callback);
+        self
+    }
+
+    /// Update the active permission mode mid-session. Used by the
+    /// Shift+Tab keybinding to cycle Default → AcceptEdits → Plan → Bypass.
+    pub fn set_permission_mode(&mut self, mode: crate::permissions::PermissionMode) {
+        self.agent_loop.set_permission_mode(mode);
+    }
+
     pub fn with_clipboard_writer<F>(mut self, writer: F) -> Self
     where
         F: Fn(&str) -> Result<(), String> + Send + Sync + 'static,

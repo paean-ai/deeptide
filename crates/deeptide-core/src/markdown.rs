@@ -13,6 +13,113 @@ impl Default for MarkdownRenderOptions {
 
 pub struct MarkdownRenderer;
 
+/// Incremental markdown renderer for streaming LLM output.
+///
+/// Buffers tokens until a newline arrives, then renders the just-completed
+/// line through the full [`MarkdownRenderer`] pipeline so inline markup
+/// (`**bold**`, `__bold__`, `` `code` ``, `[label](url)`, `~~strike~~`),
+/// list items (`- item`, `1. item`), headers (`# Title`), and blockquotes
+/// (`> quote`) all render correctly even though the model is emitting one
+/// token at a time.
+///
+/// Multi-line constructs that depend on a closing token — fenced code blocks
+/// — are passed through unchanged while we're inside them: the renderer
+/// detects the opening fence and switches to verbatim mode so partial code
+/// remains readable as it streams in. Tables aren't streamable this way
+/// (they need the separator row to be recognised); the fully-assembled
+/// re-render via [`crate::render_output_panel`] still handles those when the
+/// turn completes without streaming.
+///
+/// Trade-off: lines now appear as a unit rather than character-by-character.
+/// In practice an LLM emits dozens of characters per token, so the human eye
+/// still sees "live" updates roughly every 100–300 ms.
+pub struct StreamingMarkdownRenderer {
+    buf: String,
+    in_fence: bool,
+    options: MarkdownRenderOptions,
+}
+
+impl StreamingMarkdownRenderer {
+    pub fn new(options: MarkdownRenderOptions) -> Self {
+        Self {
+            buf: String::new(),
+            in_fence: false,
+            options,
+        }
+    }
+
+    /// Feed a streamed chunk of markdown text and return the bytes that
+    /// should be written to the terminal now. The returned string consists
+    /// of zero or more newline-terminated rendered lines plus, when inside a
+    /// fenced code block, any verbatim trailing partial line. Partial lines
+    /// outside a fence remain buffered until a newline arrives or
+    /// [`Self::flush`] is called.
+    pub fn push(&mut self, chunk: &str) -> String {
+        self.buf.push_str(chunk);
+        let mut out = String::new();
+
+        while let Some(newline_pos) = self.buf.find('\n') {
+            let mut line: String = self.buf.drain(..=newline_pos).collect();
+            // Drop the trailing '\n' for analysis; we re-append it after.
+            line.pop();
+            let trimmed = line.trim_start();
+
+            if trimmed.starts_with("```") {
+                // Fence lines themselves stay verbatim — the full block-aware
+                // renderer would render an empty box around an unmatched
+                // fence, which looks worse than just showing the fence text.
+                self.in_fence = !self.in_fence;
+                out.push_str(&line);
+                out.push('\n');
+                continue;
+            }
+
+            if self.in_fence {
+                out.push_str(&line);
+                out.push('\n');
+                continue;
+            }
+
+            out.push_str(&MarkdownRenderer::render_with_options(
+                &line,
+                self.options,
+            ));
+            out.push('\n');
+        }
+
+        // When inside a fenced block, the user wants to see partial code as
+        // it streams. Emit verbatim and drop the buffer so subsequent
+        // chunks land fresh.
+        if self.in_fence && !self.buf.is_empty() {
+            out.push_str(&self.buf);
+            self.buf.clear();
+        }
+
+        out
+    }
+
+    /// Drain any trailing partial line (no terminating newline yet) and
+    /// return its rendered form. Safe to call repeatedly.
+    pub fn flush(&mut self) -> String {
+        if self.buf.is_empty() {
+            return String::new();
+        }
+        let line = std::mem::take(&mut self.buf);
+        if self.in_fence {
+            line
+        } else {
+            MarkdownRenderer::render_with_options(&line, self.options)
+        }
+    }
+
+    /// True if no buffered text and not currently inside a fenced block. The
+    /// caller can use this to decide whether a trailing blank-line separator
+    /// is needed after streaming completes.
+    pub fn is_idle(&self) -> bool {
+        self.buf.is_empty() && !self.in_fence
+    }
+}
+
 impl MarkdownRenderer {
     pub fn render(markdown: &str) -> String {
         Self::render_with_options(markdown, MarkdownRenderOptions::default())
@@ -657,5 +764,108 @@ mod tests {
         // No language token trails the top border.
         let first = plain.lines().next().unwrap_or_default();
         assert_eq!(first.trim(), "┌─");
+    }
+
+    use super::StreamingMarkdownRenderer;
+
+    fn streaming_plain() -> StreamingMarkdownRenderer {
+        StreamingMarkdownRenderer::new(MarkdownRenderOptions { color: false })
+    }
+
+    #[test]
+    fn streaming_holds_partial_line_until_newline() {
+        let mut r = streaming_plain();
+        assert_eq!(r.push("**hi"), "");
+        // Still buffered: closing `**` and newline haven't arrived.
+        assert_eq!(r.push(" there"), "");
+        assert_eq!(r.push("**"), "");
+        assert_eq!(r.push("\n"), "hi there\n");
+        assert!(r.is_idle());
+    }
+
+    #[test]
+    fn streaming_renders_bold_on_completed_line() {
+        let mut r = StreamingMarkdownRenderer::new(MarkdownRenderOptions { color: true });
+        let out = r.push("Hello **world**\n");
+        // Bold escape must appear somewhere in the rendered output.
+        assert!(out.contains("\x1b[1m"), "expected bold escape, got: {out:?}");
+        // And the inner text is preserved literally inside the escapes.
+        assert!(out.contains("world"));
+    }
+
+    #[test]
+    fn streaming_renders_bullet_lists() {
+        let mut r = streaming_plain();
+        let out = r.push("- first\n- second\n");
+        assert!(out.contains("• first"), "got: {out:?}");
+        assert!(out.contains("• second"), "got: {out:?}");
+    }
+
+    #[test]
+    fn streaming_renders_headers() {
+        let mut r = streaming_plain();
+        let out = r.push("# Title\n");
+        assert!(out.contains("▌ Title"), "got: {out:?}");
+    }
+
+    #[test]
+    fn streaming_passes_fenced_code_through_verbatim() {
+        let mut r = streaming_plain();
+        // Open fence: line is emitted as-is, not as an empty box.
+        let out_open = r.push("```rust\n");
+        assert_eq!(out_open, "```rust\n");
+        // Inside fence: the `- not a list` line must NOT become `• not a list`.
+        let out_inside = r.push("- not a list\n");
+        assert_eq!(out_inside, "- not a list\n");
+        // Partial line inside fence is emitted verbatim immediately so the
+        // user sees code as it streams.
+        let out_partial = r.push("let x = 1");
+        assert_eq!(out_partial, "let x = 1");
+        let out_eol = r.push(";\n");
+        assert_eq!(out_eol, ";\n");
+        let out_close = r.push("```\n");
+        assert_eq!(out_close, "```\n");
+        // Outside the fence again, list syntax renders normally.
+        let out_after = r.push("- back to lists\n");
+        assert!(out_after.contains("• back to lists"));
+    }
+
+    #[test]
+    fn streaming_flush_drains_trailing_partial_line() {
+        let mut r = streaming_plain();
+        r.push("**partial");
+        // Buffered, nothing emitted yet.
+        let flushed = r.flush();
+        // The partial line is rendered as best-effort: unbalanced `**` is
+        // preserved literally (the existing emphasis pass leaves unmatched
+        // delimiters as-is).
+        assert!(flushed.contains("partial"), "got: {flushed:?}");
+        // Flushing again is a no-op.
+        assert_eq!(r.flush(), "");
+        assert!(r.is_idle());
+    }
+
+    #[test]
+    fn streaming_handles_chunks_split_mid_codepoint_is_a_caller_concern() {
+        // We don't claim to split UTF-8 bytes; callers must pass us valid
+        // &str slices. But we DO handle multi-codepoint Chinese/Japanese
+        // text within a single chunk without panicking.
+        let mut r = streaming_plain();
+        let out = r.push("- 你好世界\n- 再见\n");
+        assert!(out.contains("• 你好世界"), "got: {out:?}");
+        assert!(out.contains("• 再见"), "got: {out:?}");
+    }
+
+    #[test]
+    fn streaming_emits_each_line_independently() {
+        // Three small chunks that together form two lines should produce
+        // exactly two newline-terminated rendered lines, in order.
+        let mut r = streaming_plain();
+        let mut out = String::new();
+        out.push_str(&r.push("first "));
+        out.push_str(&r.push("line\nsecond"));
+        out.push_str(&r.push(" line\n"));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines, vec!["first line", "second line"]);
     }
 }

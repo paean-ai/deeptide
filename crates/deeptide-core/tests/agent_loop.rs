@@ -1,7 +1,7 @@
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
-    AgentUsage, ContextWindowConfig, HookEngine, HookEntry, MessageRole, PermissionMode,
-    SettingsHooks, ToolCall,
+    AgentUsage, AskOutcome, ContextWindowConfig, HookEngine, HookEntry, MessageRole,
+    PermissionMode, SettingsHooks, ToolCall,
 };
 use std::sync::{Arc, Mutex};
 
@@ -128,6 +128,136 @@ fn agent_loop_blocks_write_tool_calls_without_edit_permission() {
             } if label == "Wrote 1 write, 1 failed"
         )
     }));
+}
+
+#[test]
+fn ask_callback_allow_lets_write_through_in_default_mode() {
+    // With the default permission mode and an interactive ask callback
+    // installed, a Write call should be approved and persist its content.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let invocations: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&invocations);
+
+    let mut loop_ = AgentLoop::new(Box::new(WriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3)
+        .with_ask_callback(Arc::new(move |tool_call: &ToolCall| {
+            recorded
+                .lock()
+                .expect("recorded lock")
+                .push(tool_call.name.clone());
+            AskOutcome::Allow
+        }));
+
+    let events = loop_.run("write notes");
+
+    assert_eq!(
+        invocations.lock().expect("invocations lock").as_slice(),
+        &["Write".to_owned()]
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentLoopEvent::ToolResult { tool_call, is_error: false, .. }
+            if tool_call.name == "Write"
+    )));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("written file"),
+        "hello from agent"
+    );
+}
+
+#[test]
+fn ask_callback_deny_blocks_the_tool_and_reports_reason() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(WriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3)
+        .with_ask_callback(Arc::new(|_| AskOutcome::Deny {
+            reason: String::from("user said no"),
+        }));
+
+    let events = loop_.run("write notes");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: true,
+            } if tool_call.name == "Write" && content.contains("user said no")
+        )
+    }));
+    assert!(!temp.path().join("notes.txt").exists());
+}
+
+#[test]
+fn ask_callback_allow_and_set_mode_persists_for_subsequent_calls() {
+    // First call hits the ask path and switches the loop into Bypass mode;
+    // observable side effects: tool succeeded, then `permission_mode()`
+    // reflects the new mode going forward.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(WriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3)
+        .with_ask_callback(Arc::new(|_| {
+            AskOutcome::AllowAndSetMode(PermissionMode::Bypass)
+        }));
+
+    assert_eq!(loop_.permission_mode(), PermissionMode::Default);
+
+    let _ = loop_.run("write notes");
+
+    assert_eq!(loop_.permission_mode(), PermissionMode::Bypass);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("written file"),
+        "hello from agent"
+    );
+}
+
+#[test]
+fn without_ask_callback_default_mode_still_emits_legacy_error() {
+    // Headless callers (--print, library embeds) keep the long-standing
+    // error contract: no callback means Ask → ToolResult error, no panic.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(WriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3);
+
+    let events = loop_.run("write notes");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentLoopEvent::ToolResult {
+                tool_call,
+                content,
+                is_error: true,
+            } if tool_call.name == "Write" && content.contains("Permission required")
+        )
+    }));
+}
+
+#[test]
+fn set_permission_mode_changes_active_mode_mid_session() {
+    // Shift+Tab in the REPL drives this via ReplSession::set_permission_mode,
+    // which forwards to AgentLoop::set_permission_mode.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut loop_ = AgentLoop::new(Box::new(WriteCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3);
+
+    assert_eq!(loop_.permission_mode(), PermissionMode::Default);
+    loop_.set_permission_mode(PermissionMode::Bypass);
+    assert_eq!(loop_.permission_mode(), PermissionMode::Bypass);
+
+    // With mode flipped to Bypass, the next Write goes through without an
+    // ask callback at all.
+    let _ = loop_.run("write notes");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.txt")).expect("written file"),
+        "hello from agent"
+    );
 }
 
 #[test]
