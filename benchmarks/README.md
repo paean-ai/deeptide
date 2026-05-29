@@ -1,5 +1,36 @@
 # Benchmarks
 
+## `auto_capture_bench.py` — automatic memory capture quality + cost
+
+Auto-capture (`src/memory_capture.rs`) asks the model, at session end, to
+extract durable facts worth remembering — so the user doesn't have to
+`/remember` everything by hand. It's only worth running every session if it's
+accurate *and* cheap. This benchmark plants durable facts among ephemeral
+distractors across synthetic sessions and measures recall, false-positive rate,
+and **real ¥ cost/session** against the live API.
+
+```sh
+DEEPSEEK_API_KEY=sk-... python3 benchmarks/auto_capture_bench.py
+```
+
+### Measured result (2026-05-29, deepseek-v4-flash, 3 sessions)
+
+```
+durable-fact recall : 7/7 = 100%
+false-positive rate : 0/5 = 0%      (skipped "fix line 42", "restart staging", "2+2", "token expires today")
+tokens              : in=649  out=530
+est. cost           : ¥0.0010 / session
+VERDICT: GOOD — accurate and cheap enough to run every session
+```
+
+Token counts are authoritative (from the API `usage` field); the ¥ figure uses
+listed flash pricing. ~¥0.001/session is far below the ¥0.01 dashboard display
+resolution, so it won't move the balance visibly — but it's real and trivially
+affordable. Auto-capture runs on the cheap `deepseek-v4-flash` tier by design.
+
+---
+
+
 ## `cache_memory_bench.py` — DeepSeek prompt-cache alignment
 
 Measures, against the **live DeepSeek API**, how memory/system-prompt layout
