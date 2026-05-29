@@ -920,34 +920,11 @@ fn render_help_detail(command: &CommandCompletionSource) -> String {
     lines.join("\n")
 }
 
-fn render_unknown_command(needle: &str, registered: &[CommandCompletionSource]) -> String {
-    let mut prefix_hits = Vec::new();
-    let mut substring_hits = Vec::new();
-
-    for command in registered {
-        let candidates = std::iter::once(command.name.as_str())
-            .chain(command.aliases.iter().map(String::as_str))
-            .map(str::to_ascii_lowercase)
-            .collect::<Vec<_>>();
-
-        if candidates
-            .iter()
-            .any(|candidate| candidate.starts_with(needle))
-        {
-            prefix_hits.push(format!("/{}", command.name));
-        } else if candidates
-            .iter()
-            .any(|candidate| candidate.contains(needle))
-        {
-            substring_hits.push(format!("/{}", command.name));
-        }
-    }
-
-    let suggestions = prefix_hits
-        .into_iter()
-        .chain(substring_hits)
-        .take(3)
-        .collect::<Vec<_>>();
+pub(crate) fn render_unknown_command(
+    needle: &str,
+    registered: &[CommandCompletionSource],
+) -> String {
+    let suggestions = suggest_commands(needle, registered, 3);
 
     let mut lines = vec![format!("Unknown command: /{needle}")];
     if suggestions.is_empty() {
@@ -956,6 +933,96 @@ fn render_unknown_command(needle: &str, registered: &[CommandCompletionSource]) 
         lines.push(format!("Did you mean: {}?", suggestions.join(", ")));
     }
     lines.join("\n")
+}
+
+/// Suggest up to `limit` command names close to `needle`. Strong signals come
+/// first: a command whose name/alias starts with the needle, then one that
+/// merely contains it. Only when neither matches do we fall back to small
+/// edit-distance (typo) matches like `/commti` -> `/commit`, so the common
+/// abbreviation case keeps its existing, predictable ordering.
+fn suggest_commands(
+    needle: &str,
+    registered: &[CommandCompletionSource],
+    limit: usize,
+) -> Vec<String> {
+    let mut prefix_hits = Vec::new();
+    let mut substring_hits = Vec::new();
+    let mut fuzzy_hits: Vec<(usize, String)> = Vec::new();
+
+    // Longer needles get more slack; a 2-3 char needle stays strict so a single
+    // typo doesn't fuzzily match half the command table.
+    let max_distance = if needle.len() <= 3 { 1 } else { 2 };
+
+    for command in registered {
+        let candidates = std::iter::once(command.name.as_str())
+            .chain(command.aliases.iter().map(String::as_str))
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        let label = format!("/{}", command.name);
+
+        if candidates
+            .iter()
+            .any(|candidate| candidate.starts_with(needle))
+        {
+            prefix_hits.push(label);
+        } else if candidates
+            .iter()
+            .any(|candidate| candidate.contains(needle))
+        {
+            substring_hits.push(label);
+        } else if let Some(distance) = candidates
+            .iter()
+            .map(|candidate| levenshtein(needle, candidate))
+            .min()
+            .filter(|distance| *distance <= max_distance)
+        {
+            fuzzy_hits.push((distance, label));
+        }
+    }
+
+    let mut suggestions: Vec<String> = prefix_hits
+        .into_iter()
+        .chain(substring_hits)
+        .take(limit)
+        .collect();
+
+    // Typo matches are a last resort: only surface them when nothing matched by
+    // prefix or substring, ranked closest-first (ties keep registration order).
+    if suggestions.is_empty() {
+        fuzzy_hits.sort_by_key(|(distance, _)| *distance);
+        suggestions = fuzzy_hits
+            .into_iter()
+            .map(|(_, label)| label)
+            .take(limit)
+            .collect();
+    }
+
+    suggestions
+}
+
+/// Classic two-row Levenshtein edit distance over chars. Command names are
+/// short, so the O(n*m) cost is negligible.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 fn find_command<'a>(

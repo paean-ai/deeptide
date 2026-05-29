@@ -512,8 +512,9 @@ impl ReplSession {
             "cron" => self.execute_cron_command(args),
             "goal" | "objective" => return self.execute_goal_command(args),
             "cache" | "kvcache" | "manifest" => self.execute_cache_command(args),
-            _ => CommandResult::Text(format!(
-                "Unknown command: /{name}\nType /help for the full list."
+            _ => CommandResult::Text(crate::commands::render_unknown_command(
+                &name,
+                &context.all_commands(),
             )),
         };
 

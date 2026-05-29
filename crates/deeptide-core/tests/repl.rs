@@ -1550,6 +1550,24 @@ fn repl_sessions_command_is_routed_and_functional() {
 }
 
 #[test]
+fn repl_unknown_command_suggests_closest_match() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+
+    // A directly-typed typo routes through the shared fuzzy suggester, so the
+    // REPL now offers a "did you mean" instead of a bare unknown-command error.
+    let output = only_output(repl.submit("/statuus"));
+    assert!(
+        output.contains("Unknown command: /statuus"),
+        "got: {output}"
+    );
+    assert!(
+        output.contains("Did you mean: /status?"),
+        "expected /status suggestion, got: {output}"
+    );
+}
+
+#[test]
 fn repl_session_saves_and_can_be_resumed() {
     use deeptide_core::{SessionStore, new_session_id};
 
