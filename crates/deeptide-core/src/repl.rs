@@ -205,15 +205,23 @@ impl ReplSession {
     }
 
     /// Run the end-of-session memory-consolidation pass, if warranted, and
-    /// return its events. The host should call this once when the session is
-    /// ending for any reason — typed `/exit`, Ctrl-D / EOF, or signal — so
-    /// durable facts are captured without the user invoking `/remember`. The
-    /// in-crate `/exit` command routes through this too.
+    /// return its events, so durable facts are captured without the user
+    /// invoking `/remember`. The in-crate `/exit` command routes through this,
+    /// and the CLI host also calls it on Ctrl-D / EOF. A host that can be torn
+    /// down by signal should install a handler that calls this too — it is
+    /// idempotent, so an extra call after `/exit` is a no-op.
+    ///
+    /// The pass itself reuses [`run_dream_consolidation_once`] (the agent-driven
+    /// consolidation prompt). The standalone [`crate::memory_capture`] prompt
+    /// builder / parser is a separate, not-yet-wired building block — it is not
+    /// on this path.
     ///
     /// Fires at most once per session, and only when capture is enabled, the
     /// session persists turns, and at least one user turn happened. A scheduled
     /// `/dream` pass that already fired on this exact turn count is treated as
     /// the consolidation, so we don't double-run.
+    ///
+    /// [`run_dream_consolidation_once`]: ReplSession::run_dream_consolidation_once
     pub fn finalize_session(&mut self) -> Vec<ReplEvent> {
         if self.session_consolidated
             || !self.session_end_capture

@@ -893,8 +893,31 @@ fn run_interactive(
                 continue;
             }
             Err(ReadlineError::Eof) => {
-                // Ctrl+D on empty line — exit gracefully
+                // Ctrl+D on empty line — the most common way to leave the REPL.
+                // Run the same end-of-session consolidation pass as a typed
+                // `/exit` so durable facts are captured here too. Without this,
+                // capture only fired on the literal `/exit` command and silently
+                // skipped every Ctrl-D exit. `finalize_session` emits Output
+                // events only (it never returns Exit), so we render and break.
                 writeln!(stdout).map_err(|error| error.to_string())?;
+                for event in repl.finalize_session() {
+                    if let ReplEvent::Output(text) = event {
+                        if did_stream.swap(false, Ordering::Relaxed) {
+                            writeln!(stdout).map_err(|error| error.to_string())?;
+                        } else {
+                            writeln!(
+                                stdout,
+                                "{}",
+                                tui::render_output_panel(
+                                    &text,
+                                    terminal_width().unwrap_or(100),
+                                    use_color,
+                                )
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
+                    }
+                }
                 break;
             }
             Err(error) => return Err(error.to_string()),

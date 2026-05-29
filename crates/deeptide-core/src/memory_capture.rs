@@ -11,6 +11,15 @@
 //! Affordability — running this every session only makes sense if it is cheap.
 //! `benchmarks/auto_capture_bench.py` measures recall of planted facts, the
 //! false-positive rate, and the real ¥ cost per session against the live API.
+//! Note that the benchmark exercises a Python mirror of [`build_capture_prompt`]
+//! — those numbers characterize *this* prompt/parser, not the agent-driven
+//! consolidation that currently runs at session end.
+//!
+//! **Status: not yet wired.** The live end-of-session pass
+//! (`ReplSession::finalize_session`) reuses the existing agent-driven dream
+//! consolidation, not this module. These functions are a building block kept
+//! ready for the confirmation-based capture flow; until that flow is built they
+//! are reachable only from tests and the benchmark.
 
 use serde::Deserialize;
 

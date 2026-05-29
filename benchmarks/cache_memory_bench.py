@@ -34,7 +34,10 @@ import time
 import urllib.request
 
 API = "https://api.deepseek.com/chat/completions"
-MODEL = "deepseek-chat"
+# Default to the real account model id (GET /models). `deepseek-chat` is a
+# legacy alias that bills as flash, so it never exercises the pro tier — use
+# `--model deepseek-v4-pro` for that.
+MODEL = "deepseek-v4-flash"
 
 # A per-run nonce mixed into the stable prefix. Without it, runs share DeepSeek's
 # account-level content-keyed cache, so a second run hits the first run's warmed
@@ -130,7 +133,7 @@ def run_variant(key, name, builder, turns, entries_for_turn, model=MODEL):
     # Reasoning / pro tiers emit separate reasoning tokens before the answer, so
     # give them headroom; we still only read the usage/cache fields, never the
     # output.
-    max_tokens = 8 if model in ("deepseek-chat",) else 64
+    max_tokens = 64 if "pro" in model or "reasoner" in model else 8
     for turn in range(1, turns + 1):
         body = {
             "model": model,
@@ -161,7 +164,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--turns", type=int, default=5)
     ap.add_argument("--model", default=MODEL,
-                    help="DeepSeek model id, e.g. deepseek-chat or deepseek-reasoner (pro)")
+                    help="DeepSeek model id, e.g. deepseek-v4-flash (default) or deepseek-v4-pro")
     ap.add_argument("--salt", default=None,
                     help="run nonce (default: random) — keeps runs from sharing cache")
     args = ap.parse_args()

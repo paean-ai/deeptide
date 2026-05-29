@@ -44,10 +44,12 @@ pub fn tokenize(text: &str) -> Vec<String> {
     out
 }
 
-/// BM25 weight given to the recency nudge. Small on purpose: recency only
-/// separates entries that are otherwise close on relevance, it never
+/// BM25 weight given to the recency nudge. Deliberately tiny: recency is
+/// normalized relative to the matched set, so a sub-second mtime gap can span
+/// the full `[0, 1]` range. Keeping the weight well below a single matched
+/// term's BM25 contribution ensures recency only breaks near-ties and never
 /// outranks a clearly better textual match.
-const RECENCY_WEIGHT: f64 = 0.5;
+const RECENCY_WEIGHT: f64 = 0.1;
 const K1: f64 = 1.5;
 const B: f64 = 0.75;
 
@@ -69,23 +71,30 @@ pub fn rank(query: &str, docs: &[RankDoc], k: usize) -> Vec<(usize, f64)> {
     let avg_len = doc_len.iter().sum::<f64>() / doc_len.len() as f64;
     let n = docs.len() as f64;
 
-    // Document frequency per query term.
-    let mut scored: Vec<(usize, f64)> = Vec::new();
-    for (i, terms) in doc_terms.iter().enumerate() {
-        let mut score = 0.0;
-        for q in &query_terms {
-            let tf = terms.iter().filter(|t| *t == q).count() as f64;
-            if tf == 0.0 {
-                continue;
-            }
+    // Inverse document frequency per query term, computed once (a term's df is
+    // doc-independent, so recomputing it per document was O(D²·Q) for no gain).
+    let idf: Vec<f64> = query_terms
+        .iter()
+        .map(|q| {
             let df = doc_terms
                 .iter()
                 .filter(|d| d.iter().any(|t| t == q))
                 .count() as f64;
             // BM25 idf (with the +1 guard so it never goes negative).
-            let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
+            (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+        })
+        .collect();
+
+    let mut scored: Vec<(usize, f64)> = Vec::new();
+    for (i, terms) in doc_terms.iter().enumerate() {
+        let mut score = 0.0;
+        for (qi, q) in query_terms.iter().enumerate() {
+            let tf = terms.iter().filter(|t| *t == q).count() as f64;
+            if tf == 0.0 {
+                continue;
+            }
             let denom = tf + K1 * (1.0 - B + B * doc_len[i] / avg_len.max(1.0));
-            score += idf * (tf * (K1 + 1.0)) / denom;
+            score += idf[qi] * (tf * (K1 + 1.0)) / denom;
         }
         if score > 0.0 {
             scored.push((i, score + RECENCY_WEIGHT * docs[i].recency));

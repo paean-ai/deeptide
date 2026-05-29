@@ -472,14 +472,6 @@ pub fn strip_frontmatter(raw: &str) -> String {
     lines.join("\n").trim().to_owned()
 }
 
-/// Whether a line is a `MEMORY.md` index entry (`- [Title](file.md) — hook`).
-/// Used to count what overflows the cached core so the notice can point at
-/// on-demand retrieval instead of silently dropping it.
-fn is_index_entry(line: &str) -> bool {
-    let t = line.trim();
-    t.starts_with("- [") && t.contains("](") && t.contains(".md")
-}
-
 /// Cap the memory block injected into the system prompt to a deterministic,
 /// **line-aligned**, byte-stable prefix.
 ///
@@ -492,9 +484,14 @@ fn is_index_entry(line: &str) -> bool {
 /// memory entries (which land at the end of the index) must never perturb the
 /// retained head — this function guarantees that.
 ///
-/// Overflow is **relocated, not lost**: the notice reports how many entries
-/// were left out so the agent can pull them with `MemorySearch` (two-tier
-/// memory — a cached core plus an on-demand long tail).
+/// Overflow is **relocated, not lost**: the notice always points the agent at
+/// `MemorySearch`, which retrieves the full memory files on demand (two-tier
+/// memory — a cached core plus an on-demand long tail), and reports how many
+/// lines were dropped from the core. The count is in *lines* rather than
+/// entries because the only production caller ([`load_memory_index`]) expands
+/// each index entry into the referenced file's body before this runs, so by
+/// the time we truncate there are no entry boundaries left to count — the cut
+/// lands inside concatenated bodies.
 pub fn truncate_memory(text: &str) -> String {
     let lines = text.split('\n').collect::<Vec<_>>();
 
@@ -508,7 +505,14 @@ pub fn truncate_memory(text: &str) -> String {
         } else {
             line.len() + 1
         };
-        if kept.len() >= MEMORY_MAX_LINES || bytes + added > MEMORY_MAX_BYTES {
+        // Always retain at least the first line, even if it alone exceeds the
+        // byte cap — cutting on the line boundary keeps the prefix cache-stable,
+        // and dropping the whole block to leave only the notice would lose more
+        // than it saves. (The old mid-line byte cut produced a non-line-aligned,
+        // cache-busting prefix; we accept a slightly over-cap single line over
+        // that.)
+        if !kept.is_empty() && (kept.len() >= MEMORY_MAX_LINES || bytes + added > MEMORY_MAX_BYTES)
+        {
             cut_at = Some(i);
             break;
         }
@@ -519,24 +523,20 @@ pub fn truncate_memory(text: &str) -> String {
     let mut out = kept.join("\n");
 
     if let Some(i) = cut_at {
-        let dropped_entries = lines[i..].iter().filter(|l| is_index_entry(l)).count();
+        // How many non-empty lines were cut from the cached core. They aren't
+        // lost — they still live in the memory files MemorySearch retrieves.
+        let dropped = lines[i..].iter().filter(|l| !l.trim().is_empty()).count();
         let by_lines = kept.len() >= MEMORY_MAX_LINES;
         let why = if by_lines {
             format!("{MEMORY_MAX_LINES} lines")
         } else {
             format!("{} KB", MEMORY_MAX_BYTES / 1024)
         };
-        if dropped_entries > 0 {
-            out.push_str(&format!(
-                "\n\n...(memory core capped at {why} per tide-spec/0.1 section 13.1; \
-                 {dropped_entries} more entr{} available via MemorySearch)...",
-                if dropped_entries == 1 { "y" } else { "ies" }
-            ));
-        } else {
-            out.push_str(&format!(
-                "\n\n...(memory truncated at {why} per tide-spec/0.1 section 13.1)..."
-            ));
-        }
+        out.push_str(&format!(
+            "\n\n...(memory core capped at {why} per tide-spec/0.1 section 13.1; \
+             {dropped} more line{} available via MemorySearch)...",
+            if dropped == 1 { "" } else { "s" }
+        ));
     }
 
     out
@@ -735,8 +735,39 @@ mod cache_alignment_tests {
             "missing retrieval pointer: {out:?}"
         );
         assert!(
-            out.contains("more entr"),
-            "missing dropped-entry count: {out:?}"
+            out.contains("more line"),
+            "missing dropped-line count: {out:?}"
+        );
+    }
+
+    /// Regression guard for the real production path: `load_memory_index`
+    /// expands each `- [..](x.md)` index line into the referenced file's *body*
+    /// before `truncate_memory` runs, so the cut lands inside concatenated
+    /// bodies — not on index lines. This drives that exact path into overflow
+    /// and asserts the MemorySearch relocation pointer still fires (it used to
+    /// be keyed on index-line shape that never reaches `truncate_memory`, so it
+    /// silently never fired in production).
+    #[test]
+    fn real_index_expansion_path_relocates_overflow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index = dir.path().join(MEMORY_INDEX_FILE);
+        // Each referenced file has a body large enough that the concatenation
+        // overflows the byte cap.
+        let big_body = "lorem ipsum dolor sit amet consectetur. ".repeat(800);
+        let mut idx = String::from("# memory\n");
+        for i in 0..3 {
+            let fname = format!("mem-{i}.md");
+            std::fs::write(dir.path().join(&fname), &big_body).expect("write body");
+            idx.push_str(&format!("- [Entry {i}]({fname}) — hook {i}\n"));
+        }
+        std::fs::write(&index, idx).expect("write index");
+
+        let expanded = load_memory_index(&index).expect("index loads + expands");
+        let out = truncate_memory(&expanded);
+        assert!(
+            out.contains("via MemorySearch"),
+            "real expansion path must relocate overflow to MemorySearch: {}",
+            &out[out.len().saturating_sub(200)..]
         );
     }
 
@@ -745,5 +776,16 @@ mod cache_alignment_tests {
         let out = truncate_memory(&index_with(5000));
         let body = out.split("\n\n...").next().expect("body before notice");
         assert!(body.lines().count() <= MEMORY_MAX_LINES);
+    }
+
+    /// A single line longer than the byte cap is kept whole (line-aligned),
+    /// not dropped to leave only the notice — otherwise an over-long leading
+    /// line would erase the entire block.
+    #[test]
+    fn over_long_single_line_is_kept_whole() {
+        let huge = "x".repeat(MEMORY_MAX_BYTES * 2);
+        let out = truncate_memory(&huge);
+        let body = out.split("\n\n...").next().expect("body before notice");
+        assert_eq!(body, huge, "over-long single line must be retained whole");
     }
 }
