@@ -240,6 +240,14 @@ struct Cli {
         help = "List saved sessions for this directory and exit (no API key required)."
     )]
     list_sessions: bool,
+
+    #[arg(
+        long = "no-session-persistence",
+        env = "DEEPTIDE_NO_SESSION_PERSISTENCE",
+        action = ArgAction::SetTrue,
+        help = "Do not autosave conversation turns to disk (privacy / scratch sessions)."
+    )]
+    no_session_persistence: bool,
 }
 
 fn main() {
@@ -604,6 +612,7 @@ fn run_interactive(
         .with_fast_mode(cli.fast)
         .with_hooks(hooks)
         .with_tool_restrictions(allowed_tools, disallowed_tools)
+        .with_session_persistence(!cli.no_session_persistence)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
     if let Some(append) = cli.append_system_prompt.as_deref() {
@@ -1193,6 +1202,7 @@ mod tests {
             continue_session: false,
             resume: None,
             list_sessions: false,
+            no_session_persistence: false,
         }
     }
 

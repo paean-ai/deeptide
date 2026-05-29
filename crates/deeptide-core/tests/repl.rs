@@ -1604,6 +1604,31 @@ fn repl_resume_session_method_restores_and_continues_same_id() {
 }
 
 #[test]
+fn repl_no_session_persistence_skips_autosave() {
+    use deeptide_core::SessionStore;
+
+    // Persistence disabled: a completed turn writes no session file.
+    let off = tempfile::tempdir().expect("tempdir");
+    let mut repl = ReplSession::new(Box::new(StaticBackend))
+        .with_cwd(off.path())
+        .with_session_persistence(false);
+    repl.submit("hello");
+    assert!(
+        SessionStore::list(off.path()).is_empty(),
+        "no session should be saved when persistence is disabled"
+    );
+
+    // Default (persistence enabled): the same turn saves a session.
+    let on = tempfile::tempdir().expect("tempdir");
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(on.path());
+    repl.submit("hello");
+    assert!(
+        !SessionStore::list(on.path()).is_empty(),
+        "default persistence should autosave the session"
+    );
+}
+
+#[test]
 fn repl_with_appended_system_prompt_keeps_base_and_appends() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repl = ReplSession::new(Box::new(StaticBackend))
