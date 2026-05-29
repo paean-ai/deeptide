@@ -17,8 +17,48 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplEvent {
+    /// Free-form assistant text or slash-command output. The CLI renders
+    /// this through the markdown pipeline (live or assembled).
     Output(String),
+    /// A structured, system-emitted message — tool execution events,
+    /// auto-compaction summaries, terminal conditions. Carries enough
+    /// metadata for the CLI to apply tool-specific styling (color, icons,
+    /// dim call IDs) without parsing strings.
+    System(SystemMessage),
+    /// Request the CLI to exit the REPL loop (e.g. `/exit`, Ctrl+D).
     Exit,
+}
+
+/// Structured payload for [`ReplEvent::System`]. Each variant carries the
+/// raw data needed by the CLI to render the event; the deeptide-core layer
+/// stays color-agnostic because color is a CLI-time concern (driven by
+/// `--no-color` / `NO_COLOR` / TTY detection).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemMessage {
+    /// "Tools completed: Read 1 file in ." — the batch-level rollup the
+    /// agent loop emits after a tool batch finishes.
+    ToolBatch { label: String, failed_count: usize },
+    /// Per-tool result line — the CLI styles success vs failure differently
+    /// and dims the call_id by default.
+    Tool {
+        name: String,
+        call_id: String,
+        summary: String,
+        is_error: bool,
+        /// Optional expanded body shown verbatim after the summary line
+        /// (small, successful tool results only — see
+        /// `should_expand_tool_result`).
+        body: Option<String>,
+    },
+    /// Auto-compaction completed; `compressed_messages` older messages
+    /// folded into a summary, `tokens_after` tokens remain.
+    Compaction {
+        compressed_messages: usize,
+        tokens_after: usize,
+    },
+    /// Terminal notice (max-turns, model error, blocked context window).
+    /// Carries a pre-formatted message; the CLI applies an "alert" style.
+    Notice(String),
 }
 
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
@@ -1949,63 +1989,70 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
             label,
             failed_count,
             ..
-        } => {
-            let status = if failed_count == 0 {
-                "completed"
-            } else {
-                "completed with failures"
-            };
-            Some(ReplEvent::Output(format!("Tools {status}: {label}")))
-        }
-        AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => {
-            Some(ReplEvent::Output(String::from("Maximum turns reached.")))
-        }
-        AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)) => {
-            Some(ReplEvent::Output(format!("Model error: {error}")))
-        }
+        } => Some(ReplEvent::System(SystemMessage::ToolBatch {
+            label,
+            failed_count,
+        })),
+        AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => Some(ReplEvent::System(
+            SystemMessage::Notice(String::from("Maximum turns reached.")),
+        )),
+        AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)) => Some(ReplEvent::System(
+            SystemMessage::Notice(format!("Model error: {error}")),
+        )),
         AgentLoopEvent::Terminal(AgentTerminalEvent::Blocked) => {
-            Some(ReplEvent::Output(String::from(
+            Some(ReplEvent::System(SystemMessage::Notice(String::from(
                 "Context window full: the transcript exceeds the model's limit even after compaction. Start a new session (/new) or trim context.",
-            )))
+            ))))
         }
         AgentLoopEvent::ToolResult {
             tool_call,
             content,
             is_error,
-        } => Some(ReplEvent::Output(render_tool_result_for_repl(
+        } => Some(ReplEvent::System(build_tool_system_message(
             &tool_call.name,
             &tool_call.id,
             &content,
             is_error,
         ))),
-        AgentLoopEvent::Compaction(report) => Some(ReplEvent::Output(format!(
-            "Context auto-compacted: folded {} earlier message(s); ~{} tokens now.",
-            report.compressed_messages, report.tokens_after
-        ))),
+        AgentLoopEvent::Compaction(report) => Some(ReplEvent::System(SystemMessage::Compaction {
+            compressed_messages: report.compressed_messages,
+            tokens_after: report.tokens_after,
+        })),
         AgentLoopEvent::User(_) | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => None,
     }
 }
 
-fn render_tool_result_for_repl(
+/// Build a structured [`SystemMessage::Tool`] from a single tool result.
+/// Decides whether the body is small enough to inline below the summary
+/// (`should_expand_tool_result`); the CLI then renders the body verbatim
+/// without re-applying markdown styling so tool output (file contents,
+/// command output, etc.) is preserved exactly.
+fn build_tool_system_message(
     tool_name: &str,
     tool_id: &str,
     content: &str,
     is_error: bool,
-) -> String {
+) -> SystemMessage {
     let summary = ToolResultSummaryFormatter::summary(tool_name, content, is_error);
-    let verb = if is_error { "failed" } else { "completed" };
-    let header = format!("Tool {tool_name} ({tool_id}) {verb}:");
     let trimmed = content.trim();
 
-    if is_error
+    let body = if is_error
         || trimmed.is_empty()
         || ToolResultSummaryFormatter::should_mute_appearance(tool_name, content, is_error)
         || !should_expand_tool_result(trimmed)
     {
-        return format!("{header} {summary}");
-    }
+        None
+    } else {
+        Some(trimmed.to_owned())
+    };
 
-    format!("{header} {summary}\n{trimmed}")
+    SystemMessage::Tool {
+        name: tool_name.to_owned(),
+        call_id: tool_id.to_owned(),
+        summary,
+        is_error,
+        body,
+    }
 }
 
 fn should_expand_tool_result(trimmed: &str) -> bool {

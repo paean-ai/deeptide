@@ -1,6 +1,6 @@
 use deeptide_core::{
     AgentBackend, AgentRequest, AgentResponse, AgentUsage, PermissionManager, PermissionMode,
-    PermissionRules, ReplEvent, ReplSession, ToolCall,
+    PermissionRules, ReplEvent, ReplSession, SystemMessage, ToolCall,
 };
 use std::sync::{Arc, Mutex};
 
@@ -200,15 +200,23 @@ fn repl_shows_tool_batch_summary_before_tool_output() {
     assert!(events.iter().any(|event| {
         matches!(
             event,
-            ReplEvent::Output(output) if output == "Tools completed: Read 1 file in ."
+            ReplEvent::System(SystemMessage::ToolBatch { label, failed_count: 0 })
+                if label == "Read 1 file in ."
         )
     }));
     assert!(events.iter().any(|event| {
         matches!(
             event,
-            ReplEvent::Output(output)
-                if output.contains("Tool Read (toolu_read) completed: 1 lines")
-                    && output.contains("1\talpha")
+            ReplEvent::System(SystemMessage::Tool {
+                name,
+                call_id,
+                summary,
+                is_error: false,
+                body: Some(body),
+            }) if name == "Read"
+                && call_id == "toolu_read"
+                && summary.contains("1 lines")
+                && body.contains("1\talpha")
         )
     }));
 }
@@ -228,14 +236,24 @@ fn repl_summarizes_long_tool_output() {
     assert!(events.iter().any(|event| {
         matches!(
             event,
-            ReplEvent::Output(output)
-                if output == "Tool Read (toolu_read) completed: 20 lines (201 B)"
+            ReplEvent::System(SystemMessage::Tool {
+                name,
+                call_id,
+                summary,
+                is_error: false,
+                body: None,
+            }) if name == "Read"
+                && call_id == "toolu_read"
+                && summary == "20 lines (201 B)"
         )
     }));
+    // Body must NOT be inlined when the result is too large to expand
+    // (>2_000 bytes or >12 lines). The CLI surfaces the summary only.
     assert!(!events.iter().any(|event| {
         matches!(
             event,
-            ReplEvent::Output(output) if output.contains("13\tline-13")
+            ReplEvent::System(SystemMessage::Tool { body: Some(body), .. })
+                if body.contains("13\tline-13")
         )
     }));
 }
@@ -249,8 +267,15 @@ fn repl_compacts_recoverable_tool_failures() {
     assert!(events.iter().any(|event| {
         matches!(
             event,
-            ReplEvent::Output(output)
-                if output == "Tool Read (toolu_missing) failed: file not found — use Glob or find to locate it"
+            ReplEvent::System(SystemMessage::Tool {
+                name,
+                call_id,
+                summary,
+                is_error: true,
+                body: None,
+            }) if name == "Read"
+                && call_id == "toolu_missing"
+                && summary == "file not found — use Glob or find to locate it"
         )
     }));
 }
@@ -917,7 +942,8 @@ fn repl_honors_max_turns_setting() {
     assert!(events.iter().any(|event| {
         matches!(
             event,
-            ReplEvent::Output(output) if output == "Maximum turns reached."
+            ReplEvent::System(SystemMessage::Notice(notice))
+                if notice == "Maximum turns reached."
         )
     }));
     assert_eq!(repl.agent_loop().max_turns(), 1);

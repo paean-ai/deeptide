@@ -14,7 +14,7 @@ use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
     AskOutcome, CommandCompletionSource, CompletionEngine, LocalEchoBackend, MarkdownRenderOptions,
     ModelPricing, ReplEvent, ReplSession, StatusSegment, StreamingEvent, StreamingHandler,
-    StreamingMarkdownRenderer, ThinkingConfig, ToolCall, tui,
+    StreamingMarkdownRenderer, SystemMessage, ThinkingConfig, ToolCall, tui,
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -961,6 +961,10 @@ fn run_interactive(
                                 .map_err(|error| error.to_string())?;
                             }
                         }
+                        ReplEvent::System(message) => {
+                            let rendered = render_system_message(&message, use_color, cli.debug);
+                            writeln!(stdout, "{rendered}").map_err(|error| error.to_string())?;
+                        }
                         ReplEvent::Exit => {
                             if let Some(ref path) = history_path {
                                 save_history(&mut rl, path);
@@ -1715,6 +1719,130 @@ fn effective_credential(cli: &Cli) -> Option<CloudCredential> {
     None
 }
 
+/// Render a [`SystemMessage`] for the interactive REPL. Color is applied
+/// when the user hasn't opted out via `--no-color` / `NO_COLOR`; in plain
+/// mode the output is just the structured fields joined together.
+///
+/// Styling vocabulary:
+/// - tool batch summary       → dim `· Tools …`
+/// - tool success             → green `✓ <Name>` + dim summary
+/// - tool failure             → red `✗ <Name>` + bright summary
+/// - small successful body    → dim `│ <line>` left-bar (claude-code style)
+/// - compaction notice        → dim `· Context auto-compacted …`
+/// - notice (alert)           → yellow `⚠ <message>`
+/// - call-id                  → only shown under `--debug` (was always-on)
+fn render_system_message(message: &SystemMessage, use_color: bool, debug: bool) -> String {
+    match message {
+        SystemMessage::ToolBatch {
+            label,
+            failed_count,
+        } => {
+            let verb = if *failed_count == 0 {
+                "Tools completed"
+            } else {
+                "Tools completed with failures"
+            };
+            let raw = format!("· {verb}: {label}");
+            status_bar::dim(&raw, use_color)
+        }
+        SystemMessage::Tool {
+            name,
+            call_id,
+            summary,
+            is_error,
+            body,
+        } => render_tool_event(
+            name,
+            call_id,
+            summary,
+            *is_error,
+            body.as_deref(),
+            use_color,
+            debug,
+        ),
+        SystemMessage::Compaction {
+            compressed_messages,
+            tokens_after,
+        } => {
+            let raw = format!(
+                "· Context auto-compacted: folded {compressed_messages} earlier message(s); ~{tokens_after} tokens now."
+            );
+            status_bar::dim(&raw, use_color)
+        }
+        SystemMessage::Notice(text) => {
+            if use_color {
+                format!("\x1b[33m⚠ {text}\x1b[0m")
+            } else {
+                format!("! {text}")
+            }
+        }
+    }
+}
+
+/// Format a single tool event line. Call IDs are hidden by default
+/// (they're long and noisy) and only re-surfaced under `--debug` for
+/// correlation with backend logs.
+fn render_tool_event(
+    name: &str,
+    call_id: &str,
+    summary: &str,
+    is_error: bool,
+    body: Option<&str>,
+    use_color: bool,
+    debug: bool,
+) -> String {
+    let id_suffix = if debug {
+        format!(" ({call_id})")
+    } else {
+        String::new()
+    };
+
+    let header = if is_error {
+        if use_color {
+            format!(
+                "\x1b[31m✗\x1b[0m \x1b[1m{name}\x1b[0m{id_dim}  \x1b[31m{summary}\x1b[0m",
+                id_dim = if debug {
+                    format!("\x1b[2m{id_suffix}\x1b[0m")
+                } else {
+                    String::new()
+                }
+            )
+        } else {
+            format!("✗ {name}{id_suffix}  {summary}")
+        }
+    } else if use_color {
+        format!(
+            "\x1b[32m✓\x1b[0m \x1b[1m{name}\x1b[0m{id_dim}  \x1b[2m{summary}\x1b[0m",
+            id_dim = if debug {
+                format!("\x1b[2m{id_suffix}\x1b[0m")
+            } else {
+                String::new()
+            }
+        )
+    } else {
+        format!("✓ {name}{id_suffix}  {summary}")
+    };
+
+    match body {
+        Some(body) if !body.is_empty() => {
+            // Indent body lines with a dim left bar so they're visually
+            // grouped with the tool header without overwhelming the bar.
+            let prefix = if use_color {
+                "\x1b[2m│\x1b[0m "
+            } else {
+                "│ "
+            };
+            let body_block = body
+                .lines()
+                .map(|line| format!("{prefix}{line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{header}\n{body_block}")
+        }
+        _ => header,
+    }
+}
+
 /// Advance the permission mode by one step around the cycle
 /// `Default → AcceptEdits → Plan → Bypass → Default`. Bound to Shift+Tab so
 /// users can switch into YOLO mid-session without restarting the REPL.
@@ -2014,11 +2142,13 @@ mod tests {
         Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
         build_auth_segment, collect_prompt, configured_backend, effective_base_url,
         effective_model, next_permission_mode, normalize_embedded_mode, paean_token_resolved,
-        summarize_tool_call_for_prompt, use_color, validate_formats,
+        render_system_message, summarize_tool_call_for_prompt, use_color, validate_formats,
     };
     use clap::Parser;
     use deeptide_core::permissions::PermissionMode;
-    use deeptide_core::{AnthropicAuthMode, ConfigData, ProviderProfile, ThinkingConfig};
+    use deeptide_core::{
+        AnthropicAuthMode, ConfigData, ProviderProfile, SystemMessage, ThinkingConfig,
+    };
     use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -3099,6 +3229,170 @@ mod tests {
 
     fn tool_call(name: &str, input: serde_json::Value) -> deeptide_core::ToolCall {
         deeptide_core::ToolCall::new("call_test", name, input)
+    }
+
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn tool_batch_summary_dims_with_dot_prefix() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::ToolBatch {
+                label: "Read 2 files in src/".into(),
+                failed_count: 0,
+            },
+            true,
+            false,
+        ));
+        assert_eq!(plain, "· Tools completed: Read 2 files in src/");
+        // ANSI codes present for color-on: dim escape \x1b[2m must appear.
+        let colored = render_system_message(
+            &SystemMessage::ToolBatch {
+                label: "Read 2 files in src/".into(),
+                failed_count: 0,
+            },
+            true,
+            false,
+        );
+        assert!(colored.contains("\x1b[2m"), "got: {colored:?}");
+    }
+
+    #[test]
+    fn tool_batch_failure_uses_failed_verb() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::ToolBatch {
+                label: "Wrote 1 write, 1 failed".into(),
+                failed_count: 1,
+            },
+            false,
+            false,
+        ));
+        assert_eq!(
+            plain,
+            "· Tools completed with failures: Wrote 1 write, 1 failed"
+        );
+    }
+
+    #[test]
+    fn tool_success_shows_green_check_and_hides_call_id_by_default() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::Tool {
+                name: "Read".into(),
+                call_id: "toolu_abc123".into(),
+                summary: "1 lines".into(),
+                is_error: false,
+                body: None,
+            },
+            true,
+            false,
+        ));
+        // Visible glyphs only — call_id must not leak.
+        assert!(plain.starts_with("✓ Read"), "got: {plain:?}");
+        assert!(plain.contains("1 lines"), "got: {plain:?}");
+        assert!(!plain.contains("toolu_abc123"), "got: {plain:?}");
+    }
+
+    #[test]
+    fn tool_success_surfaces_call_id_under_debug() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::Tool {
+                name: "Read".into(),
+                call_id: "toolu_abc123".into(),
+                summary: "1 lines".into(),
+                is_error: false,
+                body: None,
+            },
+            false,
+            true,
+        ));
+        assert!(plain.contains("toolu_abc123"), "got: {plain:?}");
+    }
+
+    #[test]
+    fn tool_failure_shows_red_cross_and_summary() {
+        let colored = render_system_message(
+            &SystemMessage::Tool {
+                name: "Write".into(),
+                call_id: "toolu_w".into(),
+                summary: "Permission required for Write.".into(),
+                is_error: true,
+                body: None,
+            },
+            true,
+            false,
+        );
+        // Red escape \x1b[31m must appear for the failure glyph and summary.
+        assert!(colored.contains("\x1b[31m"), "got: {colored:?}");
+        let plain = strip_ansi(&colored);
+        assert!(plain.starts_with("✗ Write"), "got: {plain:?}");
+        assert!(plain.contains("Permission required"), "got: {plain:?}");
+    }
+
+    #[test]
+    fn tool_body_renders_with_dim_left_bar() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::Tool {
+                name: "Read".into(),
+                call_id: "x".into(),
+                summary: "2 lines".into(),
+                is_error: false,
+                body: Some("1\talpha\n2\tbeta".into()),
+            },
+            true,
+            false,
+        ));
+        let lines: Vec<&str> = plain.lines().collect();
+        assert!(lines[0].starts_with("✓ Read"), "got: {lines:?}");
+        assert_eq!(lines[1], "│ 1\talpha");
+        assert_eq!(lines[2], "│ 2\tbeta");
+    }
+
+    #[test]
+    fn compaction_message_dims_with_dot_prefix() {
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::Compaction {
+                compressed_messages: 4,
+                tokens_after: 12_345,
+            },
+            true,
+            false,
+        ));
+        assert_eq!(
+            plain,
+            "· Context auto-compacted: folded 4 earlier message(s); ~12345 tokens now."
+        );
+    }
+
+    #[test]
+    fn notice_uses_alert_glyph_and_yellow_color() {
+        let colored = render_system_message(
+            &SystemMessage::Notice("Maximum turns reached.".into()),
+            true,
+            false,
+        );
+        assert!(colored.contains("\x1b[33m"), "got: {colored:?}");
+        let plain = strip_ansi(&colored);
+        assert_eq!(plain, "⚠ Maximum turns reached.");
+
+        // Plain mode falls back to ASCII for portability.
+        let plain_mode =
+            render_system_message(&SystemMessage::Notice("Boom.".into()), false, false);
+        assert_eq!(plain_mode, "! Boom.");
     }
 
     #[test]
