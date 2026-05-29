@@ -788,10 +788,12 @@ fn emit_output(
     cwd: &Path,
     hooks: deeptide_core::HookEngine,
 ) -> Result<(), String> {
-    let response = run_prompt(cli, prompt, permission_mode, cwd, hooks)?;
+    let outcome = run_prompt(cli, prompt, permission_mode, cwd, hooks);
 
     match cli.output_format {
         OutputFormat::Text => {
+            // Plain text propagates errors to stderr / non-zero exit.
+            let response = outcome?.response;
             println!(
                 "{}",
                 tui::render_output_panel(
@@ -802,17 +804,9 @@ fn emit_output(
             );
         }
         OutputFormat::Json => {
-            let body = serde_json::json!({
-                "prompt": prompt,
-                "response": response,
-                "input_format": cli.input_format.as_ref(),
-                "output_format": cli.output_format.as_ref(),
-                "embedded": cli.embedded,
-                "session_id": cli.session_id,
-                "permission_mode": permission_mode.label(),
-                "model": cli.model,
-                "max_turns": cli.max_turns,
-            });
+            // Emit the result envelope (success or error) as a single JSON
+            // object so machine consumers always get a parseable result.
+            let body = one_shot_result_json(&outcome, &cli.model);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&body).map_err(|error| error.to_string())?
@@ -824,24 +818,22 @@ fn emit_output(
                 serde_json::to_string(&EmbeddedProtocolSpec::default())
                     .map_err(|error| error.to_string())?
             );
+            let body = one_shot_result_json(&outcome, &cli.model);
             println!(
                 "{}",
-                serde_json::to_string(&serde_json::json!({
-                    "type": "result",
-                    "subtype": "assistant_response",
-                    "prompt": prompt,
-                    "response": response,
-                    "session_id": cli.session_id,
-                    "permission_mode": permission_mode.label(),
-                    "model": cli.model,
-                    "max_turns": cli.max_turns,
-                }))
-                .map_err(|error| error.to_string())?
+                serde_json::to_string(&body).map_err(|error| error.to_string())?
             );
         }
     }
 
     Ok(())
+}
+
+/// The outcome of a one-shot (`--print`) run: the assistant's final text plus
+/// the run's accumulated cost/token usage, used to build the result envelope.
+struct PromptOutcome {
+    response: String,
+    cost: deeptide_core::CostSummary,
 }
 
 fn run_prompt(
@@ -850,7 +842,7 @@ fn run_prompt(
     permission_mode: PermissionMode,
     cwd: &Path,
     hooks: deeptide_core::HookEngine,
-) -> Result<String, String> {
+) -> Result<PromptOutcome, String> {
     let configured = configured_backend(cli)?;
     let (allowed_tools, disallowed_tools) = parse_tool_restrictions(
         cli.allowed_tools.as_deref(),
@@ -900,7 +892,42 @@ fn run_prompt(
         }
     }
 
-    assistant.ok_or_else(|| String::from("model returned no assistant message"))
+    let response = assistant.ok_or_else(|| String::from("model returned no assistant message"))?;
+    Ok(PromptOutcome {
+        response,
+        cost: loop_.cost_tracker().summary(),
+    })
+}
+
+/// Build the one-shot result envelope, matching the Swift `OneShotJSONResult`
+/// shape so embedded/stream-json consumers see identical fields. On error a
+/// `type: "error"` result carries the message and zeroed usage.
+fn one_shot_result_json(outcome: &Result<PromptOutcome, String>, model: &str) -> serde_json::Value {
+    match outcome {
+        Ok(outcome) => serde_json::json!({
+            "type": "result",
+            "status": "completed",
+            "response": outcome.response,
+            "model": model,
+            "cost_usd": outcome.cost.total_cost_usd,
+            "input_tokens": outcome.cost.total_input,
+            "output_tokens": outcome.cost.total_output,
+            "cache_create_tokens": outcome.cost.total_cache_create,
+            "cache_read_tokens": outcome.cost.total_cache_read,
+        }),
+        Err(error) => serde_json::json!({
+            "type": "error",
+            "status": "fatal",
+            "response": "",
+            "model": model,
+            "cost_usd": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_create_tokens": 0,
+            "cache_read_tokens": 0,
+            "error": error,
+        }),
+    }
 }
 
 fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
@@ -1760,6 +1787,44 @@ mod tests {
         assert!(listing.contains("fix the parser"));
         assert!(listing.contains("7 messages"));
         assert!(listing.contains("Use --resume"));
+    }
+
+    #[test]
+    fn one_shot_result_json_success_matches_swift_envelope() {
+        let outcome = Ok(super::PromptOutcome {
+            response: String::from("done"),
+            cost: deeptide_core::CostSummary {
+                total_input: 10,
+                total_output: 5,
+                total_cache_create: 2,
+                total_cache_read: 8,
+                total_cost_usd: 0.0123,
+                ..Default::default()
+            },
+        });
+        let json = super::one_shot_result_json(&outcome, "claude-x");
+        assert_eq!(json["type"], "result");
+        assert_eq!(json["status"], "completed");
+        assert_eq!(json["response"], "done");
+        assert_eq!(json["model"], "claude-x");
+        assert_eq!(json["input_tokens"], 10);
+        assert_eq!(json["output_tokens"], 5);
+        assert_eq!(json["cache_create_tokens"], 2);
+        assert_eq!(json["cache_read_tokens"], 8);
+        assert!(json.get("cost_usd").is_some());
+        assert!(json.get("error").is_none(), "success result omits error");
+    }
+
+    #[test]
+    fn one_shot_result_json_error_carries_message_and_zeroed_usage() {
+        let outcome: Result<super::PromptOutcome, String> = Err(String::from("boom"));
+        let json = super::one_shot_result_json(&outcome, "claude-x");
+        assert_eq!(json["type"], "error");
+        assert_eq!(json["status"], "fatal");
+        assert_eq!(json["error"], "boom");
+        assert_eq!(json["response"], "");
+        assert_eq!(json["input_tokens"], 0);
+        assert_eq!(json["output_tokens"], 0);
     }
 
     #[test]
