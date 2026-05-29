@@ -788,12 +788,10 @@ fn emit_output(
     cwd: &Path,
     hooks: deeptide_core::HookEngine,
 ) -> Result<(), String> {
-    let outcome = run_prompt(cli, prompt, permission_mode, cwd, hooks);
-
     match cli.output_format {
         OutputFormat::Text => {
             // Plain text propagates errors to stderr / non-zero exit.
-            let response = outcome?.response;
+            let response = run_prompt(cli, prompt, permission_mode, cwd, hooks, None)?.response;
             println!(
                 "{}",
                 tui::render_output_panel(
@@ -806,6 +804,7 @@ fn emit_output(
         OutputFormat::Json => {
             // Emit the result envelope (success or error) as a single JSON
             // object so machine consumers always get a parseable result.
+            let outcome = run_prompt(cli, prompt, permission_mode, cwd, hooks, None);
             let body = one_shot_result_json(&outcome, &cli.model);
             println!(
                 "{}",
@@ -813,10 +812,28 @@ fn emit_output(
             );
         }
         OutputFormat::StreamJson => {
+            // Spec first, then assistant_delta events stream live during the
+            // run, then the final result envelope — mirroring Swift's embedded
+            // event sequence.
             println!(
                 "{}",
                 serde_json::to_string(&EmbeddedProtocolSpec::default())
                     .map_err(|error| error.to_string())?
+            );
+            let delta_handler: StreamingHandler = Arc::new(|event: &StreamingEvent| {
+                if let StreamingEvent::TextDelta { delta, .. } = event {
+                    let mut out = io::stdout().lock();
+                    let _ = writeln!(out, "{}", assistant_delta_event(delta));
+                    let _ = out.flush();
+                }
+            });
+            let outcome = run_prompt(
+                cli,
+                prompt,
+                permission_mode,
+                cwd,
+                hooks,
+                Some(delta_handler),
             );
             let body = one_shot_result_json(&outcome, &cli.model);
             println!(
@@ -842,8 +859,9 @@ fn run_prompt(
     permission_mode: PermissionMode,
     cwd: &Path,
     hooks: deeptide_core::HookEngine,
+    streaming_handler: Option<StreamingHandler>,
 ) -> Result<PromptOutcome, String> {
-    let configured = configured_backend(cli)?;
+    let configured = configured_backend_with_handler(cli, streaming_handler)?;
     let (allowed_tools, disallowed_tools) = parse_tool_restrictions(
         cli.allowed_tools.as_deref(),
         cli.disallowed_tools.as_deref(),
@@ -899,6 +917,12 @@ fn run_prompt(
     })
 }
 
+/// Serialize a single `assistant_delta` stream-json event, matching Swift's
+/// `{"type":"assistant_delta","delta":...}` (JSON-escaped).
+fn assistant_delta_event(delta: &str) -> String {
+    serde_json::json!({ "type": "assistant_delta", "delta": delta }).to_string()
+}
+
 /// Build the one-shot result envelope, matching the Swift `OneShotJSONResult`
 /// shape so embedded/stream-json consumers see identical fields. On error a
 /// `type: "error"` result carries the message and zeroed usage.
@@ -930,6 +954,9 @@ fn one_shot_result_json(outcome: &Result<PromptOutcome, String>, model: &str) ->
     }
 }
 
+/// Non-streaming backend helper, used by tests; production paths call
+/// `configured_backend_with_handler` directly with the appropriate handler.
+#[cfg(test)]
 fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
     configured_backend_with_handler(cli, None)
 }
@@ -1787,6 +1814,14 @@ mod tests {
         assert!(listing.contains("fix the parser"));
         assert!(listing.contains("7 messages"));
         assert!(listing.contains("Use --resume"));
+    }
+
+    #[test]
+    fn assistant_delta_event_matches_swift_shape_and_escapes() {
+        let event = super::assistant_delta_event("hello \"world\"\n");
+        let parsed: serde_json::Value = serde_json::from_str(&event).expect("valid JSON");
+        assert_eq!(parsed["type"], "assistant_delta");
+        assert_eq!(parsed["delta"], "hello \"world\"\n");
     }
 
     #[test]
