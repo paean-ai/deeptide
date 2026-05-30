@@ -27,6 +27,7 @@ use rustyline::{
 };
 
 mod chrome;
+mod queue_editor;
 mod queue_input;
 mod status_bar;
 
@@ -1118,6 +1119,16 @@ fn run_interactive(
     let spinner_lock_for_queue = Arc::clone(&spinner_lock);
     let use_color_for_queue = use_color;
 
+    // Mutex-free signal that the raw-mode queue editor currently
+    // owns stdin (set by the REPL loop at the start of each turn,
+    // cleared when the editor thread joins). When this is true the
+    // streaming handler skips the legacy cooked-mode
+    // `drain_pending_stdin_into_queue` so the two readers don't race
+    // for the same bytes. The Arc lets the handler see updates we
+    // make from the main thread later.
+    let raw_editor_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let raw_editor_active_for_handler = Arc::clone(&raw_editor_active);
+
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
         match event {
             StreamingEvent::TextDelta { delta, .. } => {
@@ -1185,7 +1196,13 @@ fn run_interactive(
         // and consume any complete line the user typed during the turn.
         // The cost of the peek is microseconds even when stdin is idle,
         // so we don't gate it on the event kind.
-        if let Some(queue) = queue_slot_for_handler.get() {
+        //
+        // Suppressed when the raw-mode queue editor is active for the
+        // turn: that path owns stdin under different termios settings
+        // and would race with us byte-for-byte.
+        if !raw_editor_active_for_handler.load(Ordering::Relaxed)
+            && let Some(queue) = queue_slot_for_handler.get()
+        {
             drain_pending_stdin_into_queue(queue, &spinner_lock_for_queue, use_color_for_queue);
         }
     });
@@ -1454,7 +1471,11 @@ fn run_interactive(
                 // bottom of the screen never reads "empty" while the
                 // agent is thinking. The next loop iteration's
                 // `prepare_input_row` will clear it before rustyline
-                // takes over.
+                // takes over. We *also* paint this as a fallback for
+                // sessions where the raw-mode queue editor refuses
+                // to start (non-TTY stdin, termios failure, etc.);
+                // the editor thread's first paint will overwrite it
+                // a few milliseconds later when the editor is up.
                 if let Some(bar) = anchored.as_ref()
                     && bar.footer_rows() >= 2
                 {
@@ -1465,6 +1486,50 @@ fn run_interactive(
                 did_stream.store(false, Ordering::Relaxed);
                 output_started.store(false, Ordering::Relaxed);
                 spinner_stop.store(false, Ordering::Relaxed);
+
+                // Spin up the raw-mode queue editor thread so the
+                // user can type follow-ups straight into the pinned
+                // input row while the agent is streaming. Skips
+                // entirely when:
+                //   * we couldn't reserve a footer row (no
+                //     anchored bar or only the legacy 1-row variant),
+                //   * stdin isn't a TTY / termios refuses to flip,
+                //   * color is off (likely a piped session where
+                //     cooked-mode stdin is fine).
+                let editor_stop = Arc::new(AtomicBool::new(false));
+                let (editor_handle, mut editor_raw_guard) = if use_color
+                    && anchored.as_ref().map(|b| b.footer_rows()).unwrap_or(0) >= 2
+                {
+                    match queue_editor::enter_raw_mode() {
+                        Some(guard) => {
+                            let input_row = anchored.as_ref().map(|b| b.input_row()).unwrap_or(0);
+                            let ctx = queue_editor::EditorContext {
+                                queue: repl.message_queue_handle(),
+                                stop: Arc::clone(&editor_stop),
+                                paint_lock: Arc::clone(&spinner_lock),
+                                repaint: Box::new(move |line: &str| {
+                                    status_bar::write_ghost_at_row(input_row, line);
+                                }),
+                                use_color,
+                                line_width: terminal_width().unwrap_or(80) as usize,
+                            };
+                            // Flip the suppression flag BEFORE spawning
+                            // so the streaming handler's first tick sees
+                            // it; flip it back when the editor thread
+                            // joins so the cooked path resumes for the
+                            // next turn (if raw mode happens to fail
+                            // then).
+                            raw_editor_active.store(true, Ordering::Relaxed);
+                            (
+                                Some(thread::spawn(move || queue_editor::run_pump(ctx))),
+                                Some(guard),
+                            )
+                        }
+                        None => (None, None),
+                    }
+                } else {
+                    (None, None)
+                };
 
                 // Animate an activity spinner on a background thread while the
                 // synchronous turn runs, so model thinking and tool execution
@@ -1487,6 +1552,21 @@ fn run_interactive(
                 if let Some(handle) = spinner_handle {
                     let _ = handle.join();
                 }
+
+                // Stop the queue editor thread BEFORE restoring
+                // termios so the pump's last `read()` returns
+                // before the terminal flips back to cooked mode —
+                // otherwise the next user keystroke at the
+                // rustyline prompt could get swallowed by an
+                // in-flight raw-mode read.
+                editor_stop.store(true, Ordering::Relaxed);
+                if let Some(handle) = editor_handle {
+                    let _ = handle.join();
+                }
+                if let Some(ref mut guard) = editor_raw_guard {
+                    guard.restore();
+                }
+                raw_editor_active.store(false, Ordering::Relaxed);
 
                 // Drain the streaming markdown buffer. The model often
                 // produces a trailing line without a final newline; without
