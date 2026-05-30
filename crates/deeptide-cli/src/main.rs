@@ -1511,7 +1511,7 @@ fn run_interactive(
                                     status_bar::write_ghost_at_row(input_row, line);
                                 }),
                                 use_color,
-                                line_width: terminal_width().unwrap_or(80) as usize,
+                                line_width: terminal_width().unwrap_or(80),
                             };
                             // Flip the suppression flag BEFORE spawning
                             // so the streaming handler's first tick sees
