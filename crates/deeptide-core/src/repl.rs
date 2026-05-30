@@ -150,6 +150,79 @@ pub struct ReplSession {
     /// `/new`, `/clear`, and `/compact` so a fresh transcript can
     /// re-warn from scratch.
     last_context_warn_bucket: u8,
+    /// Smart auto-compact configuration. When enabled, the REPL
+    /// triggers `agent_loop.compact()` automatically the first time
+    /// context usage crosses [`AutoCompactConfig::threshold_percent`]
+    /// after each compaction reset (a "compact latch", same one-shot
+    /// pattern as the warning bucket). Off by default — users opt in
+    /// via `/auto-compact on` because silently rewriting the
+    /// transcript can surprise people the first time they hit it.
+    auto_compact: AutoCompactConfig,
+}
+
+/// Runtime configuration for the smart auto-compact feature.
+///
+/// The contract:
+///   * `enabled = false` ⇒ never fire.
+///   * `enabled = true` ⇒ fire ONCE per turn-batch the first time
+///     `context % window >= threshold_percent`. The same turn's
+///     warning still goes out so the user sees both the warning AND
+///     the auto-compaction acknowledgement.
+///   * After firing, the warning latch resets (see
+///     [`ReplSession::reset_context_warn_latch`]); the next time
+///     context refills past the warning thresholds it warns + fires
+///     again.
+///
+/// `threshold_percent` is bounded to `1..=99` on set so callers can't
+/// configure "auto-compact at 0%" (would fire every turn) or "at
+/// 100%" (would never fire because the window is the post-compaction
+/// budget, not the raw prompt size).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoCompactConfig {
+    pub enabled: bool,
+    pub threshold_percent: u8,
+    /// Lifetime counter — how many auto-compactions have fired in
+    /// this session. Surfaced by `/auto-compact status` so the user
+    /// can see whether the feature has been working silently.
+    pub fired_count: usize,
+}
+
+/// Default threshold matches the topmost warning bucket so
+/// auto-compact fires at the same time as the loudest advisory
+/// (`95%`). Users who want it to fire earlier (less risk of
+/// truncation but more aggressive context rewrites) can dial it down
+/// via `/auto-compact threshold N`.
+pub const AUTO_COMPACT_DEFAULT_THRESHOLD: u8 = 95;
+/// Minimum allowed threshold. Below this, the rolling summary
+/// quality drops sharply because there's barely any conversation to
+/// summarise.
+pub const AUTO_COMPACT_MIN_THRESHOLD: u8 = 50;
+/// Maximum allowed threshold. `99` is effectively "as late as
+/// possible while still leaving room for one final compaction
+/// turn"; `100` is meaningless because the warning is capped at
+/// 100%.
+pub const AUTO_COMPACT_MAX_THRESHOLD: u8 = 99;
+
+impl Default for AutoCompactConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold_percent: AUTO_COMPACT_DEFAULT_THRESHOLD,
+            fired_count: 0,
+        }
+    }
+}
+
+impl AutoCompactConfig {
+    /// Clamp + assign `value` to `threshold_percent`. Returns the
+    /// final stored value so callers can echo it back to the user
+    /// ("threshold set to 95%") even when the input was out of
+    /// range.
+    pub fn set_threshold(&mut self, value: u8) -> u8 {
+        self.threshold_percent =
+            value.clamp(AUTO_COMPACT_MIN_THRESHOLD, AUTO_COMPACT_MAX_THRESHOLD);
+        self.threshold_percent
+    }
 }
 
 /// Configuration + bookkeeping for the persistent dream loop. Default state
@@ -213,6 +286,7 @@ impl ReplSession {
             message_queue: Arc::new(Mutex::new(crate::message_queue::MessageQueue::new())),
             checkpoints: crate::checkpoints::CheckpointStore::new(),
             last_context_warn_bucket: 0,
+            auto_compact: AutoCompactConfig::default(),
         }
     }
 
@@ -499,6 +573,16 @@ impl ReplSession {
             events.push(ReplEvent::Output(warn));
         }
 
+        // Smart auto-compact: when enabled, fold older turns into a
+        // rolling summary the moment usage crosses the configured
+        // threshold. Runs AFTER the warning so the user sees both
+        // signals in the same turn (warning + acknowledgement) the
+        // first time it fires, and AFTER tps/debug emission so the
+        // event stream stays in chronological order.
+        if let Some(notice) = self.maybe_auto_compact() {
+            events.push(ReplEvent::Output(notice));
+        }
+
         if let Some(dream_events) = self.maybe_run_scheduled_dream() {
             events.extend(dream_events);
         }
@@ -534,6 +618,70 @@ impl ReplSession {
     /// re-warn from bucket 0. Callers: `/new`, `/clear`, `/compact`.
     fn reset_context_warn_latch(&mut self) {
         self.last_context_warn_bucket = 0;
+    }
+
+    /// Smart auto-compact entry point: if the feature is enabled and
+    /// context usage just crossed [`AutoCompactConfig::threshold_percent`],
+    /// fold older turns into a rolling summary right now and return a
+    /// user-visible notice. Returns `None` when:
+    ///
+    /// * auto-compact is disabled (default state), or
+    /// * usage is below the configured threshold, or
+    /// * the underlying [`AgentLoop::compact`] reports `did_compress
+    ///   = false` (nothing to compact — recent transcript already
+    ///   fits the rolling window).
+    ///
+    /// Implementation note: like the warning, this method has a
+    /// "fire once per crossing" semantics. The warning latch
+    /// (`last_context_warn_bucket`) doubles as the fire latch — when
+    /// auto-compact runs it ALSO resets the warning latch via
+    /// `reset_context_warn_latch`, so a fresh refill of the context
+    /// will re-warn AND re-fire. This pairing avoids the
+    /// "warn-but-never-fire" and "fire-twice-without-warning" anti
+    /// patterns.
+    fn maybe_auto_compact(&mut self) -> Option<String> {
+        if !self.auto_compact.enabled {
+            return None;
+        }
+        let context_tokens = estimate_repl_context_tokens(self.agent_loop.messages());
+        let window = model_context_window(self.agent_loop.model()) as usize;
+        if window == 0 {
+            return None;
+        }
+        let percent = context_tokens
+            .saturating_mul(100)
+            .checked_div(window)
+            .unwrap_or(0)
+            .min(100) as u8;
+        if percent < self.auto_compact.threshold_percent {
+            return None;
+        }
+
+        let report = self.agent_loop.compact();
+        if !report.did_compress {
+            // Nothing to compact — either the transcript is short
+            // (over-budget but no foldable history yet) or the
+            // summarizer rejected the pass. Don't claim victory
+            // when nothing changed, and don't reset the warning
+            // latch (the user still needs the advisory).
+            return None;
+        }
+
+        self.auto_compact.fired_count += 1;
+        // Reset the warning latch so the next pass through the
+        // submit() pipeline starts re-warning from bucket 0 — the
+        // post-compaction window is much smaller, and ignoring this
+        // would leave the user thinking we're still at 95% forever.
+        self.reset_context_warn_latch();
+
+        Some(format!(
+            "↻ auto-compact triggered at {percent}% (threshold {threshold}%): \
+             folded {folded} message(s) into a summary; ~{remaining} tokens remain.",
+            percent = percent,
+            threshold = self.auto_compact.threshold_percent,
+            folded = report.compressed_messages,
+            remaining = report.tokens_after,
+        ))
     }
 
     /// If the persistent dream loop is enabled and the user-turn cadence has
@@ -634,12 +782,28 @@ impl ReplSession {
         let branch = git_branch(&self.tool_context.cwd).unwrap_or_else(|| String::from("no-git"));
         let cwd = format_cwd_for_status(&self.tool_context.cwd);
 
+        // The `ctx` segment carries either just the usage percent
+        // (`87%`) or the percent plus an `auto<N>` suffix
+        // (`87% auto95`) when smart auto-compact is enabled. Keeping
+        // it on the same segment instead of adding a separate
+        // `auto` segment saves a column slot on narrow terminals
+        // and visually associates the indicator with the metric it
+        // operates on.
+        let ctx_value = if self.auto_compact.enabled {
+            format!(
+                "{context_pct}% auto{threshold}",
+                threshold = self.auto_compact.threshold_percent
+            )
+        } else {
+            format!("{context_pct}%")
+        };
+
         let mut segments = vec![
             StatusSegment::new("model", self.agent_loop.model()),
             StatusSegment::new("mode", self.agent_loop.permission_mode().label()),
             StatusSegment::new("cwd", cwd),
             StatusSegment::new("git", branch),
-            StatusSegment::new("ctx", format!("{context_pct}%")),
+            StatusSegment::new("ctx", ctx_value),
         ];
         if let Some(auth) = auth {
             segments.push(auth);
@@ -754,6 +918,14 @@ impl ReplSession {
                 let result = self.execute_compact_command(args);
                 self.reset_context_warn_latch();
                 result
+            }
+            // `/auto-compact`: configure the smart auto-compact
+            // feature. Off by default — see `AutoCompactConfig`. The
+            // grammar accepts `on|off|status` plus
+            // `threshold <N>` and the shorthand `<N>` (an integer
+            // anywhere becomes "enable + set threshold").
+            "auto-compact" | "autocompact" | "auto_compact" => {
+                self.execute_auto_compact_command(args)
             }
             "cost" => CostCommand.execute(args, &context),
             "model" | "m" => self.execute_model_command(args),
@@ -983,6 +1155,125 @@ impl ReplSession {
             )
         };
         CommandResult::Text(text)
+    }
+
+    /// Implement `/auto-compact <subcommand>`. See [`auto_compact_help_text`]
+    /// for the full grammar.  Parsing precedence:
+    ///
+    /// 1. Empty args ⇒ status.
+    /// 2. A bare integer (`/auto-compact 90`) ⇒ enable + set threshold.
+    /// 3. `on` / `enable`, `off` / `disable`, `status`.
+    /// 4. `threshold <N>` ⇒ set threshold only (does NOT enable;
+    ///    callers who want both can use the shorthand above).
+    /// 5. `reset` ⇒ zero out the `fired_count` lifetime counter.
+    /// 6. Anything else ⇒ help text.
+    fn execute_auto_compact_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        if trimmed.is_empty() || matches!(trimmed, "status" | "show") {
+            return CommandResult::Text(self.auto_compact_status_line());
+        }
+
+        // Shorthand: `/auto-compact 88` ⇒ enable + threshold 88.
+        if let Ok(value) = trimmed.parse::<u8>() {
+            return self.auto_compact_set(true, Some(value));
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        let verb = parts
+            .next()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let rest = parts.collect::<Vec<_>>().join(" ");
+
+        match verb.as_str() {
+            "on" | "enable" | "enabled" => self.auto_compact_set(true, None),
+            "off" | "disable" | "disabled" => self.auto_compact_set(false, None),
+            "threshold" | "at" | "percent" | "pct" => {
+                let Ok(value) = rest.trim().parse::<u8>() else {
+                    return CommandResult::Text(format!(
+                        "Usage: /auto-compact threshold <{min}..={max}>",
+                        min = AUTO_COMPACT_MIN_THRESHOLD,
+                        max = AUTO_COMPACT_MAX_THRESHOLD,
+                    ));
+                };
+                self.auto_compact_set(self.auto_compact.enabled, Some(value))
+            }
+            "reset" => {
+                let prev = self.auto_compact.fired_count;
+                self.auto_compact.fired_count = 0;
+                CommandResult::Text(format!(
+                    "Auto-compact fired_count reset (was {prev}). Current settings: {}",
+                    self.auto_compact_status_line()
+                ))
+            }
+            "help" | "?" => CommandResult::Text(auto_compact_help_text()),
+            _ => CommandResult::Text(format!(
+                "Unknown /auto-compact subcommand: {verb}\n\n{}",
+                auto_compact_help_text()
+            )),
+        }
+    }
+
+    /// Apply an enable/disable + optional threshold change atomically
+    /// and return the resulting status line, so the user sees the
+    /// final settled state (including any clamping). Centralising the
+    /// mutation in one spot keeps the audit trail simple — every
+    /// state change goes through here.
+    fn auto_compact_set(&mut self, enabled: bool, threshold: Option<u8>) -> CommandResult {
+        let was_enabled = self.auto_compact.enabled;
+        let prev_threshold = self.auto_compact.threshold_percent;
+        self.auto_compact.enabled = enabled;
+        if let Some(value) = threshold {
+            self.auto_compact.set_threshold(value);
+        }
+        let final_threshold = self.auto_compact.threshold_percent;
+
+        let mut summary = vec![format!(
+            "Auto-compact {} (threshold {final_threshold}%).",
+            if enabled { "enabled" } else { "disabled" }
+        )];
+        if was_enabled != enabled {
+            summary.push(format!(
+                "  state: {} → {}",
+                if was_enabled { "on" } else { "off" },
+                if enabled { "on" } else { "off" }
+            ));
+        }
+        if let Some(_value) = threshold
+            && prev_threshold != final_threshold
+        {
+            summary.push(format!(
+                "  threshold: {prev_threshold}% → {final_threshold}%"
+            ));
+        }
+        summary.push(format!(
+            "  fired so far: {} (use `/auto-compact reset` to zero this counter)",
+            self.auto_compact.fired_count
+        ));
+        CommandResult::Text(summary.join("\n"))
+    }
+
+    /// One-line status renderer used by `/auto-compact` (empty args)
+    /// and the post-mutation echo. Keeps the wording identical
+    /// between the two paths so the user can recognise the format
+    /// regardless of how they got there.
+    fn auto_compact_status_line(&self) -> String {
+        let cfg = self.auto_compact;
+        format!(
+            "Auto-compact: {} | threshold {}% | fired {} time(s) this session.\n\n{}",
+            if cfg.enabled { "ON" } else { "off" },
+            cfg.threshold_percent,
+            cfg.fired_count,
+            auto_compact_help_text()
+        )
+    }
+
+    /// Read-only snapshot for embedders that want to surface the
+    /// auto-compact state on their own UI (e.g. the status bar
+    /// indicator). Returns a copy because [`AutoCompactConfig`] is
+    /// `Copy` and small.
+    pub fn auto_compact_config(&self) -> AutoCompactConfig {
+        self.auto_compact
     }
 
     fn execute_debug_command(&mut self, args: &str) -> CommandResult {
@@ -3456,6 +3747,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "Auto-detect & suggest the project's lint command (`--run` to execute)",
             "/lint [--run]",
         ),
+        CommandCompletionSource::new(
+            "auto-compact",
+            ["autocompact", "auto_compact"],
+            "Auto-fold older turns into a summary when context crosses a threshold",
+            "/auto-compact [on|off|<N>|threshold <N>|reset]",
+        ),
     ]
 }
 
@@ -3480,6 +3777,27 @@ fn context_warn_bucket(percent: u8) -> u8 {
         }
     }
     bucket
+}
+
+/// User-facing grammar for `/auto-compact`. Kept in one place so the
+/// status line, the unknown-subcommand error, and the `/help`
+/// surface all share the exact same text.
+fn auto_compact_help_text() -> String {
+    format!(
+        "Smart auto-compact — automatically folds older turns into a summary when\n\
+         context usage crosses a threshold.\n\n\
+         Usage:\n\
+         \u{2003}/auto-compact                 show current status\n\
+         \u{2003}/auto-compact on              enable at the current threshold\n\
+         \u{2003}/auto-compact off             disable\n\
+         \u{2003}/auto-compact <N>             enable + set threshold (e.g. `/auto-compact 90`)\n\
+         \u{2003}/auto-compact threshold <N>   set threshold without changing enable state\n\
+         \u{2003}/auto-compact reset           reset the lifetime fired counter\n\n\
+         Threshold range: {min}..={max}% (default {default}%). Off by default.",
+        min = AUTO_COMPACT_MIN_THRESHOLD,
+        max = AUTO_COMPACT_MAX_THRESHOLD,
+        default = AUTO_COMPACT_DEFAULT_THRESHOLD,
+    )
 }
 
 /// Render the advisory message for a given bucket. Returns `None`
@@ -4733,6 +5051,86 @@ mod context_warn_tests {
         assert!(
             b3.to_ascii_uppercase().contains("NOW"),
             "highest bucket should emphasise urgency: {b3}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod auto_compact_config_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::{
+        AUTO_COMPACT_DEFAULT_THRESHOLD, AUTO_COMPACT_MAX_THRESHOLD, AUTO_COMPACT_MIN_THRESHOLD,
+        AutoCompactConfig, auto_compact_help_text,
+    };
+
+    #[test]
+    fn default_is_disabled_at_the_default_threshold() {
+        let cfg = AutoCompactConfig::default();
+        assert!(!cfg.enabled, "auto-compact must be opt-in (off by default)");
+        assert_eq!(cfg.threshold_percent, AUTO_COMPACT_DEFAULT_THRESHOLD);
+        assert_eq!(cfg.fired_count, 0);
+    }
+
+    #[test]
+    fn set_threshold_clamps_below_minimum() {
+        let mut cfg = AutoCompactConfig::default();
+        let final_value = cfg.set_threshold(10);
+        assert_eq!(final_value, AUTO_COMPACT_MIN_THRESHOLD);
+        assert_eq!(cfg.threshold_percent, AUTO_COMPACT_MIN_THRESHOLD);
+    }
+
+    #[test]
+    fn set_threshold_clamps_above_maximum() {
+        let mut cfg = AutoCompactConfig::default();
+        let final_value = cfg.set_threshold(250);
+        assert_eq!(final_value, AUTO_COMPACT_MAX_THRESHOLD);
+        assert_eq!(cfg.threshold_percent, AUTO_COMPACT_MAX_THRESHOLD);
+    }
+
+    #[test]
+    fn set_threshold_accepts_in_range_values_unchanged() {
+        let mut cfg = AutoCompactConfig::default();
+        for value in [
+            AUTO_COMPACT_MIN_THRESHOLD,
+            AUTO_COMPACT_MIN_THRESHOLD + 1,
+            85,
+            AUTO_COMPACT_DEFAULT_THRESHOLD,
+            AUTO_COMPACT_MAX_THRESHOLD - 1,
+            AUTO_COMPACT_MAX_THRESHOLD,
+        ] {
+            let stored = cfg.set_threshold(value);
+            assert_eq!(stored, value, "in-range value {value} must round-trip");
+        }
+    }
+
+    #[test]
+    fn help_text_documents_the_full_grammar_and_bounds() {
+        let text = auto_compact_help_text();
+        // Each grammar form must be mentioned by name; users land
+        // here when they typo a subcommand so missing any is a
+        // discoverability bug.
+        for needle in [
+            "/auto-compact",
+            "on",
+            "off",
+            "threshold",
+            "reset",
+            "default",
+        ] {
+            assert!(
+                text.contains(needle),
+                "help text missing `{needle}`: {text}"
+            );
+        }
+        // Threshold bounds must be surfaced literally so the user
+        // doesn't have to guess what range is valid.
+        assert!(
+            text.contains(&format!("{AUTO_COMPACT_MIN_THRESHOLD}")),
+            "help text must mention the min threshold ({AUTO_COMPACT_MIN_THRESHOLD}): {text}"
+        );
+        assert!(
+            text.contains(&format!("{AUTO_COMPACT_MAX_THRESHOLD}")),
+            "help text must mention the max threshold ({AUTO_COMPACT_MAX_THRESHOLD}): {text}"
         );
     }
 }

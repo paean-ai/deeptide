@@ -1099,7 +1099,16 @@ fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
         (
             "Core",
             &[
-                "help", "exit", "new", "clear", "compact", "status", "cost", "usage", "reminder",
+                "help",
+                "exit",
+                "new",
+                "clear",
+                "compact",
+                "auto-compact",
+                "status",
+                "cost",
+                "usage",
+                "reminder",
                 "goal",
             ],
         ),
