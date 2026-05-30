@@ -136,7 +136,24 @@ impl AnthropicConfig {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
-            max_tokens: 4096,
+            // 64K matches the practical output cap of every modern
+            // Anthropic-compatible backend we ship against:
+            //
+            //   * Claude 4.5 Sonnet:        64K output
+            //   * DeepSeek-V4-Pro/Flash:    384K output  (1M context)
+            //   * Paean (Anthropic-format): 64K+ output
+            //   * Older Claude 3 / DeepSeek-V3.2: server-side clamped
+            //     to their own limit (8K / 16K), so requesting 64K is
+            //     safe — the API just returns whatever it supports.
+            //
+            // Defaulting to 64K closes the failure mode where a single
+            // `Write` of a non-trivial HTML/code file (~7-10K tokens)
+            // hits the budget mid-call and produces an unparseable
+            // partial tool input. We don't go higher by default because
+            // (a) 384K would be a footgun for billing on first-use and
+            // (b) for outputs larger than 64K the right design is to
+            // chunk via Edit / append-style tools rather than one-shot.
+            max_tokens: 65_536,
             auth_mode: AnthropicAuthMode::ApiKey,
             system_prompt: None,
             tool_choice: ToolChoice::Auto,
@@ -156,7 +173,8 @@ impl AnthropicConfig {
             base_url: base_url.into(),
             api_key: token.into(),
             model: model.into(),
-            max_tokens: 4096,
+            // See `new` — same rationale, applies to bearer-auth backends too.
+            max_tokens: 65_536,
             auth_mode: AnthropicAuthMode::BearerToken,
             system_prompt: None,
             tool_choice: ToolChoice::Auto,
