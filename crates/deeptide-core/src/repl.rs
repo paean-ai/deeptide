@@ -726,6 +726,12 @@ impl ReplSession {
             // `/tools`: discovery surface for the agent's tool catalog.
             // Mirrors the role `/help` plays for slash commands.
             "tools" | "tool" => self.execute_tools_command(args),
+            // `/think`: toggle extended-thinking (reasoning) on/off,
+            // tune its budget, or read the current state.
+            "think" | "thinking" | "reason" | "reasoning" => self.execute_think_command(args),
+            // `/search`: full-text search across the current session's
+            // user/assistant messages.
+            "search" | "find" | "grep-chat" => self.execute_search_command(args),
             _ => CommandResult::Text(crate::commands::render_unknown_command(
                 &name,
                 &context.all_commands(),
@@ -2064,6 +2070,200 @@ impl ReplSession {
         CommandResult::Text(lines.join("\n"))
     }
 
+    /// `/think [on|off|low|medium|high|status|budget <N>|auto]`
+    ///
+    /// Toggles the extended-thinking (reasoning) directive on the agent
+    /// loop without rebuilding the backend. Persisted only for the
+    /// lifetime of the session — restarting `deeptide-rs` reverts to
+    /// the construction-time default (which may itself be set via
+    /// `--thinking auto|low|medium|high` on the CLI).
+    ///
+    /// Semantic mapping (matches `ThinkingConfig::from_label`):
+    ///   * `on` / `enable` / `medium` → 16K thinking budget
+    ///   * `low`                        →  4K
+    ///   * `high`                       → 32K
+    ///   * `off` / `disable`            → explicit "disabled"
+    ///   * `auto` / `default`           → clear the override
+    ///   * `budget <N>`                 → enabled with custom budget
+    ///
+    /// `status` (the no-arg default) prints a human-readable summary
+    /// without changing anything — useful for confirming "is thinking
+    /// actually on for this session?"
+    fn execute_think_command(&mut self, args: &str) -> CommandResult {
+        use crate::api::ThinkingConfig;
+
+        let trimmed = args.trim();
+        let (verb, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((head, tail)) => (head.to_ascii_lowercase(), tail.trim()),
+            None => (trimmed.to_ascii_lowercase(), ""),
+        };
+
+        match verb.as_str() {
+            "" | "status" | "show" => {
+                CommandResult::Text(render_think_status(self.agent_loop.thinking_override()))
+            }
+            "auto" | "default" | "clear" => {
+                self.agent_loop.set_thinking_override(None);
+                CommandResult::Text(String::from(
+                    "Thinking override cleared. Subsequent turns will use the backend's default (whatever was set via --thinking / config).",
+                ))
+            }
+            "off" | "disable" | "disabled" | "none" => {
+                self.agent_loop
+                    .set_thinking_override(Some(ThinkingConfig::disabled()));
+                CommandResult::Text(String::from(
+                    "Thinking disabled. The model will respond without an extended-thinking pass.",
+                ))
+            }
+            "on" | "enable" | "enabled" | "medium" => {
+                self.agent_loop
+                    .set_thinking_override(Some(ThinkingConfig::medium()));
+                CommandResult::Text(String::from(
+                    "Thinking enabled at medium budget (16 000 tokens).",
+                ))
+            }
+            "low" => {
+                self.agent_loop
+                    .set_thinking_override(Some(ThinkingConfig::low()));
+                CommandResult::Text(String::from(
+                    "Thinking enabled at low budget (4 000 tokens).",
+                ))
+            }
+            "high" => {
+                self.agent_loop
+                    .set_thinking_override(Some(ThinkingConfig::high()));
+                CommandResult::Text(String::from(
+                    "Thinking enabled at high budget (32 000 tokens).",
+                ))
+            }
+            "budget" => {
+                if rest.is_empty() {
+                    return CommandResult::Text(String::from(
+                        "Usage: /think budget <tokens>\n\nEnables thinking with a custom budget. Anthropic requires the budget to be at least 1 024 tokens; values are clamped to a sane ceiling of 64 000 to avoid runaway prompt costs.",
+                    ));
+                }
+                let parsed: usize = match rest.parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        return CommandResult::Text(format!(
+                            "`{rest}` is not a valid token count. Try `/think budget 8000`."
+                        ));
+                    }
+                };
+                let clamped = parsed.clamp(1_024, 64_000);
+                // The struct only exposes preset constructors + the
+                // `from_label` shortcut, but it's a plain struct, so we
+                // construct it directly here to thread the user's
+                // exact budget through.
+                let cfg = ThinkingConfig {
+                    kind: String::from("enabled"),
+                    budget_tokens: Some(clamped),
+                };
+                self.agent_loop.set_thinking_override(Some(cfg));
+                let note = if clamped != parsed {
+                    format!(" (clamped from {parsed})")
+                } else {
+                    String::new()
+                };
+                CommandResult::Text(format!("Thinking enabled with budget {clamped}{note}."))
+            }
+            other => CommandResult::Text(format!(
+                "Unknown subcommand `/think {other}`. Try `/think status`, `/think on|off|auto|low|medium|high`, or `/think budget <N>`.",
+            )),
+        }
+    }
+
+    /// `/search <query>` — case-insensitive substring search across
+    /// the in-memory transcript. Returns matching lines with role +
+    /// turn index + a brief context window, so the user can quickly
+    /// rediscover something the model or they said earlier.
+    ///
+    /// We deliberately scope this to the *current* session's messages
+    /// (`self.agent_loop.messages()`) rather than spelunking the
+    /// session store on disk — searching the latter would need an
+    /// extra index step and is better served by `/sessions` + manual
+    /// follow-up. Doing both would also surface stale results from
+    /// other sessions, which is rarely what the user wants when they
+    /// type `/search "the bug we just fixed"`.
+    fn execute_search_command(&self, args: &str) -> CommandResult {
+        let query_raw = args.trim();
+        let (query, want_regex) = if let Some(rest) = query_raw.strip_prefix("--regex ") {
+            (rest.trim(), true)
+        } else if let Some(rest) = query_raw.strip_prefix("-r ") {
+            (rest.trim(), true)
+        } else {
+            (query_raw, false)
+        };
+
+        if query.is_empty() {
+            return CommandResult::Text(String::from(
+                "Usage: /search <query>            (case-insensitive substring)\n       /search --regex <pattern>  (Rust regex syntax)\n\nSearches the current session's user + assistant messages. Use `/sessions` to switch session first if you want to search history from another session.",
+            ));
+        }
+
+        let regex = if want_regex {
+            match regex::RegexBuilder::new(query)
+                .case_insensitive(true)
+                .build()
+            {
+                Ok(re) => Some(re),
+                Err(error) => {
+                    return CommandResult::Text(format!("Invalid regex: {error}"));
+                }
+            }
+        } else {
+            None
+        };
+        let query_lower = query.to_ascii_lowercase();
+
+        let mut hits: Vec<(usize, &str, String)> = Vec::new();
+        for (idx, message) in self.agent_loop.messages().iter().enumerate() {
+            let role = match message.role {
+                crate::MessageRole::User => "user",
+                crate::MessageRole::Assistant => "assistant",
+            };
+            for line in message.content.lines() {
+                let matched = match &regex {
+                    Some(re) => re.is_match(line),
+                    None => line.to_ascii_lowercase().contains(&query_lower),
+                };
+                if matched {
+                    hits.push((idx, role, line.trim().to_owned()));
+                }
+            }
+        }
+
+        const MAX_HITS: usize = 32;
+        let total = hits.len();
+        if total == 0 {
+            return CommandResult::Text(format!(
+                "No matches for `{query}` in this session's {} message(s).",
+                self.agent_loop.messages().len()
+            ));
+        }
+        let shown = total.min(MAX_HITS);
+        let mut lines = Vec::with_capacity(shown + 3);
+        lines.push(format!("Search hits ({shown} of {total}) for `{query}`:"));
+        for (idx, role, body) in hits.iter().take(shown) {
+            // Trim very long lines so a hit on a multi-KB tool result
+            // doesn't blow up the terminal.
+            let preview: String = body.chars().take(140).collect();
+            let ellipsis = if body.chars().count() > 140 {
+                "…"
+            } else {
+                ""
+            };
+            lines.push(format!("  [#{idx:>3} {role:<9}] {preview}{ellipsis}"));
+        }
+        if total > MAX_HITS {
+            lines.push(format!(
+                "  … {} more hit(s) suppressed. Refine the query to narrow.",
+                total - MAX_HITS
+            ));
+        }
+        CommandResult::Text(lines.join("\n"))
+    }
+
     fn execute_cache_command(&self, args: &str) -> CommandResult {
         let raw = args.trim();
         let limit = if raw.is_empty() {
@@ -2723,7 +2923,40 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "List registered agent tools (filter, partition by read-only/writes)",
             "/tools [filter] [--read-only|--writes|--all] [--details]",
         ),
+        CommandCompletionSource::new(
+            "think",
+            ["thinking", "reason", "reasoning"],
+            "Toggle / inspect the extended-thinking (reasoning) directive",
+            "/think [on|off|low|medium|high|auto|status|budget <N>]",
+        ),
+        CommandCompletionSource::new(
+            "search",
+            ["find", "grep-chat"],
+            "Search the current session's message history (substring or --regex)",
+            "/search [--regex] <query>",
+        ),
     ]
+}
+
+/// Render the body of `/think status`. Lives outside the impl block so
+/// unit tests can drive it without an `AgentLoop`.
+fn render_think_status(thinking: Option<&crate::api::ThinkingConfig>) -> String {
+    match thinking {
+        None => String::from(
+            "Thinking: auto (no override). Subsequent turns use the backend's default — set via `--thinking` flag at startup or via provider config.\n\nToggle with `/think on`, `/think off`, `/think low|medium|high`, or `/think budget <tokens>`.",
+        ),
+        Some(cfg) if cfg.is_enabled() => match cfg.budget_tokens {
+            Some(b) => format!(
+                "Thinking: enabled (budget {b} tokens).\n\nClear with `/think auto`; switch budget with `/think low|medium|high|budget <N>`."
+            ),
+            None => String::from(
+                "Thinking: enabled (provider default budget).\n\nClear with `/think auto`.",
+            ),
+        },
+        Some(_) => String::from(
+            "Thinking: explicitly disabled.\n\nRe-enable with `/think on`, or clear the override with `/think auto`.",
+        ),
+    }
 }
 
 /// Sub-mode of `/tools` controlling which subset of the registry to render.

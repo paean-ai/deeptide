@@ -129,6 +129,7 @@ fn streaming_backend_delivers_text_deltas_and_assembles_response() {
             max_turns: 1,
             system: None,
             allowed_tools: None,
+            thinking: None,
         })
         .expect("streaming respond");
 
@@ -304,6 +305,7 @@ fn streaming_backend_auto_retries_on_mid_stream_truncation() {
             max_turns: 1,
             system: None,
             allowed_tools: None,
+            thinking: None,
         })
         .expect("backend must transparently recover from a truncated first attempt");
 
@@ -373,6 +375,7 @@ fn streaming_backend_gives_up_after_max_retries_on_persistent_truncation() {
             max_turns: 1,
             system: None,
             allowed_tools: None,
+            thinking: None,
         })
         .expect_err("persistent truncation must bubble");
 
@@ -410,6 +413,7 @@ fn streaming_backend_works_without_handler_callback() {
             max_turns: 1,
             system: None,
             allowed_tools: None,
+            thinking: None,
         })
         .expect("streaming respond without handler");
     assert_eq!(response.content, "Hello, world!");

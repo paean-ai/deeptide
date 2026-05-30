@@ -112,6 +112,12 @@ pub struct AgentRequest {
     /// tool. Set for restricted sub-agents so they are only offered the tools
     /// they are allowed to call.
     pub allowed_tools: Option<Vec<String>>,
+    /// Per-request override of the extended-thinking directive. `None`
+    /// (the default) falls back to whatever the backend was configured
+    /// with at construction time; `Some(_)` takes precedence so the REPL
+    /// can toggle thinking on/off mid-session via `/think` without
+    /// rebuilding the backend.
+    pub thinking: Option<crate::api::ThinkingConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +284,12 @@ pub struct AgentLoop {
     /// `--print` mode and library embeds); when set, the REPL gets a chance
     /// to elicit a decision from the user.
     ask_callback: Option<PermissionAskCallback>,
+    /// Runtime override of the backend's extended-thinking directive.
+    /// Threaded into every outbound `AgentRequest` so the REPL can flip
+    /// thinking on/off (and tune its budget) without rebuilding the
+    /// backend or restarting the session. `None` defers to whatever the
+    /// backend was constructed with.
+    thinking_override: Option<crate::api::ThinkingConfig>,
 }
 
 impl AgentLoop {
@@ -302,6 +314,7 @@ impl AgentLoop {
             allowed_tools: None,
             disallowed_tools: Vec::new(),
             ask_callback: None,
+            thinking_override: None,
         }
     }
 
@@ -386,6 +399,22 @@ impl AgentLoop {
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = model.into();
         self.refresh_context_window();
+    }
+
+    /// Current extended-thinking override (the value the REPL has
+    /// dialled in via `/think`, if any). `None` means "use whatever the
+    /// backend was constructed with".
+    pub fn thinking_override(&self) -> Option<&crate::api::ThinkingConfig> {
+        self.thinking_override.as_ref()
+    }
+
+    /// Mid-session toggle of the extended-thinking directive. The
+    /// override is threaded into every subsequent `AgentRequest` so the
+    /// backend sees the new value on the *next* call without rebuild.
+    /// Pass `None` to clear the override and defer back to the
+    /// construction-time default.
+    pub fn set_thinking_override(&mut self, thinking: Option<crate::api::ThinkingConfig>) {
+        self.thinking_override = thinking;
     }
 
     /// Resize the context window to the current model's token budget, mirroring
@@ -529,6 +558,7 @@ impl AgentLoop {
                 max_turns: self.max_turns,
                 system: self.system_prompt.clone(),
                 allowed_tools: self.advertised_tools(),
+                thinking: self.thinking_override.clone(),
             };
 
             match self.backend.respond(request) {
