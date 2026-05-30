@@ -657,6 +657,23 @@ impl ReplSession {
         {
             segments.push(StatusSegment::new("queue", format!("{}", q.len())));
         }
+        // Surface the active TODO backlog the same way. Format is
+        // `todo IP/N` where IP is the count of items currently
+        // in-progress and N is the total (pending + in_progress +
+        // completed). This gives the user a persistent "task
+        // tracker" pinned at the bottom that updates on every
+        // repaint without scrolling away — matching how
+        // Codex/Claude Code surface their plan/task lists. Only
+        // rendered when there's at least one item so greenfield
+        // sessions stay clean.
+        let todo = crate::tools::todo_summary();
+        if todo.is_active() {
+            let active = todo.in_progress + todo.pending;
+            segments.push(StatusSegment::new(
+                "todo",
+                format!("{}/{}", active, todo.total()),
+            ));
+        }
         segments.push(StatusSegment::new(
             "turns",
             format!("{}/{}", summary.turns.len(), self.agent_loop.max_turns()),

@@ -27,6 +27,7 @@
 
 use std::io::{self, IsTerminal, Write};
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Minimum terminal height we'll engage on. Below this the single-row bar
 /// eats too much of the visible area; fall back to inline rendering.
@@ -34,6 +35,27 @@ const MIN_ROWS: u16 = 8;
 /// Minimum terminal width. Anything narrower can't fit even one status
 /// segment without truncation that would look broken.
 const MIN_COLS: u16 = 24;
+
+/// Default number of rows the pinned footer reserves at the bottom of
+/// the terminal. Layout:
+///
+/// * row `rows`     → status bar (model / mode / cwd / ctx / …)
+/// * row `rows - 1` → input prompt (the rustyline edit line)
+///
+/// Increasing this would give the input a multi-row edit area but
+/// rustyline only knows how to manage a single growing line, so
+/// reserving more rows just leaves blank space; 2 is the sweet spot.
+pub const DEFAULT_FOOTER_ROWS: u16 = 2;
+
+/// Set by the SIGWINCH handler. The next `repaint` reads + clears it
+/// to force a fresh `terminal_size` probe + re-engage of the scroll
+/// region. Atomic because the signal handler runs on a separate
+/// async-signal-safe context and must not lock anything.
+static RESIZE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// `true` once we've installed the SIGWINCH handler. We only register
+/// it once per process; subsequent engages just re-use it.
+static SIGWINCH_INSTALLED: Once = Once::new();
 
 /// Owns the bottom-anchored status bar for the lifetime of one REPL session.
 ///
@@ -43,14 +65,26 @@ const MIN_COLS: u16 = 24;
 pub struct AnchoredStatusBar {
     rows: u16,
     cols: u16,
+    footer_rows: u16,
     last_painted: String,
 }
 
 impl AnchoredStatusBar {
-    /// Attempt to take over the terminal. Returns `None` (rather than
-    /// panicking or printing garbage) when stdout isn't a TTY, the terminal
-    /// is too small, or `TERM` is missing/`dumb`.
+    /// Attempt to take over the terminal with the default 2-row pinned
+    /// footer (input prompt + status bar). Returns `None` (rather than
+    /// panicking or printing garbage) when stdout isn't a TTY, the
+    /// terminal is too small, or `TERM` is missing/`dumb`.
     pub fn try_engage() -> Option<Self> {
+        Self::try_engage_with_footer(DEFAULT_FOOTER_ROWS)
+    }
+
+    /// Same as [`try_engage`] but with a caller-chosen footer height
+    /// (in rows). Use this when the embedder wants a richer pinned
+    /// area — e.g. tests pass `footer_rows = 1` to drive the
+    /// pre-existing single-row layout.
+    ///
+    /// [`try_engage`]: AnchoredStatusBar::try_engage
+    pub fn try_engage_with_footer(footer_rows: u16) -> Option<Self> {
         if !io::stdout().is_terminal() {
             return None;
         }
@@ -59,15 +93,20 @@ impl AnchoredStatusBar {
             return None;
         }
         let (cols, rows) = terminal_size::terminal_size().map(|(w, h)| (w.0, h.0))?;
+        // A footer that swallows half the terminal would be a UX bug;
+        // a 1-row footer is the bare minimum (status bar only).
+        let footer_rows = footer_rows.max(1).min(rows.saturating_sub(MIN_ROWS / 2));
         if rows < MIN_ROWS || cols < MIN_COLS {
             return None;
         }
 
         install_panic_recovery(rows);
+        install_sigwinch_handler();
 
         let mut bar = Self {
             rows,
             cols,
+            footer_rows,
             last_painted: String::new(),
         };
         bar.engage_terminal();
@@ -79,15 +118,50 @@ impl AnchoredStatusBar {
         self.cols as usize
     }
 
-    /// Paint `line` at row `rows`. Idempotent: a repaint with identical
-    /// content does no IO so a tight REPL loop doesn't flood stdout.
+    /// Number of rows reserved at the bottom (input + status, etc.).
+    pub fn footer_rows(&self) -> u16 {
+        self.footer_rows
+    }
+
+    /// 1-based row index where the input prompt should be rendered.
+    /// When the footer is 2+ rows tall, this is the row directly above
+    /// the status bar; for a 1-row footer it coincides with the status
+    /// bar row (legacy behaviour — input renders inline above).
+    pub fn input_row(&self) -> u16 {
+        if self.footer_rows >= 2 {
+            self.rows.saturating_sub(self.footer_rows - 1)
+        } else {
+            self.rows
+        }
+    }
+
+    /// 1-based row index for the bottom-most line of the scroll region
+    /// (i.e. the last row INTO which conversation output may scroll).
+    pub fn scroll_region_bottom(&self) -> u16 {
+        self.rows.saturating_sub(self.footer_rows).max(1)
+    }
+
+    /// Paint `line` at the status row. Idempotent: a repaint with
+    /// identical content does no IO so a tight REPL loop doesn't flood
+    /// stdout.
     ///
-    /// `lock` is an external mutex shared with any other thread that writes
-    /// to stdout (e.g. the spinner thread). Holding it across the save/jump/
-    /// write/restore sequence is what keeps the bar from interleaving with
-    /// streamed model output.
+    /// `lock` is an external mutex shared with any other thread that
+    /// writes to stdout (e.g. the spinner thread). Holding it across
+    /// the save/jump/write/restore sequence is what keeps the bar from
+    /// interleaving with streamed model output.
     pub fn repaint(&mut self, line: &str, lock: &std::sync::Mutex<()>) {
-        if self.detect_resize() {
+        // Resize sources, in priority order:
+        //   1. SIGWINCH flag (set asynchronously by the kernel) —
+        //      authoritative trigger that something just changed.
+        //   2. Polled `terminal_size` probe — catches resizes that
+        //      happened before SIGWINCH was installed, or in
+        //      environments where signals aren't delivered.
+        let sigwinch_dirty = RESIZE_REQUESTED.swap(false, Ordering::Relaxed);
+        if sigwinch_dirty {
+            // Force a re-probe regardless of cached dims.
+            self.refresh_dimensions();
+            self.engage_terminal();
+        } else if self.detect_resize() {
             self.engage_terminal();
         }
         if line == self.last_painted {
@@ -102,13 +176,75 @@ impl AnchoredStatusBar {
         self.last_painted = line.to_owned();
     }
 
+    /// Position the cursor at the input row (`rows - footer_rows + 1`)
+    /// and clear it, so the next `rl.readline(...)` call writes its
+    /// prompt + edit buffer there. Must be called BEFORE invoking
+    /// rustyline; the cursor stays at the cleared column until
+    /// rustyline's prompt write moves it.
+    ///
+    /// Holding `lock` keeps the cursor jump atomic against the spinner
+    /// thread — without it, a spinner tick could squeeze in between the
+    /// jump and the readline call.
+    pub fn prepare_input_row(&self, lock: &std::sync::Mutex<()>) {
+        if let Ok(_guard) = lock.lock() {
+            let seq = jump_and_clear_seq(self.input_row());
+            let mut out = io::stdout();
+            let _ = out.write_all(seq.as_bytes());
+            let _ = out.flush();
+        }
+    }
+
+    /// Recover from `rl.readline` returning. The user just pressed
+    /// Enter so rustyline emitted a final newline; depending on
+    /// whether the input wrapped, the cursor may be on the status
+    /// row or below it.  This method:
+    ///
+    /// 1. Clears the input row so it appears empty during
+    ///    streaming — the submitted text already lives in the agent
+    ///    transcript that gets printed into the scroll region, so
+    ///    leaving it stale at the bottom would just be visual
+    ///    noise. (This is the "your message moves up" feel of
+    ///    Codex / Claude Code.)
+    /// 2. Repaints the status bar (in case input overflow scribbled
+    ///    on it).
+    /// 3. Moves the cursor to the bottom of the scroll region so
+    ///    any subsequent `println!` (streamed model output,
+    ///    slash-command results) lands INSIDE the scroll region
+    ///    rather than clobbering the pinned footer.
+    pub fn recover_to_scroll_region(&mut self, status_line: &str, lock: &std::sync::Mutex<()>) {
+        if let Ok(_guard) = lock.lock() {
+            let mut out = io::stdout();
+            // (1) Clear the input row when we actually reserved one
+            //     (footer >= 2). For the single-row legacy footer
+            //     there is no separate input row to wipe.
+            if self.footer_rows >= 2 {
+                let _ = out.write_all(jump_and_clear_seq(self.input_row()).as_bytes());
+            }
+            // (2) Repaint the status row. We bypass the
+            //     last_painted cache: input overflow could have
+            //     overwritten the status row WITHOUT changing the
+            //     intended status string, so the cache would
+            //     suppress the necessary re-paint.
+            let _ = out.write_all(paint_bar_seq(self.rows, status_line).as_bytes());
+            // (3) Drop the cursor into the bottom of the scroll
+            //     region so downstream prints scroll naturally
+            //     upwards.
+            let scroll_bottom = self.scroll_region_bottom();
+            let _ = out.write_all(format!("\x1b[{scroll_bottom};1H").as_bytes());
+            let _ = out.flush();
+        }
+        // Sync the cache so the next idempotent `repaint` is a
+        // no-op for the same status string.
+        self.last_painted = status_line.to_owned();
+    }
+
     fn engage_terminal(&mut self) {
-        let seq = engage_seq(self.rows);
+        let seq = engage_seq(self.rows, self.footer_rows);
         let mut out = io::stdout();
         let _ = out.write_all(seq.as_bytes());
         let _ = out.flush();
-        // Drop the "last painted" cache: after re-engaging (e.g. after a
-        // SIGWINCH), the bar row was cleared by engage_seq's `\x1b[2K`, so
+        // Drop the "last painted" cache: after re-engaging (e.g. after
+        // a SIGWINCH), the footer rows were cleared by engage_seq, so
         // any cached value would suppress the necessary first repaint.
         self.last_painted.clear();
     }
@@ -124,6 +260,13 @@ impl AnchoredStatusBar {
             true
         } else {
             false
+        }
+    }
+
+    fn refresh_dimensions(&mut self) {
+        if let Some((w, h)) = terminal_size::terminal_size() {
+            self.cols = w.0;
+            self.rows = h.0;
         }
     }
 }
@@ -155,22 +298,30 @@ fn install_panic_recovery(rows: u16) {
     });
 }
 
-/// Build the ANSI sequence that engages the scroll region [1..=rows-1] and
-/// clears the bar row so it starts visually empty.
-fn engage_seq(rows: u16) -> String {
-    let bottom = rows.saturating_sub(1).max(1);
-    // 1. Save cursor (DECSC) so we can return the user's input position.
-    // 2. Set DECSTBM [1; bottom] — reserves the LAST row outside the region.
-    // 3. Jump to the reserved row and clear it (in case something was there).
-    // 4. Move into the bottom of the region so subsequent prints scroll
-    //    naturally upwards.
-    // 5. Restore the saved cursor (DECRC) — most terminals honor this even
-    //    after DECSTBM resets the cursor to (1,1) per spec.
-    format!(
-        "\x1b7\x1b[1;{bottom}r\x1b[{rows};1H\x1b[2K\x1b[{bottom};1H\x1b8",
-        bottom = bottom,
-        rows = rows
-    )
+/// Build the ANSI sequence that engages the scroll region `[1..=rows -
+/// footer_rows]` and clears every reserved footer row so the pinned
+/// area starts visually empty.
+fn engage_seq(rows: u16, footer_rows: u16) -> String {
+    let footer = footer_rows.max(1);
+    let bottom = rows.saturating_sub(footer).max(1);
+
+    // 1. Save cursor (DECSC) so we can return the user's input
+    //    position.
+    // 2. Set DECSTBM [1; bottom] — reserves the LAST `footer` rows
+    //    outside the scroll region.
+    // 3. Clear each reserved row (footer can be 1..N) — in case
+    //    something was already on them when we engaged.
+    // 4. Move into the bottom of the scroll region so subsequent
+    //    prints scroll naturally upwards.
+    // 5. Restore the saved cursor (DECRC) — most terminals honor this
+    //    even after DECSTBM resets the cursor to (1,1) per spec.
+    let mut out = format!("\x1b7\x1b[1;{bottom}r", bottom = bottom);
+    for i in 0..footer {
+        let row = rows.saturating_sub(i).max(1);
+        out.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+    }
+    out.push_str(&format!("\x1b[{bottom};1H\x1b8", bottom = bottom));
+    out
 }
 
 /// Build the ANSI sequence that paints `text` at row `rows` (the reserved
@@ -184,6 +335,60 @@ fn paint_bar_seq(rows: u16, text: &str) -> String {
 /// exits.
 fn disengage_seq(rows: u16) -> String {
     format!("\x1b[r\x1b[{rows};1H\x1b[2K\n", rows = rows)
+}
+
+/// Build the ANSI sequence that jumps the cursor to `row`, column 1,
+/// and clears that row. Used by `prepare_input_row` to position the
+/// rustyline edit area at the bottom-most non-status row.
+fn jump_and_clear_seq(row: u16) -> String {
+    format!("\x1b[{row};1H\x1b[2K", row = row.max(1))
+}
+
+/// Install a SIGWINCH handler that sets [`RESIZE_REQUESTED`] so the
+/// next [`AnchoredStatusBar::repaint`] re-probes terminal dimensions
+/// and re-engages the scroll region. Idempotent across calls; the
+/// handler does not allocate or take locks (async-signal-safe).
+///
+/// On non-Unix targets this is a no-op — the polled `detect_resize`
+/// path is the only resize signal we get.
+fn install_sigwinch_handler() {
+    #[cfg(unix)]
+    {
+        SIGWINCH_INSTALLED.call_once(|| {
+            // SAFETY: libc::signal is async-signal-safe; the handler we
+            // install only writes to an AtomicBool, which is also
+            // async-signal-safe.
+            unsafe {
+                libc::signal(libc::SIGWINCH, sigwinch_handler as libc::sighandler_t);
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        // SIGWINCH doesn't exist on Windows; we rely entirely on the
+        // polled `terminal_size` probe inside `repaint`.
+        let _ = &SIGWINCH_INSTALLED;
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn sigwinch_handler(_sig: libc::c_int) {
+    // Only writes to an atomic — no allocation, no locks, fully
+    // async-signal-safe.
+    RESIZE_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// Test-only helper: force the resize flag so unit tests can drive
+/// the `repaint` re-engage path without spinning up a real terminal.
+#[cfg(test)]
+pub(crate) fn signal_resize_for_test() {
+    RESIZE_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// Test-only helper: snapshot + clear the resize flag.
+#[cfg(test)]
+pub(crate) fn take_resize_flag_for_test() -> bool {
+    RESIZE_REQUESTED.swap(false, Ordering::Relaxed)
 }
 
 // ─── Styling helpers ────────────────────────────────────────────────────────
@@ -242,31 +447,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn engage_seq_reserves_bottom_row_and_returns_to_caller_position() {
-        let seq = engage_seq(24);
-        // DECSC at the start so the caller's cursor is preserved across the
-        // engage sequence.
+    fn engage_seq_reserves_one_row_footer_by_default_layout() {
+        let seq = engage_seq(24, 1);
+        // DECSC at the start so the caller's cursor is preserved
+        // across the engage sequence.
         assert!(seq.starts_with("\x1b7"), "expected DECSC first: {seq:?}");
-        // DECSTBM with bottom = rows - 1.
+        // DECSTBM with bottom = rows - footer = 23.
         assert!(
             seq.contains("\x1b[1;23r"),
             "expected DECSTBM [1;23]: {seq:?}"
         );
-        // We jump to and clear the reserved row so it isn't holding stale
-        // content from before engagement.
+        // Jump to + clear the single reserved status row.
         assert!(
             seq.contains("\x1b[24;1H"),
             "expected jump to row 24: {seq:?}"
         );
         assert!(seq.contains("\x1b[2K"), "expected line clear: {seq:?}");
-        // DECRC at the end restores the caller's cursor.
         assert!(seq.ends_with("\x1b8"), "expected DECRC at the end: {seq:?}");
     }
 
     #[test]
-    fn engage_seq_pins_minimum_two_row_region_on_a_very_short_terminal() {
-        // rows = 2 → bottom must clamp to 1, not 0 (which would be invalid).
-        let seq = engage_seq(2);
+    fn engage_seq_two_row_footer_clears_both_input_and_status_rows() {
+        let seq = engage_seq(24, 2);
+        // Bottom of scroll region drops by another row: rows-2 = 22.
+        assert!(
+            seq.contains("\x1b[1;22r"),
+            "two-row footer must reserve rows 23+24, leaving region [1;22]: {seq:?}"
+        );
+        // Both reserved rows must be cleared.
+        assert!(
+            seq.contains("\x1b[24;1H"),
+            "must clear status row 24: {seq:?}"
+        );
+        assert!(
+            seq.contains("\x1b[23;1H"),
+            "must clear input row 23: {seq:?}"
+        );
+    }
+
+    #[test]
+    fn engage_seq_pins_minimum_one_row_region_on_a_very_short_terminal() {
+        // rows = 2, footer = 1 → bottom = 1.
+        let seq = engage_seq(2, 1);
         assert!(
             seq.contains("\x1b[1;1r"),
             "DECSTBM must use a 1-based bottom even when rows-1 underflows: {seq:?}"
@@ -327,5 +549,40 @@ mod tests {
     #[test]
     fn rustyline_safe_is_a_noop_when_color_is_off_so_prompt_width_is_exact() {
         assert_eq!(rustyline_safe("> ", "1;36", false), "> ");
+    }
+
+    #[test]
+    fn jump_and_clear_seq_places_cursor_at_row_one_column_and_erases_line() {
+        let seq = jump_and_clear_seq(23);
+        // Sequence: CUP to row 23 column 1, then EL2 (erase whole line).
+        assert_eq!(seq, "\x1b[23;1H\x1b[2K");
+    }
+
+    #[test]
+    fn jump_and_clear_seq_clamps_zero_row_to_one() {
+        // Row 0 is not a valid VT cursor coordinate; the helper must
+        // not emit `\x1b[0;1H` (which some terminals reject).
+        let seq = jump_and_clear_seq(0);
+        assert!(
+            seq.starts_with("\x1b[1;1H"),
+            "expected row clamped to 1: {seq:?}"
+        );
+    }
+
+    #[test]
+    fn resize_flag_round_trips_through_helper_accessors() {
+        // The flag is process-global; clear first so a previous test
+        // doesn't poison this assertion.
+        let _ = take_resize_flag_for_test();
+        assert!(!take_resize_flag_for_test());
+        signal_resize_for_test();
+        assert!(
+            take_resize_flag_for_test(),
+            "expected the flag to be high after signal"
+        );
+        assert!(
+            !take_resize_flag_for_test(),
+            "take must clear the flag — otherwise repaint would re-engage forever"
+        );
     }
 }

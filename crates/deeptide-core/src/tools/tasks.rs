@@ -464,3 +464,129 @@ fn delete_todo(task_id: &str) -> bool {
     todos.remove(index);
     true
 }
+
+/// Snapshot of the current todo storage for cheap "is the agent
+/// tracking tasks right now?" queries. Used by the pinned status bar
+/// to surface a `todo N/M` segment so the user always knows whether
+/// there's an open backlog. Returns zeros (not `None`) when the
+/// storage is empty or poisoned so the caller can render
+/// unconditionally.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TodoSummary {
+    /// Number of items whose status is `pending` (queued, not yet
+    /// started).
+    pub pending: usize,
+    /// Number of items currently `in_progress` — usually 1 in
+    /// well-behaved agent runs, but we count them honestly.
+    pub in_progress: usize,
+    /// Number of items already `completed`.
+    pub completed: usize,
+}
+
+impl TodoSummary {
+    /// Total number of items in the snapshot (pending + in_progress
+    /// + completed).
+    ///
+    /// Deleted items are not counted because they're already removed
+    /// from storage.
+    pub fn total(self) -> usize {
+        self.pending + self.in_progress + self.completed
+    }
+
+    /// `true` when the storage holds at least one item. The status
+    /// bar uses this to decide whether to render the `todo` segment
+    /// at all (no segment ⇒ less visual noise on greenfield
+    /// sessions).
+    pub fn is_active(self) -> bool {
+        self.total() > 0
+    }
+}
+
+/// Read the current todo storage and reduce it to a [`TodoSummary`].
+/// Public because the pinned status bar needs to surface this on
+/// every repaint, but the underlying `TodoItem` type stays private
+/// (the dashboard only needs counts, not contents).
+pub fn todo_summary() -> TodoSummary {
+    let Ok(todos) = todo_storage().lock() else {
+        return TodoSummary::default();
+    };
+    let mut summary = TodoSummary::default();
+    for item in todos.iter() {
+        match item.status {
+            TodoStatus::Pending => summary.pending += 1,
+            TodoStatus::InProgress => summary.in_progress += 1,
+            TodoStatus::Completed => summary.completed += 1,
+            TodoStatus::Deleted => {}
+        }
+    }
+    summary
+}
+
+#[cfg(test)]
+mod todo_summary_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn reset_storage() {
+        replace_todos(Vec::new());
+    }
+
+    #[test]
+    fn empty_storage_yields_a_zeroed_inactive_summary() {
+        reset_storage();
+        let s = todo_summary();
+        assert_eq!(s, TodoSummary::default());
+        assert!(!s.is_active(), "empty storage must read as inactive");
+        assert_eq!(s.total(), 0);
+    }
+
+    #[test]
+    fn summary_counts_each_status_independently() {
+        reset_storage();
+        replace_todos(vec![
+            TodoItem {
+                content: "a".into(),
+                status: TodoStatus::Pending,
+                active_form: None,
+            },
+            TodoItem {
+                content: "b".into(),
+                status: TodoStatus::Pending,
+                active_form: None,
+            },
+            TodoItem {
+                content: "c".into(),
+                status: TodoStatus::InProgress,
+                active_form: None,
+            },
+            TodoItem {
+                content: "d".into(),
+                status: TodoStatus::Completed,
+                active_form: None,
+            },
+        ]);
+        let s = todo_summary();
+        assert_eq!(s.pending, 2);
+        assert_eq!(s.in_progress, 1);
+        assert_eq!(s.completed, 1);
+        assert_eq!(s.total(), 4);
+        assert!(s.is_active());
+        reset_storage();
+    }
+
+    #[test]
+    fn deleted_status_does_not_contribute_to_any_count() {
+        // We never persist `Deleted` in storage (delete_todo removes
+        // the item outright), but defend the match arm so a future
+        // refactor can't silently bump counts.
+        reset_storage();
+        replace_todos(vec![TodoItem {
+            content: "ghost".into(),
+            status: TodoStatus::Deleted,
+            active_form: None,
+        }]);
+        let s = todo_summary();
+        assert_eq!(s.total(), 0);
+        reset_storage();
+    }
+}

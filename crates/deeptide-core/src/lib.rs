@@ -100,9 +100,9 @@ pub use tools::{
     PushNotificationTool, ReadFilesTool, ReadMcpResourceTool, ReadTool, RemoteTriggerTool,
     ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool,
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, Tool, ToolContext, ToolMetadata, ToolRegistry, ToolResult, ToolSearchTool,
-    VerifyPlanExecutionTool, VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool,
-    WriteTool,
+    TodoSummary, TodoWriteTool, Tool, ToolContext, ToolMetadata, ToolRegistry, ToolResult,
+    ToolSearchTool, VerifyPlanExecutionTool, VideoTranscribeTool, VisionTool, WebFetchTool,
+    WebSearchTool, WriteTool, todo_summary,
 };
 pub use tps::{TpsRecord, TpsSample};
 pub use tui::{
