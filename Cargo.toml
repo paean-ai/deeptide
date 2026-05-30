@@ -15,9 +15,13 @@ authors = ["Paean AI"]
 [workspace.dependencies]
 clap = { version = "4.5.40", features = ["derive", "env"] }
 image = { version = "0.25.8", default-features = false, features = ["jpeg", "png"] }
+# `libc` is consumed only by the deeptide-cli stdin polling path (the
+# `/queue` mid-turn type-ahead feature on Unix). Kept at the workspace
+# level so other crates can opt in without duplicating the version pin.
+libc = "0.2"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 regex = "1.12.2"
-rustyline = "14"
+rustyline = "18"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 tempfile = "3.20.0"

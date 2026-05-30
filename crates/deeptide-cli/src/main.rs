@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,7 @@ use rustyline::{
     KeyCode, KeyEvent, Modifiers, RepeatCount,
 };
 
+mod queue_input;
 mod status_bar;
 
 const DEFAULT_MODEL: &str = "deepseek-v4-pro";
@@ -51,10 +52,49 @@ enum OutputFormat {
     StreamJson,
 }
 
+/// Compile-time short version string for `-V`. Combines the static crate
+/// version with the git commit short hash and commit date captured by
+/// `build.rs`. When the binary is built outside a git checkout (e.g. from
+/// a crates.io tarball) the build script substitutes "unknown" for the
+/// git pieces; we strip those out so `--version` stays clean and doesn't
+/// announce missing metadata.
+const VERSION_SHORT: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("DEEPTIDE_GIT_HASH"),
+    " ",
+    env!("DEEPTIDE_GIT_DATE"),
+    ")"
+);
+
+/// Multi-line `--version` output. Exposes every build-provenance datum so
+/// a user filing a bug report can paste the output and unambiguously
+/// identify which binary they're running.
+const VERSION_LONG: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("DEEPTIDE_GIT_HASH"),
+    " ",
+    env!("DEEPTIDE_GIT_DATE"),
+    ")\n",
+    "commit:  ",
+    env!("DEEPTIDE_GIT_HASH"),
+    "\n",
+    "date:    ",
+    env!("DEEPTIDE_GIT_DATE"),
+    "\n",
+    "branch:  ",
+    env!("DEEPTIDE_GIT_BRANCH"),
+    "\n",
+    "rustc:   ",
+    env!("DEEPTIDE_RUSTC"),
+);
+
 #[derive(Debug, Parser)]
 #[command(
-    name = "deeptide",
-    version,
+    name = "deeptide-rs",
+    version = VERSION_SHORT,
+    long_version = VERSION_LONG,
     about = "Cross-platform Rust implementation of the Deeptide CLI.",
     long_about = "Cross-platform Rust implementation of the Deeptide CLI.\n\nThis workspace is under active parity development against the Swift Deeptide app. The current Rust increment establishes slash-command, permission, and embedded protocol parity slices."
 )]
@@ -128,7 +168,15 @@ struct Cli {
     )]
     effort: Option<String>,
 
-    #[arg(long, default_value_t = 4096)]
+    #[arg(
+        long,
+        default_value_t = 65_536,
+        env = "DEEPTIDE_MAX_OUTPUT_TOKENS",
+        help = "Maximum tokens the model may produce per turn. 64K matches the practical output \
+                cap of Claude 4.5 Sonnet and is safely clamped server-side for smaller-capacity \
+                models. DeepSeek V4 supports up to 384K — raise this for very large one-shot \
+                outputs, or use chunked Write+Edit patterns for arbitrary file sizes."
+    )]
     max_output_tokens: usize,
 
     #[arg(
@@ -412,7 +460,11 @@ fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
     {
         cli.max_turns = t;
     }
-    if cli.max_output_tokens == 4096
+    // Only override the CLI flag from config when the user is still on
+    // the *current default* — otherwise an explicit `--max-output-tokens`
+    // would silently lose to a stale settings.json. 65_536 mirrors the
+    // clap default just above; bump both together if it changes.
+    if cli.max_output_tokens == 65_536
         && let Some(t) = cfg.max_tokens
     {
         cli.max_output_tokens = t;
@@ -535,6 +587,44 @@ struct ReplHelper {
     use_color: bool,
 }
 
+/// Static argument-completion table for slash commands whose first argument
+/// is drawn from a small fixed value set. Each entry pairs *all accepted
+/// heads* (canonical name + aliases) with the candidate values, so e.g.
+/// typing `/perm --` and `/permissions --` both yield the same suggestions.
+///
+/// New commands with closed-set first arguments should be added here rather
+/// than special-cased in `Completer::complete`.
+///
+/// `/model` and `/help` are handled separately because their value sets are
+/// dynamic (built from `known_models()` and the live command registry,
+/// respectively).
+const FIXED_ARG_SUGGESTIONS: &[(&[&str], &[&str])] = &[
+    (
+        &["permission", "perm", "permissions"],
+        &["--allow", "--deny", "--remove", "--list"],
+    ),
+    (&["cost"], &["show", "hide", "breakdown"]),
+    (&["provider", "profiles"], &["list", "use", "status"]),
+    (&["tps", "speed"], &["--json", "--reset"]),
+    (&["update", "upgrade"], &["--check", "--force"]),
+    (&["dream"], &["run", "status"]),
+    (&["cron"], &["list", "delete"]),
+    (&["goal", "objective"], &["status", "clear"]),
+    (&["config"], &["show"]),
+    (&["clear", "cls"], &["--yes"]),
+    (&["new"], &["--yes"]),
+    (&["compact", "compress"], &["--yes"]),
+    (&["reminder", "anchor", "reorient"], &["show", "send"]),
+    (&["sessions", "session"], &["latest", "today"]),
+    (&["context", "ctx"], &["files", "all"]),
+    (&["debug", "dbg"], &["on", "off"]),
+    (&["branch"], &["-b"]),
+    (
+        &["queue"],
+        &["list", "add", "pop", "clear", "mode", "single", "batch"],
+    ),
+];
+
 impl ReplHelper {
     fn new(commands: Vec<CommandCompletionSource>, use_color: bool) -> Self {
         // Argument completion for `/model <name>`: the built-in catalog plus the
@@ -551,10 +641,121 @@ impl ReplHelper {
             use_color,
         }
     }
+
+    /// Walk the dynamic argument-completion specs (model, help) and the
+    /// static `FIXED_ARG_SUGGESTIONS` table, returning the first match.
+    /// Each `command` head is tried against `value_completions`, which
+    /// already enforces that the typed token sits in the first-arg slot.
+    fn arg_completion(&self, line: &str, pos: usize) -> Option<(usize, Vec<Pair>)> {
+        // Dynamic: /model <name>
+        let model_refs: Vec<&str> = self.models.iter().map(String::as_str).collect();
+        for head in ["model", "m"] {
+            if let Some(values) =
+                CompletionEngine::value_completions(line, pos, head, &model_refs, 8)
+            {
+                return Some(pairs_from_values(values.token_start, &values.candidates));
+            }
+        }
+
+        // Dynamic: /help <command-name> — surfaces every registered command
+        // (and its aliases) so /help <Tab> works as a "list everything"
+        // affordance distinct from /help showing categorised output.
+        let mut help_targets: Vec<String> = Vec::with_capacity(self.commands.len() * 2);
+        for cmd in &self.commands {
+            help_targets.push(cmd.name.clone());
+            help_targets.extend(cmd.aliases.clone());
+        }
+        let help_refs: Vec<&str> = help_targets.iter().map(String::as_str).collect();
+        for head in ["help", "h", "?"] {
+            if let Some(values) =
+                CompletionEngine::value_completions(line, pos, head, &help_refs, 8)
+            {
+                return Some(pairs_from_values(values.token_start, &values.candidates));
+            }
+        }
+
+        // Static fixed-value table.
+        for (heads, values) in FIXED_ARG_SUGGESTIONS {
+            for head in *heads {
+                if let Some(result) =
+                    CompletionEngine::value_completions(line, pos, head, values, 8)
+                {
+                    return Some(pairs_from_values(result.token_start, &result.candidates));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Compute the inline ghost-text hint for a partially-typed slash
+    /// command. Returns the *tail* (the characters that would be inserted
+    /// if the user accepted the hint) when there is exactly one prefix
+    /// match in the registered command set. Multiple matches → no hint
+    /// (the user should press Tab to see the list and disambiguate);
+    /// substring/fuzzy matches → no hint (would be visually misleading);
+    /// cursor not at end of line → no hint (mid-edit cursor noise).
+    ///
+    /// Exposed at module scope as `compute_hint` so it's unit-testable
+    /// without a full rustyline `Context`.
+    fn compute_hint(&self, line: &str, pos: usize) -> Option<String> {
+        compute_hint(line, pos, &self.commands)
+    }
+}
+
+fn pairs_from_values(token_start: usize, values: &[String]) -> (usize, Vec<Pair>) {
+    let pairs = values
+        .iter()
+        .map(|value| Pair {
+            display: value.clone(),
+            replacement: value.clone(),
+        })
+        .collect();
+    (token_start, pairs)
+}
+
+/// Pure-function inline-hint logic; see `ReplHelper::compute_hint` for the
+/// behavioural contract. Lives outside the impl block so unit tests can
+/// drive it with a synthetic command list and no rustyline state.
+fn compute_hint(line: &str, pos: usize, commands: &[CommandCompletionSource]) -> Option<String> {
+    if pos != line.chars().count() {
+        return None;
+    }
+    let result = CompletionEngine::command_completions(line, pos, commands, 64)?;
+
+    // Only hint on clean *prefix* matches against either the canonical name
+    // (score == 0) or an alias (score == 1). Substring/contains hits (scores
+    // 2 / 3) would jump the hint to a non-adjacent character range which is
+    // visually misleading.
+    let prefix_hits: Vec<_> = result.candidates.iter().filter(|c| c.score <= 1).collect();
+    if prefix_hits.len() != 1 {
+        return None;
+    }
+    let candidate = prefix_hits[0];
+    let target = &candidate.matched_text;
+    let typed_len = result.typed.chars().count();
+    let target_len = target.chars().count();
+    if target_len <= typed_len {
+        return None;
+    }
+    let tail: String = target.chars().skip(typed_len).collect();
+    Some(tail)
 }
 
 impl Helper for ReplHelper {}
-impl Highlighter for ReplHelper {}
+
+impl Highlighter for ReplHelper {
+    fn highlight_hint<'h>(&self, hint: &'h str) -> std::borrow::Cow<'h, str> {
+        if self.use_color {
+            // ANSI dim + faint-grey (24-bit-safe SGR pair: 2;90). Keeps the
+            // ghost text visibly distinct from the user's typed input on
+            // both light and dark terminal themes.
+            std::borrow::Cow::Owned(format!("\x1b[2;90m{hint}\x1b[0m"))
+        } else {
+            std::borrow::Cow::Borrowed(hint)
+        }
+    }
+}
 
 impl Validator for ReplHelper {
     fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
@@ -573,8 +774,8 @@ impl Validator for ReplHelper {
 
 impl Hinter for ReplHelper {
     type Hint = String;
-    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        None
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        self.compute_hint(line, pos)
     }
 }
 
@@ -589,21 +790,11 @@ impl Completer for ReplHelper {
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
         let Some(result) = CompletionEngine::command_completions(line, pos, &self.commands, 8)
         else {
-            // No command-name match: try completing a known command argument,
-            // currently `/model <name>`.
-            let model_refs: Vec<&str> = self.models.iter().map(String::as_str).collect();
-            if let Some(values) =
-                CompletionEngine::value_completions(line, pos, "model", &model_refs, 8)
-            {
-                let pairs = values
-                    .candidates
-                    .iter()
-                    .map(|value| Pair {
-                        display: value.clone(),
-                        replacement: value.clone(),
-                    })
-                    .collect();
-                return Ok((values.token_start, pairs));
+            // No command-name match: walk the broader argument-completion
+            // table (model, help <cmd>, permission flags, cost actions,
+            // provider sub-verbs, etc.).
+            if let Some(pairs) = self.arg_completion(line, pos) {
+                return Ok(pairs);
             }
             return Ok((pos, vec![]));
         };
@@ -696,33 +887,91 @@ fn run_interactive(
         MarkdownRenderOptions { color: use_color },
     )));
     let streaming_md_handler = Arc::clone(&streaming_md);
+    let streaming_md_for_retry = Arc::clone(&streaming_md);
+    let did_stream_for_retry = Arc::clone(&did_stream);
+    let spinner_stop_for_retry = Arc::clone(&spinner_stop);
+    let spinner_lock_for_retry = Arc::clone(&spinner_lock);
+    let output_started_for_retry = Arc::clone(&output_started);
+    let use_color_for_retry = use_color;
+
+    // Late-bound slot for the per-session message queue. We can't capture
+    // `ReplSession::message_queue_handle()` directly here because the REPL
+    // is created several blocks below; instead, the streaming handler holds
+    // a `OnceLock` and pulls the queue out the first time it sees one. The
+    // CLI fills the slot right after constructing the REPL.
+    //
+    // Wrapping in `Arc` so the handler closure can hold one clone and the
+    // post-construction "set" site holds another.
+    let queue_slot: Arc<OnceLock<Arc<Mutex<deeptide_core::MessageQueue>>>> =
+        Arc::new(OnceLock::new());
+    let queue_slot_for_handler = Arc::clone(&queue_slot);
+    let spinner_lock_for_queue = Arc::clone(&spinner_lock);
+    let use_color_for_queue = use_color;
+
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
-        if let StreamingEvent::TextDelta { delta, .. } = event {
-            let first = !did_stream_handler.swap(true, Ordering::Relaxed);
-            // Stop the spinner under the lock so it cannot draw a frame over
-            // the text we are about to print.
-            if let Ok(_guard) = spinner_lock_handler.lock() {
-                spinner_stop_handler.store(true, Ordering::Relaxed);
-                output_started_handler.store(true, Ordering::Relaxed);
-                let mut out = io::stdout();
-                if first {
-                    // Erase the spinner line before the first streamed token.
-                    let _ = out.write_all(b"\r\x1b[2K");
+        match event {
+            StreamingEvent::TextDelta { delta, .. } => {
+                let first = !did_stream_handler.swap(true, Ordering::Relaxed);
+                // Stop the spinner under the lock so it cannot draw a frame
+                // over the text we are about to print.
+                if let Ok(_guard) = spinner_lock_handler.lock() {
+                    spinner_stop_handler.store(true, Ordering::Relaxed);
+                    output_started_handler.store(true, Ordering::Relaxed);
+                    let mut out = io::stdout();
+                    if first {
+                        // Erase the spinner line before the first streamed token.
+                        let _ = out.write_all(b"\r\x1b[2K");
+                    }
+                    // Apply incremental markdown rendering. Bold, lists, headers,
+                    // links, and inline code now style correctly even though the
+                    // model is emitting one chunk at a time. Code fences are
+                    // passed through verbatim while open (the body remains
+                    // readable as it streams in).
+                    let rendered = match streaming_md_handler.lock() {
+                        Ok(mut renderer) => renderer.push(delta),
+                        // If the mutex is poisoned, fall back to raw output so the
+                        // user still sees the model response.
+                        Err(_) => delta.clone(),
+                    };
+                    let _ = out.write_all(rendered.as_bytes());
+                    let _ = out.flush();
                 }
-                // Apply incremental markdown rendering. Bold, lists, headers,
-                // links, and inline code now style correctly even though the
-                // model is emitting one chunk at a time. Code fences are
-                // passed through verbatim while open (the body remains
-                // readable as it streams in).
-                let rendered = match streaming_md_handler.lock() {
-                    Ok(mut renderer) => renderer.push(delta),
-                    // If the mutex is poisoned, fall back to raw output so the
-                    // user still sees the model response.
-                    Err(_) => delta.clone(),
-                };
-                let _ = out.write_all(rendered.as_bytes());
-                let _ = out.flush();
             }
+            StreamingEvent::MessageDelta {
+                stop_reason: Some(reason),
+                ..
+            } => {
+                // Surface our synthetic `deeptide:stream-retry:N/M` signal
+                // as a visible REPL notice. Without this the user sees a
+                // ~400 ms+ silent backoff with no clue why; with it they
+                // get "↻ retry 1/3 — stream cut, reconnecting" and a
+                // fresh spinner cycle.
+                //
+                // Real Anthropic stop_reasons (end_turn, tool_use, …)
+                // bypass via `parse_stream_retry_signal` returning None.
+                if let Some(notice) = deeptide_core::parse_stream_retry_signal(reason) {
+                    render_retry_notice(
+                        &notice,
+                        use_color_for_retry,
+                        &did_stream_for_retry,
+                        &output_started_for_retry,
+                        &spinner_stop_for_retry,
+                        &spinner_lock_for_retry,
+                        &streaming_md_for_retry,
+                    );
+                }
+            }
+            _ => {}
+        }
+
+        // Mid-turn type-ahead capture for the `/queue` feature. After
+        // every SSE event, opportunistically peek stdin (non-blocking,
+        // libc::poll with timeout=0 on Unix; no-op on other platforms)
+        // and consume any complete line the user typed during the turn.
+        // The cost of the peek is microseconds even when stdin is idle,
+        // so we don't gate it on the event kind.
+        if let Some(queue) = queue_slot_for_handler.get() {
+            drain_pending_stdin_into_queue(queue, &spinner_lock_for_queue, use_color_for_queue);
         }
     });
 
@@ -769,6 +1018,13 @@ fn run_interactive(
     if let Some(append) = cli.append_system_prompt.as_deref() {
         repl = repl.with_appended_system_prompt(append);
     }
+
+    // Hand the streaming handler a stable reference to the per-session
+    // queue. Must happen AFTER `ReplSession::new` so the handle exists;
+    // setting fails iff some other code path already filled the slot
+    // (it shouldn't) — we ignore the result either way to stay
+    // forward-compatible if future code wants to pre-seed the queue.
+    let _ = queue_slot.set(repl.message_queue_handle());
 
     let rl_config = rustyline::config::Config::builder()
         .history_ignore_space(true)
@@ -855,6 +1111,14 @@ fn run_interactive(
     let api_key_resolved = is_configured;
     let mut auth_paint_tick: u64 = 0;
 
+    // When a turn finishes with messages remaining in the queue, we
+    // populate this with the drained content so the next loop iteration
+    // submits it immediately, bypassing rustyline. Cleared as soon as it
+    // is consumed. Holds at most one entry — `drain_next_queued_prompt`
+    // already decides how to combine multiple queued messages based on
+    // `QueueMode`.
+    let mut pending_queued_input: Option<String> = None;
+
     loop {
         // Paint the status bar (anchored at row N, OR inline above the
         // prompt as a safe fallback when anchoring isn't available).
@@ -876,7 +1140,23 @@ fn run_interactive(
             stdout.flush().map_err(|error| error.to_string())?;
         }
 
-        let readline = rl.readline(&styled_prompt);
+        // If the previous turn drained a queued prompt, fire it immediately
+        // without going through rustyline. This is what makes the queue
+        // feature feel automatic: the user typed during turn N, the queue
+        // auto-fires turn N+1 with that content. Skip the status-bar repaint
+        // loop body's `rl.readline` and synthesize an `Ok(line)` instead.
+        let readline = match pending_queued_input.take() {
+            Some(queued) => {
+                writeln!(
+                    stdout,
+                    "{}",
+                    render_queue_dispatch_notice(&queued, use_color)
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(queued)
+            }
+            None => rl.readline(&styled_prompt),
+        };
         match readline {
             Ok(line) => {
                 let trimmed = line.trim().to_owned();
@@ -973,6 +1253,14 @@ fn run_interactive(
                         }
                     }
                 }
+
+                // The turn has finished. If the user typed any messages
+                // during it (captured via mid-turn stdin polling) OR
+                // explicitly enqueued via `/queue add`, drain the queue
+                // and stage the result for automatic submission on the
+                // next iteration. `drain_next_queued_prompt` honours the
+                // configured mode (single = pop head, batch = join all).
+                pending_queued_input = repl.drain_next_queued_prompt();
             }
             Err(ReadlineError::Interrupted) => {
                 // Shift+Tab piggy-backs on rustyline's Interrupt command to
@@ -1442,7 +1730,7 @@ fn parse_tool_restrictions(
 fn run_doctor(cli: &Cli, cwd: &Path) -> String {
     let mut lines = Vec::with_capacity(64);
 
-    lines.push(format!("Deeptide doctor  v{}", env!("CARGO_PKG_VERSION")));
+    lines.push(format!("Deeptide doctor  v{}", VERSION_SHORT));
     lines.push(String::from(
         "================================================",
     ));
@@ -1452,6 +1740,10 @@ fn run_doctor(cli: &Cli, cwd: &Path) -> String {
         std::env::consts::OS,
         std::env::consts::ARCH
     ));
+    lines.push(format!("commit    : {}", env!("DEEPTIDE_GIT_HASH")));
+    lines.push(format!("built     : {}", env!("DEEPTIDE_GIT_DATE")));
+    lines.push(format!("branch    : {}", env!("DEEPTIDE_GIT_BRANCH")));
+    lines.push(format!("rustc     : {}", env!("DEEPTIDE_RUSTC")));
     lines.push(String::new());
 
     lines.push(String::from("[ config files ]"));
@@ -1767,11 +2059,231 @@ fn effective_credential(cli: &Cli) -> Option<CloudCredential> {
     None
 }
 
+/// Print a one-line "retrying…" notice when the API layer's auto-retry
+/// loop fires between SSE attempts.
+///
+/// The notice appears as `↻ retry N/M — <reason>` in dimmed cyan so it
+/// reads as a transient status message rather than competing with the
+/// model's actual answer. Operates under the same spinner lock the
+/// `TextDelta` arm uses so the spinner thread cannot draw a frame on
+/// top of (or under) the notice.
+///
+/// Side effects beyond printing:
+///
+/// 1. Resets the in-flight `StreamingMarkdownRenderer` so any partial
+///    line buffered from the doomed attempt doesn't leak into the
+///    retry's output.
+/// 2. Clears `did_stream` and `output_started` so the next `TextDelta`
+///    re-erases the spinner line cleanly (otherwise the first
+///    post-retry token would chain directly onto our notice with no
+///    separator).
+///
+/// `use_color=false` flips ANSI escapes to plain text so the notice
+/// stays readable on terminals without colour or under `--no-color`.
+#[allow(clippy::too_many_arguments)]
+fn render_retry_notice(
+    notice: &deeptide_core::StreamRetryNotice,
+    use_color: bool,
+    did_stream: &Arc<AtomicBool>,
+    output_started: &Arc<AtomicBool>,
+    spinner_stop: &Arc<AtomicBool>,
+    spinner_lock: &Arc<Mutex<()>>,
+    streaming_md: &Arc<Mutex<deeptide_core::StreamingMarkdownRenderer>>,
+) {
+    let Ok(_guard) = spinner_lock.lock() else {
+        return;
+    };
+    // Stop the spinner, clear its line, print the notice, then let the
+    // outer loop restart the spinner during the backoff. The next
+    // TextDelta (or another retry) will re-claim stdout under the lock.
+    spinner_stop.store(true, Ordering::Relaxed);
+    let mut out = io::stdout();
+    let _ = out.write_all(b"\r\x1b[2K");
+
+    // Drain any buffered markdown state — the partial line from the
+    // doomed attempt is now meaningless because we'll get a fresh
+    // delta stream on the retry.
+    let drained = match streaming_md.lock() {
+        Ok(mut renderer) => {
+            let leftover = renderer.flush();
+            renderer.reset();
+            leftover
+        }
+        Err(_) => String::new(),
+    };
+    if !drained.is_empty() {
+        // If the previous attempt had emitted some text already, print
+        // it before the notice so the user can see how far we got.
+        let _ = out.write_all(drained.as_bytes());
+        if !drained.ends_with('\n') {
+            let _ = out.write_all(b"\n");
+        }
+    }
+
+    let line = format_retry_notice_line(notice, use_color);
+    let _ = out.write_all(line.as_bytes());
+    let _ = out.flush();
+
+    // Reset the "we have streamed output" flags so the next real
+    // TextDelta re-erases the spinner line and starts fresh.
+    did_stream.store(false, Ordering::Relaxed);
+    output_started.store(false, Ordering::Relaxed);
+}
+
+/// Truncate a single-line string to at most `max_chars` *display*
+/// characters with a trailing `…` if it had to cut. Uses the unified
+/// `display_width` so CJK / fullwidth content gets accounted at 2
+/// cells per char rather than 1.
+fn truncate_inline(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{truncated}…")
+}
+
+/// Build the rendered retry-notice line (without writing it). Split out
+/// from [`render_retry_notice`] so we can unit-test the formatting
+/// without needing a real spinner thread or stdout capture.
+///
+/// Output shape:
+///
+/// * With reason:     `  ↻ retry N/M — <reason>\n`
+/// * Without reason:  `  ↻ retry N/M\n`
+/// * With colour:     wrapped in dim-cyan ANSI escapes
+///
+/// The leading two-space indent is intentional: it matches the
+/// `└─` left-bar indent of the structured tool-event renderer so
+/// transient status messages visually align with executed-tool output
+/// rather than competing with the model's prose.
+fn format_retry_notice_line(notice: &deeptide_core::StreamRetryNotice, use_color: bool) -> String {
+    let label = if notice.reason.is_empty() {
+        format!("  ↻ retry {}/{}", notice.attempt, notice.max_attempts)
+    } else {
+        // Bound the reason length so a verbose truncation message
+        // doesn't push the spinner off-screen. 80 chars covers the
+        // canonical "streaming response cut before message_stop (N
+        // chars assembled…)" template comfortably.
+        format!(
+            "  ↻ retry {}/{} — {}",
+            notice.attempt,
+            notice.max_attempts,
+            truncate_inline(&notice.reason, 80)
+        )
+    };
+    if use_color {
+        // Dim cyan: visible but signals "transient status, not the
+        // actual answer". Reset at end so subsequent tokens aren't
+        // accidentally coloured.
+        format!("\x1b[2;36m{label}\x1b[0m\n")
+    } else {
+        format!("{label}\n")
+    }
+}
+
+/// Bounded single-line preview used by both the mid-turn "✚ queued"
+/// notice and the post-turn "▶ queued" dispatch notice. Collapses
+/// internal newlines to ` / ` so multi-line input doesn't break the
+/// status line, and truncates at `max_chars` characters (not bytes) so
+/// CJK content fits cleanly.
+fn queue_preview(message: &str, max_chars: usize) -> String {
+    let collapsed: String = message
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    truncate_inline(&collapsed, max_chars)
+}
+
+/// Read every pending complete line off stdin and push each into the
+/// queue. Called from the streaming handler after every SSE event.
+///
+/// Visibility: after consuming a line we print a `✚ queued (#N): …`
+/// notice on its own row so the user has positive confirmation their
+/// input was captured. The notice acquires `spinner_lock` so it can't
+/// tear a concurrent streaming write — the rest of the streaming
+/// handler uses the same lock for that reason.
+///
+/// Failure modes are swallowed (we re-try on the next event tick):
+///   * lock poisoning → can't render notice, skip
+///   * stdin EOF → poll will no longer trigger, harmless
+///   * transient read error → return; the next poll picks up the rest
+fn drain_pending_stdin_into_queue(
+    queue: &Arc<Mutex<deeptide_core::MessageQueue>>,
+    spinner_lock: &Arc<Mutex<()>>,
+    use_color: bool,
+) {
+    // Cap the per-event drain so a runaway producer can't starve the
+    // streaming handler. The loop exits naturally when stdin reports
+    // no more pending data.
+    const MAX_LINES_PER_TICK: usize = 8;
+
+    for _ in 0..MAX_LINES_PER_TICK {
+        if !queue_input::stdin_has_pending_line() {
+            break;
+        }
+        let line = match queue_input::read_pending_line() {
+            Ok(Some(line)) => line,
+            Ok(None) => break, // stdin EOF
+            Err(_) => break,
+        };
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let depth = match queue.lock() {
+            Ok(mut q) => {
+                if !q.push(trimmed) {
+                    continue;
+                }
+                q.len()
+            }
+            Err(_) => break,
+        };
+
+        // Render the per-line confirmation under the spinner lock so a
+        // concurrent stream write doesn't interleave with our newline.
+        // The leading `\r\x1b[2K` clears whatever fragment of streaming
+        // output is on the current row, then we re-emit the notice on
+        // its own row. The streaming text that arrives after this
+        // continues from the next row naturally.
+        let preview = queue_preview(trimmed, 60);
+        let line_text = if use_color {
+            format!("\r\x1b[2K\x1b[2;32m  ✚ queued (#{depth}): {preview}\x1b[0m\n")
+        } else {
+            format!("\r  ✚ queued (#{depth}): {preview}\n")
+        };
+
+        if let Ok(_guard) = spinner_lock.lock() {
+            let mut out = io::stdout();
+            let _ = out.write_all(line_text.as_bytes());
+            let _ = out.flush();
+        }
+    }
+}
+
+/// Notice printed on the row above an auto-dispatched queued prompt, so
+/// the user sees "this prompt was popped off the queue, not freshly
+/// typed". Shown immediately before the REPL submits the queued content
+/// on the next iteration.
+fn render_queue_dispatch_notice(queued: &str, use_color: bool) -> String {
+    let preview = queue_preview(queued, 80);
+    if use_color {
+        format!("\x1b[2;36m  ▶ queued → submit: {preview}\x1b[0m")
+    } else {
+        format!("  ▶ queued → submit: {preview}")
+    }
+}
+
 /// Render a [`SystemMessage`] for the interactive REPL. Color is applied
 /// when the user hasn't opted out via `--no-color` / `NO_COLOR`; in plain
 /// mode the output is just the structured fields joined together.
 ///
 /// Styling vocabulary:
+///
 /// - tool batch summary       → dim `· Tools …`
 /// - tool success             → green `✓ <Name>` + dim summary
 /// - tool failure             → red `✗ <Name>` + bright summary
@@ -2214,14 +2726,16 @@ impl EnumValue for OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
-        build_auth_segment, collect_prompt, configured_backend, effective_base_url,
-        effective_model, next_permission_mode, normalize_embedded_mode, paean_token_resolved,
-        parse_permission_response, render_system_message, summarize_tool_call_for_prompt,
-        use_color, validate_formats,
+        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, FIXED_ARG_SUGGESTIONS, InputFormat, OutputFormat,
+        ReplHelper, VERSION_LONG, VERSION_SHORT, apply_config_fallbacks, build_auth_segment,
+        collect_prompt, compute_hint, configured_backend, effective_base_url, effective_model,
+        format_retry_notice_line, next_permission_mode, normalize_embedded_mode,
+        paean_token_resolved, parse_permission_response, render_system_message,
+        summarize_tool_call_for_prompt, truncate_inline, use_color, validate_formats,
     };
     use clap::Parser;
     use deeptide_core::AskOutcome;
+    use deeptide_core::CommandCompletionSource;
     use deeptide_core::permissions::PermissionMode;
     use deeptide_core::{
         AnthropicAuthMode, ConfigData, ProviderProfile, SystemMessage, ThinkingConfig,
@@ -2246,7 +2760,7 @@ mod tests {
             fallback_model: None,
             thinking: None,
             effort: None,
-            max_output_tokens: 4096,
+            max_output_tokens: 65_536,
             max_turns: 25,
             system_prompt: None,
             system_prompt_file: None,
@@ -2268,6 +2782,100 @@ mod tests {
             settings: None,
             add_dir: Vec::new(),
         }
+    }
+
+    #[test]
+    fn retry_notice_renders_compact_label_without_color() {
+        let notice = deeptide_core::StreamRetryNotice {
+            attempt: 1,
+            max_attempts: 3,
+            reason: "stream cut".to_owned(),
+        };
+        let line = format_retry_notice_line(&notice, false);
+        // Plain mode: no ANSI escapes, single newline, indented label.
+        assert_eq!(line, "  ↻ retry 1/3 — stream cut\n");
+        assert!(
+            !line.contains('\x1b'),
+            "plain mode must have no escapes: {line:?}"
+        );
+    }
+
+    #[test]
+    fn retry_notice_wraps_label_in_dim_cyan_when_color_on() {
+        let notice = deeptide_core::StreamRetryNotice {
+            attempt: 2,
+            max_attempts: 3,
+            reason: "upstream proxy cut".to_owned(),
+        };
+        let line = format_retry_notice_line(&notice, true);
+        // Dim (2) + cyan (36) opening, reset (0) closing. Sole newline
+        // at the very end so subsequent TextDelta lands on its own row.
+        assert!(
+            line.starts_with("\x1b[2;36m"),
+            "missing dim-cyan opener: {line:?}"
+        );
+        assert!(
+            line.ends_with("\x1b[0m\n"),
+            "missing reset+newline: {line:?}"
+        );
+        assert!(line.contains("retry 2/3"));
+        assert!(line.contains("upstream proxy cut"));
+    }
+
+    #[test]
+    fn retry_notice_omits_separator_when_reason_is_empty() {
+        // Empty-reason path: the em-dash separator and trailing text
+        // must vanish entirely so we don't render "↻ retry 1/3 —" with
+        // a dangling dash that looks like a truncated message.
+        let notice = deeptide_core::StreamRetryNotice {
+            attempt: 1,
+            max_attempts: 3,
+            reason: String::new(),
+        };
+        let line = format_retry_notice_line(&notice, false);
+        assert_eq!(line, "  ↻ retry 1/3\n");
+        assert!(
+            !line.contains('—'),
+            "no separator allowed when reason is empty: {line:?}"
+        );
+    }
+
+    #[test]
+    fn retry_notice_truncates_long_reasons_inline() {
+        let long_reason: String = "x".repeat(200);
+        let notice = deeptide_core::StreamRetryNotice {
+            attempt: 3,
+            max_attempts: 3,
+            reason: long_reason,
+        };
+        let line = format_retry_notice_line(&notice, false);
+        // Hard cap: the inline truncator keeps reasons at ≤80 chars +
+        // ellipsis so the notice fits on a typical terminal row even
+        // with the "  ↻ retry N/M — " preamble. Total line stays well
+        // under 100 columns.
+        assert!(line.contains('…'), "long reason must be elided: {line:?}");
+        assert!(
+            line.chars().count() < 100,
+            "notice too long: {line:?} ({} chars)",
+            line.chars().count()
+        );
+    }
+
+    #[test]
+    fn truncate_inline_is_a_no_op_for_short_text() {
+        assert_eq!(truncate_inline("hello", 80), "hello");
+        assert_eq!(truncate_inline("", 80), "");
+    }
+
+    #[test]
+    fn truncate_inline_respects_char_count_not_byte_count_for_cjk() {
+        // 中文每字符占 1 个 char 但占 2 个显示格。本函数以 char 计数，
+        // 所以 5 个中文 ≤ 5 不裁剪；6 个 + 上限 5 → 4 个中文 + …。
+        let cjk = "你好世界编程";
+        assert_eq!(truncate_inline(cjk, 6), cjk);
+        let cut = truncate_inline(cjk, 5);
+        assert!(cut.ends_with('…'));
+        assert_eq!(cut.chars().count(), 5);
     }
 
     fn env_guard() -> MutexGuard<'static, ()> {
@@ -3620,5 +4228,307 @@ mod tests {
         }
         assert!(!paean_token_resolved());
         clear_api_env();
+    }
+
+    // ---------- Slash-command completion & ghost-text hint ----------
+    //
+    // These tests cover the user-reported gaps:
+    //   * `/exit` must appear in the registered command list (regression
+    //     against accidentally removing it from `repl_command_sources`)
+    //   * Tab completion for partial command names must surface candidates
+    //   * Inline hint shows only on unambiguous prefix matches
+    //   * The expanded argument-completion table (FIXED_ARG_SUGGESTIONS)
+    //     covers /permission, /cost, /provider, /tps, /update, /dream,
+    //     /cron, /goal, /config, /clear --yes, /new --yes, /compact --yes,
+    //     /reminder, /sessions, /context, /debug, /branch.
+
+    fn sample_commands() -> Vec<CommandCompletionSource> {
+        vec![
+            CommandCompletionSource::new(
+                "help",
+                ["h", "?"],
+                "Show available commands and keybindings",
+                "/help [command]",
+            ),
+            CommandCompletionSource::new("exit", ["quit", "q"], "Exit the REPL", "/exit"),
+            CommandCompletionSource::new("export", Vec::<&str>::new(), "Export", "/export"),
+            CommandCompletionSource::new("memory", ["mem"], "Manage memory", "/memory"),
+            CommandCompletionSource::new("model", ["m"], "Switch model", "/model <name>"),
+            CommandCompletionSource::new(
+                "permission",
+                ["perm", "permissions"],
+                "Manage permissions",
+                "/permission",
+            ),
+            CommandCompletionSource::new("cost", Vec::<&str>::new(), "Cost", "/cost"),
+            CommandCompletionSource::new(
+                "provider",
+                ["profiles"],
+                "Provider profiles",
+                "/provider",
+            ),
+        ]
+    }
+
+    fn helper() -> ReplHelper {
+        ReplHelper::new(sample_commands(), false)
+    }
+
+    #[test]
+    fn hint_offers_completion_tail_when_prefix_is_unambiguous() {
+        // `/exi` only matches `/exit` as a prefix → hint should be "t".
+        let line = "/exi";
+        assert_eq!(
+            compute_hint(line, line.len(), &sample_commands()).as_deref(),
+            Some("t")
+        );
+    }
+
+    #[test]
+    fn hint_is_empty_for_ambiguous_prefix() {
+        // `/ex` matches both /exit and /export → no hint, user must Tab.
+        let line = "/ex";
+        assert!(
+            compute_hint(line, line.len(), &sample_commands()).is_none(),
+            "ambiguous /ex must not ghost-text — let Tab show the candidate list"
+        );
+    }
+
+    #[test]
+    fn hint_is_empty_for_complete_command() {
+        // Already typed the full name → no trailing ghost text.
+        let line = "/exit";
+        assert!(compute_hint(line, line.len(), &sample_commands()).is_none());
+    }
+
+    #[test]
+    fn hint_is_empty_when_cursor_not_at_end() {
+        // Cursor mid-word: hint would visually clash with the typed tail.
+        let line = "/exit";
+        // pos=3 means cursor sits after "/ex" — hint would still be unambiguous
+        // for the prefix, but rendering it past in-progress edits is jarring.
+        assert!(compute_hint(line, 3, &sample_commands()).is_none());
+    }
+
+    #[test]
+    fn hint_is_empty_for_bare_slash() {
+        // Just `/` → every command matches as score 0 → no hint.
+        let line = "/";
+        assert!(compute_hint(line, line.len(), &sample_commands()).is_none());
+    }
+
+    #[test]
+    fn hint_is_empty_for_non_slash_input() {
+        let line = "hello";
+        assert!(compute_hint(line, line.len(), &sample_commands()).is_none());
+    }
+
+    #[test]
+    fn hint_completes_aliases_when_uniquely_typed() {
+        // `/quit` is an alias for `/exit` and shouldn't appear as a hint —
+        // the alias is itself a complete command. `/qui` should hint `t`
+        // (matched_text is the alias "quit").
+        let line = "/qui";
+        let hint = compute_hint(line, line.len(), &sample_commands());
+        assert_eq!(
+            hint.as_deref(),
+            Some("t"),
+            "hint should complete /quit → /quit (alias path)"
+        );
+    }
+
+    #[test]
+    fn arg_completion_table_contains_critical_commands() {
+        // Sanity check: the table the user expects to feed argument
+        // suggestions doesn't silently shrink.
+        let heads: Vec<&str> = FIXED_ARG_SUGGESTIONS
+            .iter()
+            .flat_map(|(heads, _)| heads.iter().copied())
+            .collect();
+        for required in [
+            "permission",
+            "cost",
+            "provider",
+            "tps",
+            "update",
+            "dream",
+            "cron",
+            "goal",
+            "config",
+            "clear",
+            "new",
+            "compact",
+            "reminder",
+            "sessions",
+            "context",
+            "debug",
+            "branch",
+        ] {
+            assert!(
+                heads.contains(&required),
+                "FIXED_ARG_SUGGESTIONS dropped /{required}; table is now: {heads:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn arg_completion_resolves_permission_flag() {
+        let helper = helper();
+        let line = "/permission --a";
+        let (token_start, pairs) = helper
+            .arg_completion(line, line.len())
+            .expect("/permission --a must suggest --allow");
+        assert_eq!(token_start, "/permission ".len());
+        let suggestions: Vec<String> = pairs.iter().map(|p| p.replacement.clone()).collect();
+        assert!(
+            suggestions.iter().any(|s| s == "--allow"),
+            "expected --allow in suggestions, got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn arg_completion_resolves_permission_via_short_alias() {
+        let helper = helper();
+        // Critical: aliases must trigger the same arg completion as the
+        // canonical name. Previous implementation only matched canonical.
+        let line = "/perm --d";
+        let pairs = helper
+            .arg_completion(line, line.len())
+            .expect("/perm alias must surface the permission arg list");
+        let suggestions: Vec<String> = pairs.1.iter().map(|p| p.replacement.clone()).collect();
+        assert!(
+            suggestions.iter().any(|s| s == "--deny"),
+            "expected --deny via alias /perm, got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn arg_completion_resolves_cost_action() {
+        let helper = helper();
+        let line = "/cost s";
+        let pairs = helper
+            .arg_completion(line, line.len())
+            .expect("/cost s must suggest 'show'");
+        let suggestions: Vec<String> = pairs.1.iter().map(|p| p.replacement.clone()).collect();
+        assert!(
+            suggestions.contains(&"show".to_owned()),
+            "got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn arg_completion_resolves_provider_subverb() {
+        let helper = helper();
+        let line = "/provider l";
+        let pairs = helper
+            .arg_completion(line, line.len())
+            .expect("/provider l must suggest 'list'");
+        let suggestions: Vec<String> = pairs.1.iter().map(|p| p.replacement.clone()).collect();
+        assert!(
+            suggestions.contains(&"list".to_owned()),
+            "got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn arg_completion_resolves_help_for_registered_command() {
+        let helper = helper();
+        // `/help mem` should surface "memory" from the dynamic registered
+        // command list (not the static FIXED_ARG_SUGGESTIONS table).
+        let line = "/help mem";
+        let pairs = helper
+            .arg_completion(line, line.len())
+            .expect("/help mem must surface registered command names");
+        let suggestions: Vec<String> = pairs.1.iter().map(|p| p.replacement.clone()).collect();
+        assert!(
+            suggestions.iter().any(|s| s == "memory"),
+            "expected memory in /help completion, got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn arg_completion_for_unknown_command_returns_none() {
+        let helper = helper();
+        let line = "/notacommand foo";
+        assert!(
+            helper.arg_completion(line, line.len()).is_none(),
+            "no completion should be returned for an unknown command head"
+        );
+    }
+
+    // ---------- Version provenance ----------
+    //
+    // The user complaint that motivated build.rs was:
+    //   $ deeptide-rs --version
+    //   deeptide 0.1.0
+    // ...with no way to tell *which* commit they had installed locally.
+    // These tests guard the contract that --version output remains
+    // meaningful even when build.rs falls back to "unknown" hashes.
+
+    #[test]
+    fn version_short_contains_pkg_version() {
+        let pkg = env!("CARGO_PKG_VERSION");
+        assert!(
+            VERSION_SHORT.starts_with(pkg),
+            "VERSION_SHORT must lead with the crate version, got: {VERSION_SHORT}"
+        );
+    }
+
+    #[test]
+    fn version_short_includes_provenance_envelope() {
+        // The wrapped "(hash date)" envelope is what makes the short form
+        // bug-report friendly. It must be present even when the build is
+        // outside a git checkout (in which case both fields are "unknown").
+        assert!(
+            VERSION_SHORT.contains('('),
+            "VERSION_SHORT must contain a (hash date) envelope, got: {VERSION_SHORT}"
+        );
+        assert!(VERSION_SHORT.contains(')'));
+    }
+
+    #[test]
+    fn version_long_carries_each_label() {
+        for label in ["commit:", "date:", "branch:", "rustc:"] {
+            assert!(
+                VERSION_LONG.contains(label),
+                "VERSION_LONG missing `{label}`, got:\n{VERSION_LONG}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_long_starts_with_short_form() {
+        // The first line of --version (long) is the same as -V (short) so
+        // grep / pipe-to-head workflows show the same headline either way.
+        let first_line = VERSION_LONG.lines().next().unwrap_or_default();
+        assert_eq!(
+            first_line, VERSION_SHORT,
+            "VERSION_LONG's first line must match VERSION_SHORT verbatim"
+        );
+    }
+
+    #[test]
+    fn version_env_vars_are_non_empty() {
+        // build.rs guarantees a fallback string for every variable, so even
+        // a crates.io tarball build produces a usable --version. Catch a
+        // future regression where someone removes the fallback.
+        for name in [
+            "DEEPTIDE_GIT_HASH",
+            "DEEPTIDE_GIT_DATE",
+            "DEEPTIDE_GIT_BRANCH",
+            "DEEPTIDE_RUSTC",
+        ] {
+            let value = match name {
+                "DEEPTIDE_GIT_HASH" => env!("DEEPTIDE_GIT_HASH"),
+                "DEEPTIDE_GIT_DATE" => env!("DEEPTIDE_GIT_DATE"),
+                "DEEPTIDE_GIT_BRANCH" => env!("DEEPTIDE_GIT_BRANCH"),
+                "DEEPTIDE_RUSTC" => env!("DEEPTIDE_RUSTC"),
+                _ => unreachable!(),
+            };
+            assert!(
+                !value.is_empty(),
+                "{name} must always be set to at least 'unknown' by build.rs, got empty"
+            );
+        }
     }
 }

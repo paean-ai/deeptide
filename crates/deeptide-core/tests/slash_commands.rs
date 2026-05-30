@@ -2,8 +2,38 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use deeptide_core::{
-    ClearCommand, CommandContext, CommandResult, CompactCommand, NewCommand, SlashCommand,
+    ClearCommand, CommandContext, CommandResult, CompactCommand, ExitCommand, NewCommand,
+    SlashCommand,
 };
+
+#[test]
+fn exit_command_returns_exit_result() {
+    let context = CommandContext::default();
+    let result = ExitCommand.execute("", &context);
+    assert!(
+        matches!(result, CommandResult::Exit),
+        "ExitCommand must produce CommandResult::Exit, got: {result:?}"
+    );
+}
+
+#[test]
+fn exit_command_advertises_canonical_name_and_aliases() {
+    assert_eq!(ExitCommand.name(), "exit");
+    assert_eq!(ExitCommand.aliases(), &["quit", "q"]);
+    assert_eq!(ExitCommand.usage(), "/exit");
+    assert!(!ExitCommand.description().is_empty());
+}
+
+#[test]
+fn exit_command_ignores_arguments() {
+    let context = CommandContext::default();
+    // Future-proof: even if someone types `/exit --force` we still exit, we
+    // don't render an error or accidentally consume the argument as a flag.
+    assert!(matches!(
+        ExitCommand.execute("--force right-now", &context),
+        CommandResult::Exit
+    ));
+}
 
 #[test]
 fn clear_command_uses_clear_hook_when_provided() {

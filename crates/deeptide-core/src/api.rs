@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentBackend, AgentRequest, AgentResponse, AgentUsage, ConversationMessage, MessageRole,
-    StreamingHandler, ToolCall, ToolResultBlock, streaming::parse_streaming_response,
+    StreamingEvent, StreamingHandler, ToolCall, ToolResultBlock,
+    streaming::{STREAM_RETRY_SIGNAL_PREFIX, parse_streaming_response},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +136,24 @@ impl AnthropicConfig {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
-            max_tokens: 4096,
+            // 64K matches the practical output cap of every modern
+            // Anthropic-compatible backend we ship against:
+            //
+            //   * Claude 4.5 Sonnet:        64K output
+            //   * DeepSeek-V4-Pro/Flash:    384K output  (1M context)
+            //   * Paean (Anthropic-format): 64K+ output
+            //   * Older Claude 3 / DeepSeek-V3.2: server-side clamped
+            //     to their own limit (8K / 16K), so requesting 64K is
+            //     safe — the API just returns whatever it supports.
+            //
+            // Defaulting to 64K closes the failure mode where a single
+            // `Write` of a non-trivial HTML/code file (~7-10K tokens)
+            // hits the budget mid-call and produces an unparseable
+            // partial tool input. We don't go higher by default because
+            // (a) 384K would be a footgun for billing on first-use and
+            // (b) for outputs larger than 64K the right design is to
+            // chunk via Edit / append-style tools rather than one-shot.
+            max_tokens: 65_536,
             auth_mode: AnthropicAuthMode::ApiKey,
             system_prompt: None,
             tool_choice: ToolChoice::Auto,
@@ -155,7 +173,8 @@ impl AnthropicConfig {
             base_url: base_url.into(),
             api_key: token.into(),
             model: model.into(),
-            max_tokens: 4096,
+            // See `new` — same rationale, applies to bearer-auth backends too.
+            max_tokens: 65_536,
             auth_mode: AnthropicAuthMode::BearerToken,
             system_prompt: None,
             tool_choice: ToolChoice::Auto,
@@ -265,7 +284,7 @@ impl AgentBackend for AnthropicBackend {
         } else {
             request.model.clone()
         };
-        match self.try_model(&primary, &request, effective_system.as_deref()) {
+        match self.try_model_with_stream_retry(&primary, &request, effective_system.as_deref()) {
             Ok(response) => Ok(response),
             Err(failure) => {
                 // On a transient server overload, retry once with the
@@ -276,7 +295,11 @@ impl AgentBackend for AnthropicBackend {
                     && is_retryable_overload(failure.status)
                 {
                     return self
-                        .try_model(&fallback, &request, effective_system.as_deref())
+                        .try_model_with_stream_retry(
+                            &fallback,
+                            &request,
+                            effective_system.as_deref(),
+                        )
                         .map_err(|failure| failure.message);
                 }
                 Err(failure.message)
@@ -285,11 +308,31 @@ impl AgentBackend for AnthropicBackend {
     }
 }
 
+/// Maximum number of SSE-truncation retries before bubbling the error.
+/// Three attempts (initial + 2 retries) is the same budget zero-cli uses
+/// and matches the empirical observation that transient stream cuts
+/// almost always recover by the second attempt.
+const STREAM_TRUNCATION_MAX_ATTEMPTS: u32 = 3;
+
+/// Compute the backoff sleep between attempt N and N+1. We start at
+/// 200 ms and double (200 → 400 → 800 …) so the first retry is fast
+/// (likely-transient cut), and any subsequent retry signals a fatter
+/// problem and waits longer to avoid hammering the upstream.
+fn stream_retry_backoff(attempt: u32) -> Duration {
+    let base_ms: u64 = 200;
+    Duration::from_millis(base_ms.saturating_mul(1_u64 << attempt.min(4)))
+}
+
 /// A failed `/v1/messages` attempt, tagging the formatted error with the HTTP
 /// status so the caller can decide whether to retry with a fallback model.
 struct ApiFailure {
     /// HTTP status code, or `0` for transport-level errors (no response).
     status: u16,
+    /// Set when the failure was a streaming SSE truncation — the HTTP
+    /// request was idempotent and the cause is a transient network
+    /// or upstream-proxy hiccup, so the caller may safely re-run the
+    /// same request without changing inputs.
+    transient_truncation: bool,
     message: String,
 }
 
@@ -300,6 +343,66 @@ fn is_retryable_overload(status: u16) -> bool {
 }
 
 impl AnthropicBackend {
+    /// Wrap [`Self::try_model`] in an SSE-truncation retry loop.
+    ///
+    /// Real-world failure mode (PR #96, user-reported): a long Write
+    /// tool call gets cut mid-payload because the upstream proxy / load
+    /// balancer / model server hiccuped before emitting `message_stop`.
+    /// The HTTP request itself was idempotent — the same body produces
+    /// equivalent output modulo sampling — so retrying transparently
+    /// is the right behaviour, exactly mirroring how zero-cli handles
+    /// the same class of error.
+    ///
+    /// We retry only when [`ApiFailure::transient_truncation`] is set:
+    /// other failures (HTTP 4xx, model-rejected, malformed JSON with a
+    /// clean stream close, U+FFFD upstream-corruption) are *not* retried
+    /// because the recourse is human, not mechanical. Backoff doubles
+    /// between attempts and we cap at [`STREAM_TRUNCATION_MAX_ATTEMPTS`].
+    ///
+    /// Each retry emits a synthetic streaming notice through the user's
+    /// installed `StreamingHandler` so the UI can surface "stream cut,
+    /// retrying…" instead of going silent for a full second.
+    fn try_model_with_stream_retry(
+        &self,
+        model: &str,
+        request: &AgentRequest,
+        effective_system: Option<&str>,
+    ) -> Result<AgentResponse, ApiFailure> {
+        let mut last_err: Option<ApiFailure> = None;
+        for attempt in 0..STREAM_TRUNCATION_MAX_ATTEMPTS {
+            match self.try_model(model, request, effective_system) {
+                Ok(response) => return Ok(response),
+                Err(failure) => {
+                    if !failure.transient_truncation {
+                        return Err(failure);
+                    }
+                    // Last attempt: don't sleep, just surface.
+                    if attempt + 1 >= STREAM_TRUNCATION_MAX_ATTEMPTS {
+                        last_err = Some(failure);
+                        break;
+                    }
+                    // Tell the UI we're retrying so the user sees
+                    // forward progress rather than a frozen spinner.
+                    if let Some(handler) = self.streaming_handler.as_ref() {
+                        handler(&StreamingEvent::MessageDelta {
+                            stop_reason: Some(format!(
+                                "{prefix}{}/{} ({})",
+                                attempt + 1,
+                                STREAM_TRUNCATION_MAX_ATTEMPTS,
+                                failure.message,
+                                prefix = STREAM_RETRY_SIGNAL_PREFIX,
+                            )),
+                            output_tokens: None,
+                        });
+                    }
+                    std::thread::sleep(stream_retry_backoff(attempt));
+                    last_err = Some(failure);
+                }
+            }
+        }
+        Err(last_err.expect("retry loop must have populated last_err on exit"))
+    }
+
     /// Issue a single `/v1/messages` request with the given model, returning
     /// the assembled response or a status-tagged failure.
     fn try_model(
@@ -347,9 +450,25 @@ impl AnthropicBackend {
             AnthropicAuthMode::ApiKey => req.header("x-api-key", &self.config.api_key),
             AnthropicAuthMode::BearerToken => req.bearer_auth(&self.config.api_key),
         };
-        let response = req.send().map_err(|error| ApiFailure {
-            status: 0,
-            message: format!("connection error: {error}"),
+        let response = req.send().map_err(|error| {
+            // Some `reqwest` send-time errors stem from a mid-stream
+            // reset where the connection was established but never got
+            // a clean response. Heuristically these errors stringify
+            // with "decode" / "body" hints or fail at connect/timeout —
+            // treat them as transient so the outer retry loop gives
+            // them another try.
+            let msg = error.to_string();
+            let transient = error.is_timeout()
+                || error.is_connect()
+                || msg.contains("connection")
+                || msg.contains("reset")
+                || msg.contains("decode")
+                || msg.contains("body");
+            ApiFailure {
+                status: 0,
+                transient_truncation: transient,
+                message: format!("connection error: {error}"),
+            }
         })?;
         let status = response.status();
 
@@ -364,10 +483,12 @@ impl AnthropicBackend {
                 .map(str::to_owned);
             let text = response.text().map_err(|error| ApiFailure {
                 status: status.as_u16(),
+                transient_truncation: false,
                 message: format!("failed to read response body: {error}"),
             })?;
             return Err(ApiFailure {
                 status: status.as_u16(),
+                transient_truncation: false,
                 message: classify_error(status.as_u16(), &text, retry_after.as_deref()),
             });
         }
@@ -378,17 +499,20 @@ impl AnthropicBackend {
             // payload up front, so live deltas flow to the handler as the
             // model produces them.
             parse_streaming_response(response, self.streaming_handler.as_ref(), started.elapsed())
-                .map_err(|message| ApiFailure {
+                .map_err(|stream_err| ApiFailure {
                     status: status.as_u16(),
-                    message,
+                    transient_truncation: stream_err.is_transient_retry(),
+                    message: stream_err.to_string(),
                 })
         } else {
             let text = response.text().map_err(|error| ApiFailure {
                 status: status.as_u16(),
+                transient_truncation: false,
                 message: format!("failed to read response body: {error}"),
             })?;
             parse_messages_response(&text, started.elapsed()).map_err(|message| ApiFailure {
                 status: status.as_u16(),
+                transient_truncation: false,
                 message,
             })
         }
@@ -1385,8 +1509,22 @@ fn tool_schemas() -> Vec<WireTool> {
             cache_control: None,
         },
         WireTool {
+            name: "AppendFile",
+            description: "Append UTF-8 text to a file, creating it (with parent directories) if it does not exist.\n- Use this for INCREMENTAL file construction when a single Write would exceed your output token budget: emit a skeleton with Write, then call AppendFile repeatedly to add each subsequent section. This is strictly better than risking a truncated one-shot Write — partial JSON cannot be repaired.\n- Required input keys are exactly file_path and content; do not call AppendFile with path, filename, target, or an empty object.\n- Relative file_path values resolve against the current workspace.\n- The chunk is appended verbatim after line-ending normalization (\\r\\n / lone \\r → \\n).\n- By default a single \\n separator is inserted between the existing file tail and the new chunk only when the file does not already end in a newline; pass ensure_trailing_newline=false to disable this for byte-exact concatenation.\n- AppendFile is O(chunk_size) and safe to call many times against a growing file.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file to extend (created if missing)."},
+                    "content": {"type": "string", "description": "Chunk to append verbatim after line-ending normalization."},
+                    "ensure_trailing_newline": {"type": "boolean", "description": "Insert a single '\\n' separator when the existing file does not already end in a newline. Defaults to true."}
+                },
+                "required": ["file_path", "content"]
+            }),
+            cache_control: None,
+        },
+        WireTool {
             name: "Edit",
-            description: "Performs exact string replacements in files.\n- Relative file_path values resolve against the current workspace.\n- Read the file first so old_string matches the current content exactly. When copying from Read output, preserve the exact indentation (tabs/spaces) as it appears AFTER the line-number prefix (line number + tab) and never include any part of that prefix in old_string or new_string.\n- ALWAYS prefer editing existing files; never write new files unless explicitly required.\n- Only add emojis if the user explicitly requests it.\n- The edit FAILS if old_string is not unique: provide a larger surrounding string to make it unique, or set replace_all to change every occurrence.\n- If you see \"old_string not found\", the file may have changed since your last Read - re-read it and retry; this is a normal recovery path, not a dead end.\n- Use replace_all to rename a symbol across the whole file.",
+            description: "Performs exact string replacements in files.\n- Relative file_path values resolve against the current workspace.\n- Read the file first so old_string matches the current content exactly. When copying from Read output, preserve the exact indentation (tabs/spaces) as it appears AFTER the line-number prefix (line number + tab) and never include any part of that prefix in old_string or new_string.\n- ALWAYS prefer editing existing files; never write new files unless explicitly required.\n- For incremental construction of LARGE NEW files where a one-shot Write would exceed your output budget, use AppendFile instead of Edit.\n- Only add emojis if the user explicitly requests it.\n- The edit FAILS if old_string is not unique: provide a larger surrounding string to make it unique, or set replace_all to change every occurrence.\n- If you see \"old_string not found\", the file may have changed since your last Read - re-read it and retry; this is a normal recovery path, not a dead end.\n- Use replace_all to rename a symbol across the whole file.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

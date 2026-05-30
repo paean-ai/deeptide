@@ -115,6 +115,20 @@ impl StreamingMarkdownRenderer {
     pub fn is_idle(&self) -> bool {
         self.buf.is_empty() && !self.in_fence
     }
+
+    /// Discard all buffered state without rendering it.
+    ///
+    /// Used by the REPL when an SSE stream truncates and the auto-retry
+    /// kicks in: the bytes we held would have completed into something
+    /// meaningful on the doomed attempt, but the retry will resend its
+    /// own deltas from scratch, so keeping the partial buffer would
+    /// merge two unrelated outputs and look like model corruption. Pair
+    /// with [`Self::flush`] beforehand if you want the user to see how
+    /// far the previous attempt got.
+    pub fn reset(&mut self) {
+        self.buf.clear();
+        self.in_fence = false;
+    }
 }
 
 impl MarkdownRenderer {
@@ -720,6 +734,33 @@ mod tests {
 
     fn streaming_plain() -> StreamingMarkdownRenderer {
         StreamingMarkdownRenderer::new(MarkdownRenderOptions { color: false })
+    }
+
+    #[test]
+    fn streaming_reset_discards_buffer_and_clears_fence_state() {
+        // Setup: feed a partial fenced block so both the buffer AND the
+        // in_fence flag are non-default. reset() must wipe both, after
+        // which a fresh push parses from scratch with no leftover
+        // contamination from the abandoned stream.
+        let mut r = streaming_plain();
+        let _ = r.push("```rust\nlet x = ");
+        assert!(
+            !r.is_idle(),
+            "precondition: renderer must be holding fenced state"
+        );
+        r.reset();
+        assert!(
+            r.is_idle(),
+            "reset() must drop buffered bytes AND the fence flag"
+        );
+        // After reset, a brand-new heading renders cleanly with no
+        // leftover code-block markers.
+        let out = r.push("# fresh\n");
+        assert!(!out.contains("let x ="), "stale buffer leaked: {out:?}");
+        assert!(
+            out.contains("fresh"),
+            "post-reset push must render: {out:?}"
+        );
     }
 
     #[test]

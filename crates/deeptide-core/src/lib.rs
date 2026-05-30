@@ -13,6 +13,7 @@ pub mod memory;
 pub mod memory_capture;
 pub mod memory_hygiene;
 pub mod memory_rank;
+pub mod message_queue;
 pub mod permissions;
 pub mod prompt;
 pub mod repl;
@@ -35,8 +36,8 @@ pub use agent_loop::{
 };
 pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ThinkingConfig, ToolChoice};
 pub use commands::{
-    ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, HelpCommand,
-    MemoryCommand, NewCommand, RememberCommand, SlashCommand,
+    ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, ExitCommand,
+    HelpCommand, MemoryCommand, NewCommand, RememberCommand, SlashCommand,
 };
 pub use completion::{
     CommandCompletionCandidate, CommandCompletionResult, CommandCompletionSource, CompletionEngine,
@@ -56,6 +57,7 @@ pub use cost::{
 };
 pub use hooks::{HookEngine, HookEvent, HookOutcome};
 pub use markdown::{MarkdownRenderOptions, MarkdownRenderer, StreamingMarkdownRenderer};
+pub use message_queue::{MessageQueue, QueueMode};
 pub use permissions::{
     PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
     ToolInput,
@@ -67,21 +69,25 @@ pub use safety_guard::{
     AuditInput, AuditReport, Auditor, CodeAuditor, Finding, SafetyGuard, ShellAuditor, Verdict,
 };
 pub use session::{SessionEntry, SessionStore, new_session_id};
-pub use streaming::{StreamingEvent, StreamingHandler, parse_streaming_response};
+pub use streaming::{
+    STREAM_RETRY_SIGNAL_PREFIX, StreamError, StreamRetryNotice, StreamingEvent, StreamingHandler,
+    parse_stream_retry_signal, parse_streaming_response,
+};
 pub use tool_batch_labeler::{ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
-    AgentTool, AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool, ClipboardTool,
-    CrashLogTool, CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool, EditTool,
-    EnterPlanModeTool, EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool,
-    GetMcpPromptTool, GlobTool, GrepTool, ImagePreprocessTool, ListMcpPromptsTool,
-    ListMcpResourcesTool, LspTool, MacDiagnoseTool, MacLogTool, McpTool, MemorySearchTool,
-    MemoryWriteTool, MonitorTool, NotebookEditTool, PublishTool, PushNotificationTool,
-    ReadFilesTool, ReadMcpResourceTool, ReadTool, RemoteTriggerTool, ReviewArtifactTool,
-    ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool, TaskCreateTool,
-    TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool,
-    ToolContext, ToolRegistry, ToolResult, ToolSearchTool, VerifyPlanExecutionTool,
-    VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool, WriteTool,
+    AgentTool, AppendFileTool, AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool,
+    ClipboardTool, CrashLogTool, CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool,
+    EditTool, EnterPlanModeTool, EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool,
+    FileMetadataTool, GetMcpPromptTool, GlobTool, GrepTool, ImagePreprocessTool,
+    ListMcpPromptsTool, ListMcpResourcesTool, LspTool, MacDiagnoseTool, MacLogTool, McpTool,
+    MemorySearchTool, MemoryWriteTool, MonitorTool, NotebookEditTool, PublishTool,
+    PushNotificationTool, ReadFilesTool, ReadMcpResourceTool, ReadTool, RemoteTriggerTool,
+    ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool,
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
+    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, ToolSearchTool,
+    VerifyPlanExecutionTool, VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool,
+    WriteTool,
 };
 pub use tps::{TpsRecord, TpsSample};
 pub use tui::{
