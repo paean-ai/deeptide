@@ -194,6 +194,34 @@ impl AnchoredStatusBar {
         }
     }
 
+    /// Paint a single-line "ghost" text at the input row WITHOUT
+    /// moving the caller's logical cursor — used to keep the input
+    /// area visually occupied (e.g. `▎ thinking…`) while the agent
+    /// is busy. The sequence:
+    ///
+    /// 1. Save cursor (DECSC `\x1b7`).
+    /// 2. Jump to the input row + clear it.
+    /// 3. Write `text` (caller is responsible for any color codes
+    ///    or truncation — we don't attempt to width-clamp because
+    ///    the chrome module already produces ANSI-styled content
+    ///    that's hard to slice safely).
+    /// 4. Restore cursor (DECRC `\x1b8`).
+    ///
+    /// Returning the cursor lets the caller continue streaming
+    /// model output into the scroll region with no perceived
+    /// re-positioning. Holding `lock` keeps the paint atomic
+    /// against the spinner / streaming threads.
+    pub fn paint_input_ghost(&self, text: &str, lock: &std::sync::Mutex<()>) {
+        if self.footer_rows < 2 {
+            return;
+        }
+        if let Ok(_guard) = lock.lock() {
+            let mut out = io::stdout();
+            let _ = out.write_all(paint_ghost_seq(self.input_row(), text).as_bytes());
+            let _ = out.flush();
+        }
+    }
+
     /// Recover from `rl.readline` returning. The user just pressed
     /// Enter so rustyline emitted a final newline; depending on
     /// whether the input wrapped, the cursor may be on the status
@@ -342,6 +370,18 @@ fn disengage_seq(rows: u16) -> String {
 /// rustyline edit area at the bottom-most non-status row.
 fn jump_and_clear_seq(row: u16) -> String {
     format!("\x1b[{row};1H\x1b[2K", row = row.max(1))
+}
+
+/// Build the ANSI sequence that paints `text` at `row` without
+/// disturbing the caller's logical cursor: save-cursor (DECSC),
+/// jump-and-clear-row, write text, restore-cursor (DECRC).
+///
+/// Extracted as a free function so we can unit-test the exact byte
+/// sequence we emit — `paint_input_ghost` itself does live IO and
+/// would be hard to assert against directly.
+fn paint_ghost_seq(row: u16, text: &str) -> String {
+    let row = row.max(1);
+    format!("\x1b7\x1b[{row};1H\x1b[2K{text}\x1b8")
 }
 
 /// Install a SIGWINCH handler that sets [`RESIZE_REQUESTED`] so the
@@ -573,6 +613,39 @@ mod tests {
         let seq = jump_and_clear_seq(0);
         assert!(
             seq.starts_with("\x1b[1;1H"),
+            "expected row clamped to 1: {seq:?}"
+        );
+    }
+
+    #[test]
+    fn paint_ghost_seq_saves_cursor_paints_at_row_and_restores() {
+        let seq = paint_ghost_seq(23, "▎ thinking…");
+        // DECSC opens the sequence so the caller's cursor is
+        // preserved.
+        assert!(seq.starts_with("\x1b7"), "expected DECSC at start: {seq:?}");
+        // Cursor must jump to row 23 column 1 and clear the row
+        // before writing the ghost text.
+        assert!(
+            seq.contains("\x1b[23;1H\x1b[2K"),
+            "expected jump + clear for row 23: {seq:?}"
+        );
+        // The ghost text itself is embedded verbatim.
+        assert!(
+            seq.contains("▎ thinking…"),
+            "ghost text must appear verbatim: {seq:?}"
+        );
+        // DECRC closes the sequence so streaming output continues
+        // at the saved position.
+        assert!(seq.ends_with("\x1b8"), "expected DECRC at end: {seq:?}");
+    }
+
+    #[test]
+    fn paint_ghost_seq_clamps_zero_row_to_one() {
+        // Row 0 is not a valid VT cursor coordinate — verify the
+        // helper degrades rather than emitting an invalid escape.
+        let seq = paint_ghost_seq(0, "hi");
+        assert!(
+            seq.contains("\x1b[1;1H"),
             "expected row clamped to 1: {seq:?}"
         );
     }

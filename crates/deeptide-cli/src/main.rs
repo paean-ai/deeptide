@@ -26,6 +26,7 @@ use rustyline::{
     KeyCode, KeyEvent, Modifiers, RepeatCount,
 };
 
+mod chrome;
 mod queue_input;
 mod status_bar;
 
@@ -1128,8 +1129,13 @@ fn run_interactive(
                     output_started_handler.store(true, Ordering::Relaxed);
                     let mut out = io::stdout();
                     if first {
-                        // Erase the spinner line before the first streamed token.
+                        // Erase the spinner line before the first streamed
+                        // token, then drop in the assistant role header so
+                        // the streaming output reads as a labelled block.
                         let _ = out.write_all(b"\r\x1b[2K");
+                        let _ = out.write_all(
+                            chrome::render_assistant_header(use_color_for_retry).as_bytes(),
+                        );
                     }
                     // Apply incremental markdown rendering. Bold, lists, headers,
                     // links, and inline code now style correctly even though the
@@ -1261,13 +1267,35 @@ fn run_interactive(
         let _ = rl.load_history(path);
     }
 
-    writeln!(stdout, "{}", repl.banner()).map_err(|error| error.to_string())?;
-    writeln!(
-        stdout,
-        "Permission mode: {}. Type /help for commands, Ctrl+D to exit.",
-        permission_mode.label()
-    )
-    .map_err(|error| error.to_string())?;
+    // Rich welcome banner: three styled lines that summarise model,
+    // mode, cwd, auth state, plus the key shortcuts. Replaces the
+    // older two-line plain banner without changing the
+    // `repl.banner()` API — the legacy version is still available
+    // and matters for non-interactive code paths (tests, JSON
+    // output) that consume it directly.
+    let welcome = {
+        let banner_cwd = std::env::current_dir()
+            .map(|p| {
+                p.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|_| String::from("."));
+        let auth_short = if is_configured {
+            "key ok"
+        } else {
+            "no key (echo backend)"
+        };
+        chrome::render_welcome(
+            VERSION_SHORT,
+            repl.agent_loop().model(),
+            permission_mode.label(),
+            &banner_cwd,
+            auth_short,
+            use_color,
+        )
+    };
+    writeln!(stdout, "{welcome}").map_err(|error| error.to_string())?;
     if !is_configured {
         writeln!(
             stdout,
@@ -1410,6 +1438,29 @@ fn run_interactive(
                     bar.recover_to_scroll_region(&bar_styled, &spinner_lock);
                 }
 
+                // Echo the user's submitted text into the scrollback as a
+                // styled `▎ you ▾` block. Without this the conversation
+                // looks one-sided once the input row is wiped — the
+                // model's reply appears with no context for what was
+                // asked. Skipped for slash commands because the
+                // command's own output is the user-visible echo (and a
+                // double-prefix would just be noise).
+                if !content.starts_with('/') {
+                    let echo = chrome::render_user_block(&content, use_color);
+                    let _ = stdout.write_all(echo.as_bytes());
+                }
+
+                // Paint a dim ghost prompt at the input row so the
+                // bottom of the screen never reads "empty" while the
+                // agent is thinking. The next loop iteration's
+                // `prepare_input_row` will clear it before rustyline
+                // takes over.
+                if let Some(bar) = anchored.as_ref()
+                    && bar.footer_rows() >= 2
+                {
+                    bar.paint_input_ghost(&chrome::render_thinking("", use_color), &spinner_lock);
+                }
+
                 // Reset per-turn streaming + spinner state.
                 did_stream.store(false, Ordering::Relaxed);
                 output_started.store(false, Ordering::Relaxed);
@@ -1443,6 +1494,7 @@ fn run_interactive(
                 // on the next turn's first delta with stale state. Resetting
                 // the renderer also clears any fence state so a turn that
                 // ended mid-code-block doesn't bleed into the next response.
+                let streamed = did_stream.load(Ordering::Relaxed);
                 if let Ok(mut renderer) = streaming_md.lock() {
                     let trailing = renderer.flush();
                     if !trailing.is_empty() {
@@ -1450,6 +1502,15 @@ fn run_interactive(
                     }
                     *renderer =
                         StreamingMarkdownRenderer::new(MarkdownRenderOptions { color: use_color });
+                }
+                // Soft separator between turns. We only emit it when
+                // the agent actually streamed something (otherwise
+                // the turn was likely a slash-command echo whose
+                // output is self-contained) and when we have a
+                // terminal width we can clamp the rule against.
+                if streamed {
+                    let width = terminal_width().unwrap_or(80);
+                    let _ = stdout.write_all(chrome::render_separator(width, use_color).as_bytes());
                 }
 
                 for event in events {
