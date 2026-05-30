@@ -355,11 +355,19 @@ fn install_sigwinch_handler() {
     #[cfg(unix)]
     {
         SIGWINCH_INSTALLED.call_once(|| {
-            // SAFETY: libc::signal is async-signal-safe; the handler we
-            // install only writes to an AtomicBool, which is also
+            // SAFETY: libc::signal is async-signal-safe; the handler
+            // we install only writes to an AtomicBool, which is also
             // async-signal-safe.
+            //
+            // The intermediate `*const ()` cast keeps clippy's
+            // `function_casts_as_integer` lint happy on newer
+            // toolchains — casting a fn item straight to an integer
+            // type is now an error under `-D warnings`.
             unsafe {
-                libc::signal(libc::SIGWINCH, sigwinch_handler as libc::sighandler_t);
+                libc::signal(
+                    libc::SIGWINCH,
+                    sigwinch_handler as *const () as libc::sighandler_t,
+                );
             }
         });
     }
