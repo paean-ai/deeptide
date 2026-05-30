@@ -379,9 +379,21 @@ fn jump_and_clear_seq(row: u16) -> String {
 /// Extracted as a free function so we can unit-test the exact byte
 /// sequence we emit — `paint_input_ghost` itself does live IO and
 /// would be hard to assert against directly.
-fn paint_ghost_seq(row: u16, text: &str) -> String {
+pub(crate) fn paint_ghost_seq(row: u16, text: &str) -> String {
     let row = row.max(1);
     format!("\x1b7\x1b[{row};1H\x1b[2K{text}\x1b8")
+}
+
+/// Flush a single ghost-paint to stdout at the given row WITHOUT
+/// touching any locking. Intended to be called from a thread that
+/// already holds whichever synchronisation primitive the rest of
+/// the writer pipeline uses, so this helper stays a stateless
+/// `(row, text) → bytes-on-stdout`. Used by the queue editor's
+/// pump thread to repaint the pinned input row on every key.
+pub fn write_ghost_at_row(row: u16, text: &str) {
+    let mut out = io::stdout();
+    let _ = out.write_all(paint_ghost_seq(row, text).as_bytes());
+    let _ = out.flush();
 }
 
 /// Install a SIGWINCH handler that sets [`RESIZE_REQUESTED`] so the
