@@ -136,7 +136,17 @@ impl AnthropicConfig {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
-            max_tokens: 4096,
+            // 16K is the practical floor for tool-use workloads: a
+            // single-file HTML scaffold or a meaningful refactor easily
+            // exceeds 4K tokens in the model's `Write` payload, and
+            // when that limit is hit Anthropic still emits a clean
+            // `content_block_stop`+`message_stop` with
+            // `stop_reason: max_tokens` — leaving us with a partial,
+            // unparseable tool input. Every modern Anthropic-compatible
+            // backend (Claude 3+, DeepSeek-Chat, Paean) accepts 16K
+            // output, so this just makes the common case work without
+            // requiring `--max-tokens` on the command line.
+            max_tokens: 16_384,
             auth_mode: AnthropicAuthMode::ApiKey,
             system_prompt: None,
             tool_choice: ToolChoice::Auto,
@@ -156,7 +166,8 @@ impl AnthropicConfig {
             base_url: base_url.into(),
             api_key: token.into(),
             model: model.into(),
-            max_tokens: 4096,
+            // See `new` — same rationale, applies to bearer-auth backends too.
+            max_tokens: 16_384,
             auth_mode: AnthropicAuthMode::BearerToken,
             system_prompt: None,
             tool_choice: ToolChoice::Auto,

@@ -128,7 +128,15 @@ struct Cli {
     )]
     effort: Option<String>,
 
-    #[arg(long, default_value_t = 4096)]
+    #[arg(
+        long,
+        default_value_t = 16_384,
+        env = "DEEPTIDE_MAX_OUTPUT_TOKENS",
+        help = "Maximum tokens the model may produce per turn. 16K is the practical floor for \
+                tool-use workloads — a single Write of a non-trivial HTML/code file regularly \
+                exceeds 4K tokens, and hitting the budget mid-call produces an unparseable \
+                partial tool input. Raise to 32768+ for large refactors."
+    )]
     max_output_tokens: usize,
 
     #[arg(
@@ -412,7 +420,11 @@ fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
     {
         cli.max_turns = t;
     }
-    if cli.max_output_tokens == 4096
+    // Only override the CLI flag from config when the user is still on
+    // the *current default* — otherwise an explicit `--max-output-tokens`
+    // would silently lose to a stale settings.json. 16_384 mirrors the
+    // clap default just above; bump both together if it changes.
+    if cli.max_output_tokens == 16_384
         && let Some(t) = cfg.max_tokens
     {
         cli.max_output_tokens = t;
@@ -2402,7 +2414,7 @@ mod tests {
             fallback_model: None,
             thinking: None,
             effort: None,
-            max_output_tokens: 4096,
+            max_output_tokens: 16_384,
             max_turns: 25,
             system_prompt: None,
             system_prompt_file: None,

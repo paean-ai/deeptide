@@ -183,6 +183,16 @@ pub enum StreamError {
     /// SSE stream ended without `content_block_stop` for an in-flight
     /// block (or without `message_stop` overall). Retry-safe.
     Truncated(String),
+    /// Stream completed cleanly but the model ran out of its
+    /// `max_tokens` budget mid-content — Anthropic still emits
+    /// `content_block_stop` + `message_stop` in this case, just with
+    /// `stop_reason: max_tokens` on the terminal `message_delta`. The
+    /// partial tool input JSON is necessarily incomplete (closing
+    /// quote / brace missing) because the model didn't get to finish.
+    /// Not retriable with the same budget — the next attempt would
+    /// hit the same wall — so we surface a distinct error pointing
+    /// the user at `--max-tokens` rather than burning another call.
+    TokenBudgetExceeded(String),
     /// Stream completed but its payload contains U+FFFD — upstream
     /// re-encoded chunked UTF-8 lossily.
     UpstreamCorruption(String),
@@ -201,6 +211,7 @@ impl StreamError {
     pub fn message(&self) -> &str {
         match self {
             StreamError::Truncated(m)
+            | StreamError::TokenBudgetExceeded(m)
             | StreamError::UpstreamCorruption(m)
             | StreamError::Malformed(m)
             | StreamError::EmptyStream(m)
@@ -210,9 +221,12 @@ impl StreamError {
 
     /// `true` if the agent loop should silently retry the same request.
     ///
-    /// Currently only `Truncated` qualifies. `UpstreamCorruption` is
-    /// _potentially_ retriable but we leave that to a future iteration
-    /// to avoid wasting tokens spinning on a persistent server bug.
+    /// Currently only `Truncated` qualifies. `TokenBudgetExceeded` is
+    /// deliberately *not* retriable: the same prompt with the same
+    /// budget will hit the same wall, so retrying just doubles the
+    /// bill. `UpstreamCorruption` is _potentially_ retriable but we
+    /// leave that to a future iteration to avoid wasting tokens
+    /// spinning on a persistent server bug.
     pub fn is_transient_retry(&self) -> bool {
         matches!(self, StreamError::Truncated(_))
     }
@@ -243,6 +257,15 @@ pub fn parse_streaming_response<R: Read>(
     let mut usage = UsageAccumulator::default();
     let mut model: Option<String> = None;
     let mut saw_message_stop = false;
+    // Last `stop_reason` seen on a `message_delta` event. When the
+    // model hits its `max_tokens` budget mid-tool-call, Anthropic still
+    // emits a clean `content_block_stop` + `message_stop`, just with
+    // `stop_reason: max_tokens` on the terminal delta. We retain that
+    // so the per-tool-input classifier can distinguish "budget
+    // exhausted" (not retriable, fix by raising --max-tokens) from
+    // "model emitted garbage JSON" (also not retriable, but different
+    // recourse).
+    let mut final_stop_reason: Option<String> = None;
 
     while let Some(event) = read_sse_event(&mut reader)? {
         match event.event_type.as_str() {
@@ -407,6 +430,14 @@ pub fn parse_streaming_response<R: Read>(
                 if let Some(message_usage) = payload.usage.as_ref() {
                     usage.merge_output(message_usage);
                 }
+                // Latch the stop_reason. We deliberately overwrite on
+                // every message_delta — Anthropic only emits one final
+                // delta with a real stop_reason, but if a server emits
+                // multiple (some compatible APIs do for streaming
+                // progress) we want the last word.
+                if let Some(reason) = payload.delta.stop_reason.as_ref() {
+                    final_stop_reason = Some(reason.clone());
+                }
                 if let Some(handler) = handler {
                     handler(&StreamingEvent::MessageDelta {
                         stop_reason: payload.delta.stop_reason.clone(),
@@ -469,7 +500,14 @@ pub fn parse_streaming_response<R: Read>(
                     serde_json::json!({})
                 } else {
                     serde_json::from_str(&partial_input).map_err(|e| {
-                        classify_tool_input_error(&name, &id, &partial_input, &e, stop_seen)
+                        classify_tool_input_error(
+                            &name,
+                            &id,
+                            &partial_input,
+                            &e,
+                            stop_seen,
+                            final_stop_reason.as_deref(),
+                        )
                     })?
                 };
                 tool_calls.push(ToolCall::new(id, name, input));
@@ -540,7 +578,7 @@ fn ensure_index(blocks: &mut Vec<BlockAccumulator>, index: usize) {
 /// Categorise a tool-input JSON failure into the right [`StreamError`]
 /// variant and format the user-facing message.
 ///
-/// We distinguish three failure modes so the user gets a useful next step
+/// We distinguish four failure modes so the user gets a useful next step
 /// instead of an opaque parse error:
 ///
 /// 1. **Mid-stream truncation** (`!stop_seen`) — the upstream server cut
@@ -548,7 +586,15 @@ fn ensure_index(blocks: &mut Vec<BlockAccumulator>, index: usize) {
 ///    block. The partial JSON is necessarily incomplete (no closing
 ///    quote / brace). Returned as [`StreamError::Truncated`] so the API
 ///    layer can transparently retry.
-/// 2. **UTF-8 corruption** (`partial_input` contains U+FFFD) — some hop
+/// 2. **`max_tokens` budget exhausted** (`stop_seen` + final
+///    `stop_reason == "max_tokens"`) — the stream completed cleanly
+///    but the model ran out of budget mid-content. The partial JSON
+///    is just as broken as the truncation case, but retrying with
+///    the same budget would hit the same wall, so we return
+///    [`StreamError::TokenBudgetExceeded`] which is NOT
+///    auto-retried. The message names `--max-tokens` so the user
+///    knows the concrete knob to turn.
+/// 3. **UTF-8 corruption** (`partial_input` contains U+FFFD) — some hop
 ///    in the chain (proxy, load balancer, model server's own streamer)
 ///    lossily decoded a chunked UTF-8 sequence and replaced the bad
 ///    bytes with `\u{FFFD}`. The JSON string then either fails to
@@ -556,7 +602,7 @@ fn ensure_index(blocks: &mut Vec<BlockAccumulator>, index: usize) {
 ///    [`StreamError::UpstreamCorruption`] — _not_ auto-retried, because
 ///    the cause is upstream and a retry may just yield the same bad
 ///    chunks at different offsets.
-/// 3. **Otherwise** — genuinely malformed JSON. Returned as
+/// 4. **Otherwise** — genuinely malformed JSON. Returned as
 ///    [`StreamError::Malformed`]; the user has to retry by hand.
 ///
 /// `partial_input` is truncated to a reasonable preview length so a 12 KB
@@ -567,6 +613,7 @@ fn classify_tool_input_error(
     partial_input: &str,
     parse_err: &serde_json::Error,
     stop_seen: bool,
+    final_stop_reason: Option<&str>,
 ) -> StreamError {
     const PREVIEW_BYTES: usize = 240;
 
@@ -584,14 +631,39 @@ fn classify_tool_input_error(
             "tool_use {name}#{id} stream truncated before content_block_stop ({total_chars} chars assembled){utf8_note}. \
              Retry the prompt, or run with --no-stream if the issue persists. Partial input preview: {preview}"
         ))
+    } else if final_stop_reason == Some("max_tokens") {
+        // Highest-priority "stop_seen=true" diagnosis: budget exhausted
+        // takes precedence over UTF-8 corruption because the user's fix
+        // is straightforward (raise --max-tokens), unambiguous, and
+        // resolves the issue deterministically.
+        let utf8_note = if has_replacement {
+            " (payload also contains U+FFFD upstream-corruption marks)"
+        } else {
+            ""
+        };
+        StreamError::TokenBudgetExceeded(format!(
+            "tool_use {name}#{id} hit the model's max_tokens budget mid-call \
+             ({total_chars} chars produced before stop_reason=max_tokens){utf8_note}. \
+             The partial JSON cannot be repaired by retrying with the same budget — \
+             raise --max-tokens (e.g. 16384 or 32768) or split the request into smaller pieces. \
+             Partial input preview: {preview}"
+        ))
     } else if has_replacement {
         StreamError::UpstreamCorruption(format!(
             "tool_use {name}#{id} input JSON contains U+FFFD replacement characters — upstream UTF-8 corruption in the streaming payload. \
              Retry the prompt; if it recurs the upstream API is mis-chunking multibyte sequences. Underlying parse error: {parse_err}. Preview: {preview}"
         ))
     } else {
+        // Cleanly-stopped stream with valid UTF-8 but unparseable JSON.
+        // We've never observed this in the wild without a max_tokens
+        // pretext, so most "Malformed" reports in practice are likely
+        // a server that omits stop_reason on max_tokens. Point at
+        // --max-tokens defensively but keep the variant distinct so
+        // the user can recognise it.
         StreamError::Malformed(format!(
-            "tool_use {name}#{id} input JSON did not assemble cleanly: {parse_err}; partial={preview}"
+            "tool_use {name}#{id} input JSON did not assemble cleanly: {parse_err}; \
+             this usually means the model truncated its own output (try raising --max-tokens \
+             if the partial preview looks cut off mid-content). partial={preview}"
         ))
     }
 }
@@ -1243,6 +1315,109 @@ mod tests {
             msg.contains("more chars"),
             "preview must show elision: {msg}"
         );
+    }
+
+    #[test]
+    fn tool_input_truncated_by_max_tokens_classifies_as_token_budget_exceeded() {
+        // The roguelike-HTML failure mode: model emits half a Write
+        // tool call, then Anthropic terminates the message with
+        // stop_reason=max_tokens. The block closes cleanly
+        // (content_block_stop + message_stop both arrive) but the JSON
+        // is necessarily incomplete because the model was cut off by
+        // the budget.
+        //
+        // Old behaviour: classified as `Malformed`, which sent the
+        //   user down the wrong recovery path (retry by hand, no
+        //   guidance on what to change). Auto-retry didn't fire
+        //   because the variant isn't retriable, but a retry would
+        //   have hit the same wall anyway.
+        // New behaviour: `TokenBudgetExceeded` variant with an
+        //   explicit "raise --max-tokens" recommendation. Not
+        //   auto-retried — same budget = same failure.
+        let payload = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_budget\",\"name\":\"Write\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\":\\\"a.html\\\",\\\"content\\\":\\\"<!DOCTYPE html>...\"}}\n\n",
+            // Both stop events arrive cleanly — this is NOT a network
+            // truncation. The message_delta carries stop_reason=max_tokens.
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":4096}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let (result, _) = drive(payload);
+        let err = result.expect_err("max_tokens mid-tool-call must error");
+        // Variant must be TokenBudgetExceeded so the agent loop's
+        // retry path bypasses this case (same budget = same failure)
+        // and the user sees concrete recovery instructions.
+        assert!(
+            matches!(err, StreamError::TokenBudgetExceeded(_)),
+            "expected TokenBudgetExceeded variant, got {err:?}"
+        );
+        assert!(
+            !err.is_transient_retry(),
+            "budget-exceeded must not auto-retry — same prompt + same budget = same failure"
+        );
+        let msg = err.message();
+        assert!(
+            msg.contains("max_tokens budget"),
+            "message must name the cause: {msg}"
+        );
+        assert!(
+            msg.contains("--max-tokens"),
+            "message must name the CLI knob to turn: {msg}"
+        );
+        assert!(
+            msg.contains("Write") && msg.contains("toolu_budget"),
+            "message must identify the offending tool call: {msg}"
+        );
+    }
+
+    #[test]
+    fn max_tokens_diagnosis_only_fires_for_max_tokens_stop_reason() {
+        // Defense-in-depth: a model that emits stop_reason=tool_use (the
+        // normal "I'm done emitting this tool call" reason) followed by
+        // genuinely malformed JSON must NOT be classified as a budget
+        // overrun — that would point the user at the wrong knob.
+        let payload = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Read\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\":[\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let (result, _) = drive(payload);
+        let err = result.expect_err("malformed JSON must error");
+        assert!(
+            matches!(err, StreamError::Malformed(_)),
+            "expected Malformed (not TokenBudgetExceeded), got {err:?}"
+        );
+        // The defensive --max-tokens hint is still included in the
+        // Malformed message (since these often co-occur in practice)
+        // but the variant is distinct.
+        assert!(err.message().contains("did not assemble cleanly"));
+    }
+
+    #[test]
+    fn is_transient_retry_excludes_token_budget_variant() {
+        // Pin the retry-eligibility matrix: budget overrun must never
+        // be retried because doing so would just burn another call
+        // hitting the same limit. Test alongside the truncation case
+        // so future variants can't accidentally flip this bit.
+        assert!(StreamError::Truncated("x".into()).is_transient_retry());
+        assert!(!StreamError::TokenBudgetExceeded("x".into()).is_transient_retry());
     }
 
     #[test]
