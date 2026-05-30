@@ -2,6 +2,7 @@ pub mod agent_loop;
 pub mod api;
 pub mod at_references;
 pub mod background_shell;
+pub mod checkpoints;
 pub mod commands;
 pub mod completion;
 pub mod config;
@@ -38,9 +39,10 @@ pub use agent_loop::{
 };
 pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ThinkingConfig, ToolChoice};
 pub use at_references::{
-    AtExpansionOptions, AtReference, AttachedFile, ExpansionResult, ExpansionStatus,
+    AtExpansionOptions, AtReference, AttachedFile, ExpansionResult, ExpansionStatus, ImageKind,
     expand_at_references, parse_at_references,
 };
+pub use checkpoints::{Checkpoint, CheckpointStore, MAX_CHECKPOINTS, SelectorOutcome};
 pub use commands::{
     ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, ExitCommand,
     HelpCommand, MemoryCommand, NewCommand, RememberCommand, SlashCommand,

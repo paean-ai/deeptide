@@ -669,6 +669,21 @@ impl AgentLoop {
         self.current_run_step = 0;
     }
 
+    /// Replace the entire conversation transcript with `messages`. Used
+    /// by `/restore` (resume from saved session) and `/checkpoint
+    /// restore` (rewind to an in-session snapshot) so the loop's
+    /// internal state stays consistent with what the rest of the REPL
+    /// sees via [`messages`].
+    ///
+    /// Does NOT reset the cost tracker or the current step counter —
+    /// those are cumulative session telemetry, not transcript data.
+    /// Future turns continue numbering from where they were.
+    ///
+    /// [`messages`]: AgentLoop::messages
+    pub fn replace_messages(&mut self, messages: Vec<ConversationMessage>) {
+        self.messages = messages;
+    }
+
     pub fn messages(&self) -> &[ConversationMessage] {
         &self.messages
     }

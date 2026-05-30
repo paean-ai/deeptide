@@ -1107,7 +1107,17 @@ fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
         (
             "Sessions",
             &[
-                "resume", "retry", "sessions", "queue", "search", "export", "copy", "paste",
+                "resume",
+                "retry",
+                "sessions",
+                "queue",
+                "search",
+                "checkpoint",
+                "checkpoints",
+                "rewind",
+                "export",
+                "copy",
+                "paste",
             ],
         ),
         ("Permissions", &["permission"]),

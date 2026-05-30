@@ -137,6 +137,12 @@ pub struct ReplSession {
     /// cheap and the lock is held for microseconds at a time (push one
     /// string, or drain N strings).
     message_queue: Arc<Mutex<crate::message_queue::MessageQueue>>,
+    /// In-session conversation checkpoints. Populated by
+    /// `/checkpoint`, drained by `/rewind` / `/checkpoint restore`.
+    /// FIFO bounded at [`crate::checkpoints::MAX_CHECKPOINTS`].
+    /// Never persisted — the on-disk session store is the durable
+    /// counterpart for cross-process survival.
+    checkpoints: crate::checkpoints::CheckpointStore,
 }
 
 /// Configuration + bookkeeping for the persistent dream loop. Default state
@@ -198,6 +204,7 @@ impl ReplSession {
             session_end_capture: true,
             session_consolidated: false,
             message_queue: Arc::new(Mutex::new(crate::message_queue::MessageQueue::new())),
+            checkpoints: crate::checkpoints::CheckpointStore::new(),
         }
     }
 
@@ -732,6 +739,12 @@ impl ReplSession {
             // `/search`: full-text search across the current session's
             // user/assistant messages.
             "search" | "find" | "grep-chat" => self.execute_search_command(args),
+            // `/checkpoint` + `/checkpoints` + `/rewind`: in-session
+            // snapshot/restore. See `execute_checkpoint_command` for
+            // the full grammar.
+            "checkpoint" | "snap" | "snapshot" => self.execute_checkpoint_command(args),
+            "checkpoints" => self.execute_checkpoint_command("list"),
+            "rewind" | "undo-turn" => self.execute_rewind_command(args),
             _ => CommandResult::Text(crate::commands::render_unknown_command(
                 &name,
                 &context.all_commands(),
@@ -2264,6 +2277,235 @@ impl ReplSession {
         CommandResult::Text(lines.join("\n"))
     }
 
+    // ── /checkpoint + /rewind ────────────────────────────────────────
+    //
+    // Snapshots the live transcript into an in-memory `CheckpointStore`
+    // so the user can rewind multi-turn mistakes without restarting
+    // the session. The store is intentionally NOT persisted — for
+    // crash-safe resume the user reaches for `/sessions` + `/resume`.
+    //
+    // The two commands stay decoupled: `/checkpoint …` only ever
+    // mutates the store; `/rewind …` only ever reads from it and
+    // restores into `agent_loop`. This makes both unit-testable
+    // without standing up an integration harness.
+
+    fn execute_checkpoint_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        let (verb_raw, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((head, tail)) => (head, tail.trim()),
+            None => (trimmed, ""),
+        };
+        let verb = verb_raw.to_ascii_lowercase();
+
+        // Known sub-verbs take a fixed dispatch table; anything else is
+        // treated as the leading word of a free-form label so the common
+        // case `/checkpoint pre-refactor` Just Works.
+        match verb.as_str() {
+            "" | "save" | "create" | "new" => self.checkpoint_save(rest),
+            "list" | "ls" | "show" => self.checkpoint_list(),
+            "restore" | "load" | "rewind" => self.checkpoint_restore(rest),
+            "drop" | "delete" | "rm" => self.checkpoint_drop(rest),
+            "clear" | "reset" => {
+                let n = self.checkpoints.clear();
+                CommandResult::Text(if n == 0 {
+                    String::from("No checkpoints to clear.")
+                } else {
+                    format!("Cleared {n} checkpoint(s).")
+                })
+            }
+            "--help" | "help" | "-h" => CommandResult::Text(checkpoint_help_text()),
+            _ => self.checkpoint_save(trimmed),
+        }
+    }
+
+    fn execute_rewind_command(&mut self, args: &str) -> CommandResult {
+        // `/rewind` is a thin alias for `/checkpoint restore` with the
+        // empty-selector default (newest snapshot).
+        self.checkpoint_restore(args.trim())
+    }
+
+    fn checkpoint_save(&mut self, label_args: &str) -> CommandResult {
+        // Reject the no-op case early: a snapshot of an empty
+        // transcript would just clutter the list.
+        let messages = self.agent_loop.messages().to_vec();
+        if messages.is_empty() {
+            return CommandResult::Text(String::from(
+                "Nothing to checkpoint yet — send at least one message first.",
+            ));
+        }
+
+        // The label is intentionally raw (no trimming of inner
+        // whitespace) but we strip the outer trim so `/checkpoint   foo`
+        // produces label "foo" instead of "  foo".
+        let label = label_args.trim().to_owned();
+        // Validate label: forbid newlines (would break the listing) and
+        // truncate at 64 chars (UI-friendly + selector lookup still
+        // works on the full string).
+        if label.contains('\n') {
+            return CommandResult::Text(String::from("Checkpoint labels cannot contain newlines."));
+        }
+        let label = if label.chars().count() > 64 {
+            let truncated: String = label.chars().take(64).collect();
+            truncated
+        } else {
+            label
+        };
+
+        let created_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let id = crate::checkpoints::fresh_checkpoint_id();
+        let message_count = messages.len();
+        let model = self.agent_loop.model().to_owned();
+
+        let checkpoint = crate::checkpoints::Checkpoint {
+            id: id.clone(),
+            label: label.clone(),
+            created_at,
+            message_count,
+            model,
+            messages,
+        };
+
+        let was_full = self.checkpoints.len() >= crate::checkpoints::MAX_CHECKPOINTS;
+        self.checkpoints.push(checkpoint);
+
+        let label_part = if label.is_empty() {
+            String::new()
+        } else {
+            format!(" `{label}`")
+        };
+        let evict_note = if was_full {
+            format!(
+                " (oldest evicted — cap is {})",
+                crate::checkpoints::MAX_CHECKPOINTS
+            )
+        } else {
+            String::new()
+        };
+        CommandResult::Text(format!(
+            "✔ checkpoint {id}{label_part}: captured {message_count} message(s){evict_note}. Restore with `/rewind {id}` or `/checkpoint restore {id}`.",
+        ))
+    }
+
+    fn checkpoint_list(&self) -> CommandResult {
+        if self.checkpoints.is_empty() {
+            return CommandResult::Text(String::from(
+                "No checkpoints in this session. Use `/checkpoint [label]` to take one.",
+            ));
+        }
+        let total = self.checkpoints.len();
+        let mut lines = Vec::with_capacity(total + 2);
+        lines.push(format!(
+            "Checkpoints ({total}/{cap}):",
+            cap = crate::checkpoints::MAX_CHECKPOINTS,
+        ));
+        for (i, cp) in self.checkpoints.iter().enumerate() {
+            lines.push(cp.summarise(i));
+        }
+        lines.push(String::from(
+            "  Restore with `/rewind <id|index|label>` (no arg = newest).",
+        ));
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    fn checkpoint_restore(&mut self, selector: &str) -> CommandResult {
+        use crate::checkpoints::SelectorOutcome;
+
+        let outcome = self.checkpoints.resolve(selector);
+        let idx = match outcome {
+            SelectorOutcome::Found(i) => i,
+            SelectorOutcome::Empty => {
+                return CommandResult::Text(String::from(
+                    "No checkpoints in this session. Use `/checkpoint [label]` to take one.",
+                ));
+            }
+            SelectorOutcome::NotFound => {
+                return CommandResult::Text(format!(
+                    "No checkpoint matches `{selector}`. Use `/checkpoints` to list available IDs/labels.",
+                ));
+            }
+            SelectorOutcome::Ambiguous { matches } => {
+                return CommandResult::Text(format!(
+                    "Ambiguous selector `{selector}` — matches {}. Use a longer ID prefix or the 1-based index.",
+                    matches.join(", "),
+                ));
+            }
+        };
+
+        let Some(checkpoint) = self.checkpoints.get(idx).cloned() else {
+            // Defensive — `resolve` should never return an out-of-range index.
+            return CommandResult::Text(String::from("Internal error: checkpoint index drifted."));
+        };
+
+        let before = self.agent_loop.messages().len();
+        let after = checkpoint.message_count;
+        self.agent_loop
+            .replace_messages(checkpoint.messages.clone());
+
+        let label_part = if checkpoint.label.is_empty() {
+            String::new()
+        } else {
+            format!(" `{}`", checkpoint.label)
+        };
+        let direction = if before == after {
+            "(transcript already matches checkpoint)"
+        } else if before > after {
+            "rewound"
+        } else {
+            "advanced"
+        };
+        CommandResult::Text(format!(
+            "✔ {direction} to checkpoint {id}{label_part}: {before} → {after} message(s).",
+            id = checkpoint.id,
+        ))
+    }
+
+    fn checkpoint_drop(&mut self, selector: &str) -> CommandResult {
+        use crate::checkpoints::SelectorOutcome;
+
+        if selector.is_empty() {
+            return CommandResult::Text(String::from("Usage: /checkpoint drop <id|index|label>"));
+        }
+
+        let outcome = self.checkpoints.resolve(selector);
+        let idx = match outcome {
+            SelectorOutcome::Found(i) => i,
+            SelectorOutcome::Empty => {
+                return CommandResult::Text(String::from("No checkpoints to drop."));
+            }
+            SelectorOutcome::NotFound => {
+                return CommandResult::Text(format!("No checkpoint matches `{selector}`.",));
+            }
+            SelectorOutcome::Ambiguous { matches } => {
+                return CommandResult::Text(format!(
+                    "Ambiguous selector `{selector}` — matches {}.",
+                    matches.join(", "),
+                ));
+            }
+        };
+
+        match self.checkpoints.remove(idx) {
+            Some(cp) => CommandResult::Text(format!(
+                "Dropped checkpoint {id}{label}.",
+                id = cp.id,
+                label = if cp.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" `{}`", cp.label)
+                },
+            )),
+            None => CommandResult::Text(String::from("Internal error: drop index drifted.")),
+        }
+    }
+
+    /// Read-only view of in-session checkpoints. Used by tests and
+    /// potential future UI surfaces (e.g. a status-bar segment showing
+    /// "ckpt 3"). Not part of any slash command grammar.
+    pub fn checkpoint_count(&self) -> usize {
+        self.checkpoints.len()
+    }
+
     fn execute_cache_command(&self, args: &str) -> CommandResult {
         let raw = args.trim();
         let limit = if raw.is_empty() {
@@ -2506,37 +2748,75 @@ fn parse_dream_cadence(rest: &str) -> Result<usize, String> {
 fn format_attachment_notice(result: &crate::at_references::ExpansionResult) -> String {
     use crate::at_references::ExpansionStatus;
 
-    let inlined: Vec<&crate::at_references::AttachedFile> = result
+    let text_files: Vec<&crate::at_references::AttachedFile> = result
         .attachments
         .iter()
-        .filter(|a| a.is_inlined())
+        .filter(|a| matches!(a.status, ExpansionStatus::Inlined { .. }))
         .collect();
+    let images: Vec<&crate::at_references::AttachedFile> =
+        result.attachments.iter().filter(|a| a.is_image()).collect();
     let skipped: Vec<&crate::at_references::AttachedFile> = result
         .attachments
         .iter()
         .filter(|a| !a.is_inlined())
         .collect();
 
-    let mut head = String::new();
-    if !inlined.is_empty() {
+    let mut segments: Vec<String> = Vec::new();
+    if !text_files.is_empty() {
         let total_bytes = result.total_inlined_bytes();
         let size = humanize_bytes(total_bytes);
-        let noun = if inlined.len() == 1 { "file" } else { "files" };
-        let paths = inlined
+        let noun = if text_files.len() == 1 {
+            "file"
+        } else {
+            "files"
+        };
+        let paths = text_files
             .iter()
             .map(|a| a.display_path.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        head.push_str(&format!(
+        segments.push(format!(
             "📎 attached {} {noun} ({size}): {paths}",
-            inlined.len()
+            text_files.len()
         ));
-    } else {
-        head.push_str("📎 no files attached");
+    }
+    if !images.is_empty() {
+        let noun = if images.len() == 1 { "image" } else { "images" };
+        // Show each image's path + format so the user can immediately
+        // tell what the model has been told about.
+        let parts: Vec<String> = images
+            .iter()
+            .map(|a| {
+                let fmt = match &a.status {
+                    ExpansionStatus::Image { kind, .. } => kind.label(),
+                    _ => "?",
+                };
+                let bytes = match &a.status {
+                    ExpansionStatus::Image { bytes, .. } => humanize_bytes(*bytes),
+                    _ => String::new(),
+                };
+                format!("{} [{fmt}, {bytes}]", a.display_path)
+            })
+            .collect();
+        segments.push(format!(
+            "🖼 attached {} {noun} (Vision-tool hint emitted): {}",
+            images.len(),
+            parts.join(", "),
+        ));
+    }
+    if segments.is_empty() {
+        segments.push(String::from("📎 no files attached"));
     }
 
-    if !skipped.is_empty() {
-        let parts: Vec<String> = skipped
+    let mut head = segments.join(" · ");
+
+    // Only count actual skips (not images, which are listed above).
+    let real_skipped: Vec<&crate::at_references::AttachedFile> = skipped
+        .into_iter()
+        .filter(|a| !matches!(a.status, ExpansionStatus::Image { .. }))
+        .collect();
+    if !real_skipped.is_empty() {
+        let parts: Vec<String> = real_skipped
             .iter()
             .map(|a| {
                 let reason = match &a.status {
@@ -2550,7 +2830,9 @@ fn format_attachment_notice(result: &crate::at_references::ExpansionResult) -> S
                     ),
                     ExpansionStatus::BudgetExhausted => "budget exhausted".to_owned(),
                     ExpansionStatus::Unreadable { reason } => format!("unreadable: {reason}"),
-                    ExpansionStatus::Inlined { .. } => unreachable!(),
+                    ExpansionStatus::Image { .. } | ExpansionStatus::Inlined { .. } => {
+                        unreachable!()
+                    }
                 };
                 format!("{} ({reason})", a.reference)
             })
@@ -2935,6 +3217,24 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "Search the current session's message history (substring or --regex)",
             "/search [--regex] <query>",
         ),
+        CommandCompletionSource::new(
+            "checkpoint",
+            ["snap", "snapshot"],
+            "Snapshot the transcript to an in-memory checkpoint (rewindable)",
+            "/checkpoint [save|list|restore <sel>|drop <sel>|clear] [label]",
+        ),
+        CommandCompletionSource::new(
+            "checkpoints",
+            Vec::<&str>::new(),
+            "List in-memory transcript checkpoints",
+            "/checkpoints",
+        ),
+        CommandCompletionSource::new(
+            "rewind",
+            ["undo-turn"],
+            "Restore an in-memory checkpoint (empty = newest)",
+            "/rewind [id|index|label]",
+        ),
     ]
 }
 
@@ -2982,6 +3282,36 @@ fn first_line_summary(description: &str, max_chars: usize) -> String {
 }
 
 /// Render a single queued message as a short, single-line preview. Used
+/// Formatted help text for `/checkpoint --help`. Kept as a free fn (not
+/// a const) so we can produce it lazily and edit the grammar without
+/// chasing a static literal.
+fn checkpoint_help_text() -> String {
+    String::from(
+        "Usage: /checkpoint [save] [label]\n\
+         \n\
+         Snapshot the current conversation into an in-memory checkpoint.\n\
+         Useful for rolling back multi-turn mistakes without restarting.\n\
+         \n\
+         Subcommands:\n\
+           /checkpoint                Save (no label) — same as `save`\n\
+           /checkpoint [label]        Save with a human-readable label\n\
+           /checkpoint list           List checkpoints (alias: /checkpoints)\n\
+           /checkpoint restore <sel>  Restore to a checkpoint (alias: /rewind)\n\
+           /checkpoint drop <sel>     Remove a specific checkpoint\n\
+           /checkpoint clear          Remove every checkpoint\n\
+         \n\
+         Selectors (resolve in order: index → exact id → label → id prefix):\n\
+           (empty)         newest checkpoint\n\
+           1, 2, …         1-based index from `/checkpoints`\n\
+           <8-char id>     exact id (e.g. a1b2c3d4)\n\
+           <id prefix>     at least 2 chars; ambiguous prefixes are reported\n\
+           <label>         exact label match (case-sensitive)\n\
+         \n\
+         The store is capped at 20 entries (FIFO) and lives in memory only.\n\
+         For cross-process resume, use `/sessions` + `/resume`.",
+    )
+}
+
 /// by `/queue list`, `/queue add`, and `/queue pop` so the user can see
 /// what's about to fire without flooding the terminal with multi-line
 /// blobs. We cap at 80 chars in the message body and collapse interior
