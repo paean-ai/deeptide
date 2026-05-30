@@ -1509,8 +1509,22 @@ fn tool_schemas() -> Vec<WireTool> {
             cache_control: None,
         },
         WireTool {
+            name: "AppendFile",
+            description: "Append UTF-8 text to a file, creating it (with parent directories) if it does not exist.\n- Use this for INCREMENTAL file construction when a single Write would exceed your output token budget: emit a skeleton with Write, then call AppendFile repeatedly to add each subsequent section. This is strictly better than risking a truncated one-shot Write — partial JSON cannot be repaired.\n- Required input keys are exactly file_path and content; do not call AppendFile with path, filename, target, or an empty object.\n- Relative file_path values resolve against the current workspace.\n- The chunk is appended verbatim after line-ending normalization (\\r\\n / lone \\r → \\n).\n- By default a single \\n separator is inserted between the existing file tail and the new chunk only when the file does not already end in a newline; pass ensure_trailing_newline=false to disable this for byte-exact concatenation.\n- AppendFile is O(chunk_size) and safe to call many times against a growing file.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file to extend (created if missing)."},
+                    "content": {"type": "string", "description": "Chunk to append verbatim after line-ending normalization."},
+                    "ensure_trailing_newline": {"type": "boolean", "description": "Insert a single '\\n' separator when the existing file does not already end in a newline. Defaults to true."}
+                },
+                "required": ["file_path", "content"]
+            }),
+            cache_control: None,
+        },
+        WireTool {
             name: "Edit",
-            description: "Performs exact string replacements in files.\n- Relative file_path values resolve against the current workspace.\n- Read the file first so old_string matches the current content exactly. When copying from Read output, preserve the exact indentation (tabs/spaces) as it appears AFTER the line-number prefix (line number + tab) and never include any part of that prefix in old_string or new_string.\n- ALWAYS prefer editing existing files; never write new files unless explicitly required.\n- Only add emojis if the user explicitly requests it.\n- The edit FAILS if old_string is not unique: provide a larger surrounding string to make it unique, or set replace_all to change every occurrence.\n- If you see \"old_string not found\", the file may have changed since your last Read - re-read it and retry; this is a normal recovery path, not a dead end.\n- Use replace_all to rename a symbol across the whole file.",
+            description: "Performs exact string replacements in files.\n- Relative file_path values resolve against the current workspace.\n- Read the file first so old_string matches the current content exactly. When copying from Read output, preserve the exact indentation (tabs/spaces) as it appears AFTER the line-number prefix (line number + tab) and never include any part of that prefix in old_string or new_string.\n- ALWAYS prefer editing existing files; never write new files unless explicitly required.\n- For incremental construction of LARGE NEW files where a one-shot Write would exceed your output budget, use AppendFile instead of Edit.\n- Only add emojis if the user explicitly requests it.\n- The edit FAILS if old_string is not unique: provide a larger surrounding string to make it unique, or set replace_all to change every occurrence.\n- If you see \"old_string not found\", the file may have changed since your last Read - re-read it and retry; this is a normal recovery path, not a dead end.\n- Use replace_all to rename a symbol across the whole file.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

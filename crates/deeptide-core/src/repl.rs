@@ -1624,7 +1624,16 @@ impl ReplSession {
         let cwd = self.tool_context.cwd.display().to_string();
         let model = self.agent_loop.model().to_owned();
         let tool_names = self.tool_registry.names();
-        let preferred = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite"];
+        let preferred = [
+            "Read",
+            "Write",
+            "Edit",
+            "AppendFile",
+            "Bash",
+            "Glob",
+            "Grep",
+            "TodoWrite",
+        ];
         let available: std::collections::HashSet<&str> = tool_names.iter().copied().collect();
         let listed: Vec<&str> = preferred
             .iter()

@@ -1,15 +1,15 @@
 use deeptide_core::{
-    AgentTool, AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool, ClipboardTool,
-    CrashLogTool, CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool, EditTool,
-    EnterPlanModeTool, EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool, FileMetadataTool,
-    GetMcpPromptTool, ImagePreprocessTool, ListMcpPromptsTool, ListMcpResourcesTool, LspTool,
-    MacDiagnoseTool, MacLogTool, McpTool, MemorySearchTool, MemoryWriteTool, MonitorTool,
-    NotebookEditTool, PublishTool, PushNotificationTool, ReadFilesTool, ReadMcpResourceTool,
-    RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool, SnipTool,
-    SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
-    TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolSearchTool,
-    VerifyPlanExecutionTool, VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool,
-    WriteTool, memory::MemorySystem,
+    AgentTool, AppendFileTool, AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool,
+    ClipboardTool, CrashLogTool, CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool,
+    EditTool, EnterPlanModeTool, EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool,
+    FileMetadataTool, GetMcpPromptTool, ImagePreprocessTool, ListMcpPromptsTool,
+    ListMcpResourcesTool, LspTool, MacDiagnoseTool, MacLogTool, McpTool, MemorySearchTool,
+    MemoryWriteTool, MonitorTool, NotebookEditTool, PublishTool, PushNotificationTool,
+    ReadFilesTool, ReadMcpResourceTool, RemoteTriggerTool, ReviewArtifactTool, ScreenCaptureTool,
+    SkillTool, SleepTool, SnipTool, SpotlightSearchTool, TaskCreateTool, TaskGetTool, TaskListTool,
+    TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, Tool, ToolContext, ToolRegistry,
+    ToolSearchTool, VerifyPlanExecutionTool, VideoTranscribeTool, VisionTool, WebFetchTool,
+    WebSearchTool, WriteTool, memory::MemorySystem,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -2815,6 +2815,243 @@ fn write_tool_reports_missing_content() {
 
     assert!(result.is_error);
     assert!(result.content.contains("string `content` field"));
+}
+
+#[test]
+fn append_file_tool_creates_file_when_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = AppendFileTool.call(
+        serde_json::json!({"file_path": "out/log.txt", "content": "first chunk\n"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error, "got error: {}", result.content);
+    assert!(
+        result.content.contains("Created file: log.txt"),
+        "unexpected: {}",
+        result.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("out/log.txt")).expect("read"),
+        "first chunk\n"
+    );
+}
+
+#[test]
+fn append_file_tool_appends_to_existing_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("doc.md"), "# Title\n\n").expect("seed");
+
+    let result = AppendFileTool.call(
+        serde_json::json!({"file_path": "doc.md", "content": "Body line 1.\n"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert!(
+        result.content.contains("Appended to file: doc.md"),
+        "unexpected: {}",
+        result.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("doc.md")).expect("read"),
+        "# Title\n\nBody line 1.\n"
+    );
+}
+
+#[test]
+fn append_file_tool_inserts_separator_newline_when_tail_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("data.txt"), "no-newline-here").expect("seed");
+
+    let result = AppendFileTool.call(
+        serde_json::json!({"file_path": "data.txt", "content": "next\n"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("data.txt")).expect("read"),
+        "no-newline-here\nnext\n"
+    );
+}
+
+#[test]
+fn append_file_tool_respects_ensure_trailing_newline_false() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("data.txt"), "no-newline-here").expect("seed");
+
+    let result = AppendFileTool.call(
+        serde_json::json!({
+            "file_path": "data.txt",
+            "content": "next",
+            "ensure_trailing_newline": false,
+        }),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("data.txt")).expect("read"),
+        "no-newline-herenext",
+        "byte-exact concatenation must be preserved when separator is disabled"
+    );
+}
+
+#[test]
+fn append_file_tool_skips_separator_when_file_already_ends_in_newline() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("data.txt"), "first\n").expect("seed");
+
+    let result = AppendFileTool.call(
+        serde_json::json!({"file_path": "data.txt", "content": "second\n"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("data.txt")).expect("read"),
+        "first\nsecond\n",
+        "no double-newline when file already terminates correctly"
+    );
+}
+
+#[test]
+fn append_file_tool_normalizes_line_endings() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = AppendFileTool.call(
+        serde_json::json!({"file_path": "x.txt", "content": "alpha\r\nbeta\rgamma\n"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(!result.is_error);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("x.txt")).expect("read"),
+        "alpha\nbeta\ngamma\n",
+        "AppendFile must normalize line endings identically to Write"
+    );
+}
+
+#[test]
+fn append_file_tool_chains_to_build_a_large_file() {
+    // The chunked-build pattern the user explicitly asked for: Write a
+    // skeleton, then AppendFile each subsequent section. The resulting
+    // file must be byte-identical to a single-shot write of the same
+    // content, including final terminator.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ctx = ToolContext::new(temp.path());
+
+    let head = WriteTool.call(
+        serde_json::json!({
+            "file_path": "page.html",
+            "content": "<!DOCTYPE html>\n<html>\n<head><title>x</title></head>\n",
+        }),
+        &ctx,
+    );
+    assert!(!head.is_error);
+
+    for chunk in ["<body>\n", "<h1>hi</h1>\n", "</body>\n", "</html>\n"] {
+        let r = AppendFileTool.call(
+            serde_json::json!({"file_path": "page.html", "content": chunk}),
+            &ctx,
+        );
+        assert!(!r.is_error, "chunk append failed: {}", r.content);
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("page.html")).expect("read"),
+        "<!DOCTYPE html>\n<html>\n<head><title>x</title></head>\n<body>\n<h1>hi</h1>\n</body>\n</html>\n"
+    );
+}
+
+#[test]
+fn append_file_tool_blocks_sensitive_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join(".env"), "API_KEY=old\n").expect("seed");
+
+    let result = ToolRegistry::with_builtin_tools().call(
+        "AppendFile",
+        serde_json::json!({"file_path": ".env", "content": "API_KEY=leaked\n"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(
+        result.is_error,
+        "appending to a sensitive file should be denied: {}",
+        result.content
+    );
+    assert!(result.content.contains("sensitive"));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join(".env")).expect("read"),
+        "API_KEY=old\n",
+        "the sensitive file must not have been mutated"
+    );
+}
+
+#[test]
+fn append_file_tool_rejects_missing_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = AppendFileTool.call(
+        serde_json::json!({"content": "anything"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("file_path") && result.content.contains("content"),
+        "error must teach the required schema, got: {}",
+        result.content
+    );
+}
+
+#[test]
+fn append_file_tool_rejects_missing_content() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = AppendFileTool.call(
+        serde_json::json!({"file_path": "x.txt"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+    assert!(result.content.contains("string `content` field"));
+}
+
+#[test]
+fn append_file_tool_rejects_blank_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let result = AppendFileTool.call(
+        serde_json::json!({"file_path": "   ", "content": "x"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(result.is_error);
+}
+
+#[test]
+fn append_file_tool_is_registered_in_default_registry() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let registry = ToolRegistry::with_builtin_tools();
+
+    let result = registry.call(
+        "AppendFile",
+        serde_json::json!({"file_path": "via-registry.txt", "content": "hello\n"}),
+        &ToolContext::new(temp.path()),
+    );
+
+    assert!(
+        !result.is_error,
+        "AppendFile should be discoverable via the default registry, got: {}",
+        result.content
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("via-registry.txt")).expect("read"),
+        "hello\n"
+    );
 }
 
 #[test]
