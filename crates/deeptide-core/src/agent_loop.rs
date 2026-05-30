@@ -259,6 +259,54 @@ pub enum AskOutcome {
 /// spinner, prints the prompt, reads stdin, and returns the decision.
 pub type PermissionAskCallback = Arc<dyn Fn(&ToolCall) -> AskOutcome + Send + Sync>;
 
+/// Phases of a single tool invocation, threaded to the UI via
+/// [`ToolProgressCallback`] so the CLI's spinner / pinned input
+/// row can show *what* the agent is running right now (not just a
+/// generic "Crunching…").
+///
+/// Two events bracket every `execute_tool_call`:
+///
+/// * `Started`  — fired BEFORE the tool runs. `index` is the
+///   0-based position in the current turn's tool batch (1-indexed
+///   for display); `total` is how many tools the model asked for
+///   in this turn.
+/// * `Finished` — fired AFTER the tool returns. `is_error` carries
+///   whether the result was an error so the UI can flash a red
+///   marker, but the body is not carried here (the UI gets the
+///   full result via `AgentLoopEvent::ToolResult`).
+///
+/// Kept as a struct enum (rather than two free types) so future
+/// phases — e.g. `Cancelled`, `Permission(Pending)` — can be added
+/// without bumping the callback signature.
+#[derive(Debug, Clone)]
+pub enum ToolProgressEvent {
+    Started {
+        index: usize,
+        total: usize,
+        name: String,
+        /// Short, pre-rendered preview of the tool's input
+        /// (e.g. `"Bash(ls -la)"`, `"Read(/etc/hosts)"`). Built
+        /// inside `agent_loop` from the same labelling helpers
+        /// the batch summary uses, so the spinner string and the
+        /// post-turn summary stay visually consistent. May be the
+        /// empty string for tools with no compact preview.
+        preview: String,
+    },
+    Finished {
+        index: usize,
+        total: usize,
+        name: String,
+        is_error: bool,
+    },
+}
+
+/// Callback invoked synchronously around every tool execution.
+/// `Arc<dyn Fn…>` so the CLI can clone it once and have the
+/// closure observe `AtomicBool` / `Mutex<String>` state shared
+/// with the spinner thread. Synchronous on purpose — the closure
+/// must return quickly because the agent loop is blocked on it.
+pub type ToolProgressCallback = Arc<dyn Fn(&ToolProgressEvent) + Send + Sync>;
+
 pub struct AgentLoop {
     backend: Box<dyn AgentBackend>,
     messages: Vec<ConversationMessage>,
@@ -284,6 +332,12 @@ pub struct AgentLoop {
     /// `--print` mode and library embeds); when set, the REPL gets a chance
     /// to elicit a decision from the user.
     ask_callback: Option<PermissionAskCallback>,
+    /// Optional callback fired around every tool execution
+    /// ([`ToolProgressEvent::Started`] / [`ToolProgressEvent::Finished`]).
+    /// `None` means "silent execution", matching the prior behaviour;
+    /// the CLI plugs in a callback that updates the spinner / pinned
+    /// input-row hint with the current tool name.
+    tool_progress_callback: Option<ToolProgressCallback>,
     /// Runtime override of the backend's extended-thinking directive.
     /// Threaded into every outbound `AgentRequest` so the REPL can flip
     /// thinking on/off (and tune its budget) without rebuilding the
@@ -317,6 +371,7 @@ impl AgentLoop {
             allowed_tools: None,
             disallowed_tools: Vec::new(),
             ask_callback: None,
+            tool_progress_callback: None,
             thinking_override: None,
             tool_usage: crate::tool_usage::ToolUsageTracker::new(),
         }
@@ -339,6 +394,23 @@ impl AgentLoop {
     /// library embeds where there's no human at the keyboard.
     pub fn with_ask_callback(mut self, callback: PermissionAskCallback) -> Self {
         self.ask_callback = Some(callback);
+        self
+    }
+
+    /// Install a callback fired around every tool invocation.
+    /// The callback runs synchronously on the agent-loop thread
+    /// (before and after each `execute_tool_call`); it should
+    /// only do cheap work — typically updating an `Arc<Mutex<…>>`
+    /// the spinner / input-row painter reads from — and must
+    /// never block.
+    ///
+    /// Without this callback installed the agent loop runs
+    /// silently between turns: the CLI's spinner shows
+    /// "Crunching…" with no information about which tool is
+    /// currently executing, which is especially confusing for
+    /// slow tools like long Bash invocations.
+    pub fn with_tool_progress_callback(mut self, callback: ToolProgressCallback) -> Self {
+        self.tool_progress_callback = Some(callback);
         self
     }
 
@@ -603,12 +675,40 @@ impl AgentLoop {
                         return events;
                     }
 
-                    let mut tool_results = Vec::with_capacity(response.tool_calls.len());
+                    let total_tools = response.tool_calls.len();
+                    let mut tool_results = Vec::with_capacity(total_tools);
                     let mut failure_summaries = Vec::new();
-                    for tool_call in response.tool_calls {
+                    for (idx, tool_call) in response.tool_calls.into_iter().enumerate() {
+                        // Fire the "tool starting" hook BEFORE we
+                        // execute. The CLI uses this to swap the
+                        // spinner / pinned-row hint from a generic
+                        // "Crunching…" to a tool-specific label
+                        // (`Bash(npm test)`, `Read(/etc/hosts)`, …)
+                        // — without it the user has no idea what's
+                        // taking the wall-clock time during slow
+                        // tool calls.
+                        if let Some(cb) = self.tool_progress_callback.as_ref() {
+                            cb(&ToolProgressEvent::Started {
+                                index: idx,
+                                total: total_tools,
+                                name: tool_call.name.clone(),
+                                preview: tool_progress_preview(&tool_call),
+                            });
+                        }
                         let result = self.execute_tool_call(&tool_call);
                         let content = result.content;
                         let is_error = result.is_error;
+                        // Fire the "tool finished" hook BEFORE we
+                        // touch any local state — the CLI flips
+                        // the spinner back into neutral mode here.
+                        if let Some(cb) = self.tool_progress_callback.as_ref() {
+                            cb(&ToolProgressEvent::Finished {
+                                index: idx,
+                                total: total_tools,
+                                name: tool_call.name.clone(),
+                                is_error,
+                            });
+                        }
                         if is_error {
                             failure_summaries
                                 .push(ToolBatchFailureClassifier::classify(&content, is_error));
@@ -630,15 +730,16 @@ impl AgentLoop {
                         .iter()
                         .filter(|(_, _, is_error)| *is_error)
                         .count();
-                    events.push(AgentLoopEvent::ToolBatchSummary {
-                        label: ToolBatchLabeler::label_with_failure_summaries(
-                            &label_items,
-                            &failure_summaries,
-                        ),
-                        tool_calls,
-                        failed_count,
-                    });
-
+                    // ⚠ Ordering matters: ToolResult events first,
+                    // ToolBatchSummary last. We render each result
+                    // inline (✓ Glob, ✓ Bash, …) and the summary
+                    // is the "Tools completed: …" line that wraps
+                    // the whole batch — emitting the summary FIRST
+                    // (as we used to) made the UI read backwards
+                    // ("· Tools completed: Ran 2 tools" before the
+                    // user has seen any tool actually finish), so
+                    // we now emit results first and the summary
+                    // last.
                     let mut result_blocks = Vec::with_capacity(tool_results.len());
                     for (tool_call, content, is_error) in tool_results {
                         events.push(AgentLoopEvent::ToolResult {
@@ -652,6 +753,14 @@ impl AgentLoop {
                             is_error,
                         ));
                     }
+                    events.push(AgentLoopEvent::ToolBatchSummary {
+                        label: ToolBatchLabeler::label_with_failure_summaries(
+                            &label_items,
+                            &failure_summaries,
+                        ),
+                        tool_calls,
+                        failed_count,
+                    });
                     if !result_blocks.is_empty() {
                         self.messages
                             .push(ConversationMessage::tool_results(result_blocks));
@@ -962,6 +1071,122 @@ impl AgentLoop {
     }
 }
 
+/// Render a compact one-line preview of a tool call, used inside
+/// [`ToolProgressEvent::Started`] so the UI can show "Bash(npm
+/// test)" / "Read(/etc/hosts)" / "Glob(\*\*/\*.rs)" rather than a
+/// bare "Crunching…". Mirrors the style of the post-turn batch
+/// label but for a single call.
+///
+/// Lookup priority for the descriptor portion:
+///
+/// 1. Tool-specific key in `input` (`command` for Bash, `path`
+///    or `file_path` for Read/Edit/Write, `pattern` for Glob,
+///    `query` for Grep / WebSearch, `notebook_path` for
+///    Notebook tools), shortened to a path tail when it looks
+///    like a filesystem path.
+/// 2. First string-valued input field if no canonical key
+///    matches (covers custom MCP tools).
+/// 3. Just the tool name with no parens — never empty.
+///
+/// All input strings are truncated at `MAX_PREVIEW` chars with a
+/// trailing `…` so a multi-megabyte file path or a giant shell
+/// command can't blow out the spinner row width.
+fn tool_progress_preview(tool_call: &ToolCall) -> String {
+    const MAX_PREVIEW: usize = 48;
+
+    let descriptor = canonical_preview_field(&tool_call.name, &tool_call.input)
+        .or_else(|| first_string_field(&tool_call.input));
+
+    let Some(raw) = descriptor else {
+        return tool_call.name.clone();
+    };
+
+    let display = shorten_for_preview(&raw, &tool_call.name);
+    let truncated = if display.chars().count() > MAX_PREVIEW {
+        let mut s: String = display
+            .chars()
+            .take(MAX_PREVIEW.saturating_sub(1))
+            .collect();
+        s.push('…');
+        s
+    } else {
+        display
+    };
+    format!("{}({truncated})", tool_call.name)
+}
+
+/// Lookup table for "what input key best describes this tool?".
+/// Returns the raw string value if present; the caller handles
+/// truncation and path tail extraction.
+fn canonical_preview_field(name: &str, input: &serde_json::Value) -> Option<String> {
+    let key = match name.to_ascii_lowercase().as_str() {
+        "bash" | "shell" | "run" => "command",
+        "read" | "view" => "file_path",
+        "write" | "edit" | "multiedit" | "str_replace" | "str_replace_editor" => "file_path",
+        "glob" => "pattern",
+        "grep" | "search" => "pattern",
+        "websearch" | "web_search" => "query",
+        "webfetch" | "web_fetch" => "url",
+        "notebook_read" | "notebook_edit" => "notebook_path",
+        "task" => "description",
+        _ => return None,
+    };
+    // Try the canonical key plus a small set of common aliases
+    // (path / file / cmd) so we still find something useful when
+    // a tool schema drifts.
+    for candidate in [key, "path", "file", "cmd", "input"] {
+        if let Some(value) = input.get(candidate)
+            && let Some(s) = value.as_str()
+            && !s.trim().is_empty()
+        {
+            return Some(s.to_owned());
+        }
+    }
+    None
+}
+
+/// Fallback descriptor: pick the first string-valued field from
+/// the input object. Skips objects/arrays/nulls — only flat
+/// strings get surfaced, otherwise the preview becomes a dump.
+fn first_string_field(input: &serde_json::Value) -> Option<String> {
+    input
+        .as_object()
+        .and_then(|map| {
+            map.values()
+                .find_map(|value| value.as_str().filter(|s| !s.trim().is_empty()))
+        })
+        .map(str::to_owned)
+}
+
+/// Trim filesystem-pathy descriptors down to the last 1–2 segments
+/// so an absolute `/Users/ryan/very/deep/repo/file.rs` previews as
+/// `repo/file.rs`. Non-path strings (shell commands, Glob
+/// patterns, queries) are returned unchanged.
+fn shorten_for_preview(raw: &str, tool_name: &str) -> String {
+    let is_path_tool = matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "read"
+            | "view"
+            | "write"
+            | "edit"
+            | "multiedit"
+            | "str_replace"
+            | "str_replace_editor"
+            | "notebook_read"
+            | "notebook_edit"
+    );
+    if !is_path_tool {
+        return raw.trim().to_owned();
+    }
+    let trimmed = raw.trim();
+    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() <= 2 {
+        return trimmed.to_owned();
+    }
+    let tail: Vec<&str> = segments.iter().rev().take(2).rev().copied().collect();
+    format!("…/{}", tail.join("/"))
+}
+
 fn render_subagent_result(kind: &str, model: &str, events: &[AgentLoopEvent]) -> crate::ToolResult {
     if let Some(AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error))) = events.last() {
         return crate::ToolResult::error(format!("Sub-agent {kind} failed: {error}"));
@@ -1125,5 +1350,101 @@ impl AgentBackend for LocalEchoBackend {
             content,
             tool_calls: Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tool_progress_preview_tests {
+    use super::{ToolCall, tool_progress_preview};
+    use serde_json::json;
+
+    fn call(name: &str, input: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: format!("call_{name}"),
+            name: name.to_owned(),
+            input,
+        }
+    }
+
+    #[test]
+    fn bash_uses_command_field() {
+        let tc = call("Bash", json!({"command": "npm test"}));
+        assert_eq!(tool_progress_preview(&tc), "Bash(npm test)");
+    }
+
+    #[test]
+    fn read_shortens_long_paths_to_last_two_segments() {
+        let tc = call(
+            "Read",
+            json!({"file_path": "/Users/ryan/a8e/paean/repo/file.rs"}),
+        );
+        // Long absolute path → tail with leading "…/" marker so the
+        // user knows it's been abbreviated.
+        assert_eq!(tool_progress_preview(&tc), "Read(…/repo/file.rs)");
+    }
+
+    #[test]
+    fn read_short_path_kept_as_is() {
+        let tc = call("Read", json!({"file_path": "src/lib.rs"}));
+        assert_eq!(tool_progress_preview(&tc), "Read(src/lib.rs)");
+    }
+
+    #[test]
+    fn glob_uses_pattern_field_without_path_shortening() {
+        // Glob patterns aren't paths — they should pass through
+        // verbatim even when they contain `/`.
+        let tc = call("Glob", json!({"pattern": "**/*.rs"}));
+        assert_eq!(tool_progress_preview(&tc), "Glob(**/*.rs)");
+    }
+
+    #[test]
+    fn grep_uses_pattern_field() {
+        let tc = call("Grep", json!({"pattern": "fn main"}));
+        assert_eq!(tool_progress_preview(&tc), "Grep(fn main)");
+    }
+
+    #[test]
+    fn websearch_uses_query_field() {
+        let tc = call("WebSearch", json!({"query": "rust 2026 edition"}));
+        assert_eq!(tool_progress_preview(&tc), "WebSearch(rust 2026 edition)");
+    }
+
+    #[test]
+    fn unknown_tool_falls_back_to_first_string_field() {
+        let tc = call(
+            "MyCustomTool",
+            json!({"unused_int": 42, "label": "hello world"}),
+        );
+        let out = tool_progress_preview(&tc);
+        assert!(out.starts_with("MyCustomTool("), "got: {out}");
+        assert!(out.contains("hello world"), "got: {out}");
+    }
+
+    #[test]
+    fn empty_input_falls_back_to_bare_tool_name() {
+        let tc = call("Ping", json!({}));
+        assert_eq!(tool_progress_preview(&tc), "Ping");
+    }
+
+    #[test]
+    fn truncates_oversized_descriptors_with_ellipsis() {
+        let huge = "a".repeat(200);
+        let tc = call("Bash", json!({"command": huge}));
+        let out = tool_progress_preview(&tc);
+        // Total visible length stays bounded; truncation marker
+        // appears inside the parens so the user knows there was
+        // more to the command.
+        assert!(out.ends_with("…)"), "got: {out}");
+        assert!(
+            out.chars().count() < 80,
+            "expected truncation to bound width: {out}"
+        );
+    }
+
+    #[test]
+    fn write_aliases_to_path_field() {
+        let tc = call("Write", json!({"file_path": "/tmp/x.txt"}));
+        assert_eq!(tool_progress_preview(&tc), "Write(/tmp/x.txt)");
     }
 }
