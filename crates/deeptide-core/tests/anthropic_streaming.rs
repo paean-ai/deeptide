@@ -176,6 +176,220 @@ fn streaming_backend_delivers_text_deltas_and_assembles_response() {
     );
 }
 
+/// Multi-shot variant: serves a sequence of SSE payloads, one per
+/// incoming connection. Used to validate the auto-retry path where the
+/// first connection truncates mid-stream and the second one succeeds.
+///
+/// Each connection is independent (the agent's reqwest client opens a
+/// fresh socket per retry because the first one was closed by the
+/// mock). The `handled` counter lets tests assert how many attempts the
+/// backend actually made before giving up or succeeding.
+fn serve_sse_sequence(payloads: Vec<&'static str>) -> (String, Arc<Mutex<usize>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind sse sequence mock");
+    let addr = listener.local_addr().expect("addr");
+    let attempts: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let attempts_clone = Arc::clone(&attempts);
+
+    thread::spawn(move || {
+        for (idx, payload) in payloads.into_iter().enumerate() {
+            let (mut stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            *attempts_clone
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = idx + 1;
+
+            // Drain the request fully (same protocol as serve_sse_once
+            // — the deeptide tool-schema body is ~50KB, and closing the
+            // socket while the client is still writing yields a TCP RST
+            // that surfaces as "body error" to reqwest before we ever
+            // get to write the response).
+            let mut buf = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                let n = match stream.read(&mut chunk) {
+                    Ok(0) => break buf.len(),
+                    Ok(n) => n,
+                    Err(_) => break buf.len(),
+                };
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&buf[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.eq_ignore_ascii_case("content-length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            let body_so_far = buf.len().saturating_sub(header_end);
+            let mut remaining = content_length.saturating_sub(body_so_far);
+            while remaining > 0 {
+                let n = match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                remaining = remaining.saturating_sub(n);
+            }
+
+            // For the truncation simulation we deliberately do NOT
+            // declare a Content-Length, so reqwest happily streams
+            // whatever bytes we write and then sees the connection
+            // close mid-SSE. `Transfer-Encoding: identity` keeps it
+            // simple and skips chunked framing.
+            let header =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(payload.as_bytes());
+            let _ = stream.flush();
+            drop(stream);
+        }
+    });
+
+    (format!("http://{addr}"), attempts)
+}
+
+/// A deliberately-truncated SSE: tool_use opens, two input_json_deltas
+/// arrive, then the connection drops with no content_block_stop and no
+/// message_stop. Mirrors the user's roguelike-HTML failure shape.
+const TRUNCATED_TOOL_STREAM: &str = "event: message_start\n\
+    data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_t1\",\"model\":\"m\"}}\n\n\
+    event: content_block_start\n\
+    data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_cut\",\"name\":\"Write\",\"input\":{}}}\n\n\
+    event: content_block_delta\n\
+    data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\":\\\"a.html\\\",\\\"content\\\":\\\"<!DOCTYPE html>...\"}}\n\n";
+
+#[test]
+fn streaming_backend_auto_retries_on_mid_stream_truncation() {
+    use deeptide_core::AnthropicAuthMode;
+
+    // Sequence: first attempt truncates mid-tool, second attempt
+    // returns a clean text response. The backend must retry without
+    // surfacing the truncation error to the agent loop, AND must
+    // emit a `MessageDelta` notice carrying the `deeptide:stream-retry`
+    // marker so the UI can show "retrying…".
+    let (base_url, attempts) = serve_sse_sequence(vec![TRUNCATED_TOOL_STREAM, TEXT_STREAM]);
+
+    let mut config = AnthropicConfig::new(base_url, "test-key", "test-model");
+    config.enable_streaming = true;
+    config.enable_prompt_caching = false;
+    config.auth_mode = AnthropicAuthMode::ApiKey;
+
+    let observed: Arc<Mutex<Vec<StreamingEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let handler: StreamingHandler = Arc::new(move |event| {
+        sink.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(event.clone());
+    });
+
+    let mut backend = AnthropicBackend::new(config)
+        .expect("build backend")
+        .with_streaming_handler(handler);
+
+    let response = backend
+        .respond(AgentRequest {
+            messages: vec![ConversationMessage::user("hi")],
+            model: "test-model".to_owned(),
+            step: 0,
+            max_turns: 1,
+            system: None,
+            allowed_tools: None,
+        })
+        .expect("backend must transparently recover from a truncated first attempt");
+
+    // The successful retry produced the canonical Hello-world payload.
+    assert_eq!(response.content, "Hello, world!");
+    assert!(response.tool_calls.is_empty());
+
+    // The mock saw exactly two connections — initial attempt + one
+    // retry. If we ever loosen the backoff cap we'd see this climb;
+    // pinning it asserts we don't accidentally spin forever.
+    let total_attempts = *attempts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(
+        total_attempts, 2,
+        "expected exactly one retry (2 attempts total), got {total_attempts}"
+    );
+
+    // The UI handler must have observed a retry notice between the
+    // two attempts so the user sees forward progress instead of a
+    // frozen spinner.
+    let events = observed
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let retry_notice = events.iter().find_map(|event| match event {
+        StreamingEvent::MessageDelta {
+            stop_reason: Some(reason),
+            ..
+        } if reason.starts_with("deeptide:stream-retry:") => Some(reason.clone()),
+        _ => None,
+    });
+    assert!(
+        retry_notice.is_some(),
+        "retry must surface a deeptide:stream-retry MessageDelta for the UI to render"
+    );
+}
+
+#[test]
+fn streaming_backend_gives_up_after_max_retries_on_persistent_truncation() {
+    use deeptide_core::AnthropicAuthMode;
+
+    // All three connections truncate. The backend must bubble the
+    // error rather than spin forever, and the failure must be
+    // recognisable as the truncation class — not a generic JSON
+    // parse error wallpapering the terminal.
+    let (base_url, attempts) = serve_sse_sequence(vec![
+        TRUNCATED_TOOL_STREAM,
+        TRUNCATED_TOOL_STREAM,
+        TRUNCATED_TOOL_STREAM,
+        // 4th payload here would never be served because the cap is 3
+        // attempts; included anyway as a guard against accidental
+        // retry-budget creep.
+        TRUNCATED_TOOL_STREAM,
+    ]);
+
+    let mut config = AnthropicConfig::new(base_url, "test-key", "test-model");
+    config.enable_streaming = true;
+    config.enable_prompt_caching = false;
+    config.auth_mode = AnthropicAuthMode::ApiKey;
+
+    let mut backend = AnthropicBackend::new(config).expect("build backend");
+    let err = backend
+        .respond(AgentRequest {
+            messages: vec![ConversationMessage::user("hi")],
+            model: "test-model".to_owned(),
+            step: 0,
+            max_turns: 1,
+            system: None,
+            allowed_tools: None,
+        })
+        .expect_err("persistent truncation must bubble");
+
+    assert!(
+        err.contains("stream truncated") || err.contains("cut before message_stop"),
+        "error must keep the truncation framing on final attempt: {err}"
+    );
+
+    let total_attempts = *attempts
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(
+        total_attempts, 3,
+        "retry budget must be capped at 3 attempts, got {total_attempts}"
+    );
+}
+
 #[test]
 fn streaming_backend_works_without_handler_callback() {
     // Sanity check: a backend with no handler still parses the SSE stream

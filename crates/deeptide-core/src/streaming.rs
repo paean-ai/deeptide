@@ -89,6 +89,79 @@ pub enum StreamingEvent {
 /// reqwest uses for the blocking client.
 pub type StreamingHandler = Arc<dyn Fn(&StreamingEvent) + Send + Sync>;
 
+/// Categorical reason a streaming response failed to assemble.
+///
+/// The agent loop uses this to decide whether to retry, escalate, or
+/// surface the error to the user verbatim. Each variant carries the
+/// formatted user-facing message, so callers can still `to_string()` for
+/// display while inspecting the variant for routing decisions.
+///
+/// The distinction matters because the recourse is different per case:
+///   * [`StreamError::Truncated`] — upstream connection dropped before
+///     `content_block_stop`/`message_stop`. The HTTP request itself was
+///     idempotent (same body would produce the same answer modulo
+///     sampling) and the cause is transient (network blip, proxy 504,
+///     model server hiccup). **Safe to retry automatically.**
+///   * [`StreamError::UpstreamCorruption`] — the assembled JSON contains
+///     U+FFFD replacement characters, indicating a hop in the chain
+///     lossily decoded mid-multibyte-sequence chunks. Retry *might*
+///     help if the chunk boundaries land elsewhere, but the underlying
+///     bug is in the upstream streamer.
+///   * [`StreamError::Malformed`] — the model emitted JSON we cannot
+///     parse and the stream closed cleanly. Retrying is unlikely to
+///     help; surface to the user.
+///   * [`StreamError::EmptyStream`] — connection opened but produced no
+///     content blocks. Usually a credential / model-not-found issue.
+///   * [`StreamError::Protocol`] — malformed SSE framing or unparseable
+///     control event. Indicates a serious upstream bug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamError {
+    /// SSE stream ended without `content_block_stop` for an in-flight
+    /// block (or without `message_stop` overall). Retry-safe.
+    Truncated(String),
+    /// Stream completed but its payload contains U+FFFD — upstream
+    /// re-encoded chunked UTF-8 lossily.
+    UpstreamCorruption(String),
+    /// Stream completed but the assembled tool input JSON is unparseable
+    /// for reasons unrelated to truncation or UTF-8 corruption.
+    Malformed(String),
+    /// Stream closed without producing any content blocks at all.
+    EmptyStream(String),
+    /// SSE framing or control event was unparseable; serious upstream
+    /// issue, not retriable.
+    Protocol(String),
+}
+
+impl StreamError {
+    /// User-facing message. Equivalent to `to_string()`.
+    pub fn message(&self) -> &str {
+        match self {
+            StreamError::Truncated(m)
+            | StreamError::UpstreamCorruption(m)
+            | StreamError::Malformed(m)
+            | StreamError::EmptyStream(m)
+            | StreamError::Protocol(m) => m,
+        }
+    }
+
+    /// `true` if the agent loop should silently retry the same request.
+    ///
+    /// Currently only `Truncated` qualifies. `UpstreamCorruption` is
+    /// _potentially_ retriable but we leave that to a future iteration
+    /// to avoid wasting tokens spinning on a persistent server bug.
+    pub fn is_transient_retry(&self) -> bool {
+        matches!(self, StreamError::Truncated(_))
+    }
+}
+
+impl std::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for StreamError {}
+
 /// Parse an Anthropic SSE stream off `reader`, invoke `handler` for each
 /// observed delta (if any), and assemble the final non-streaming
 /// [`AgentResponse`] the agent loop expects.
@@ -100,7 +173,7 @@ pub fn parse_streaming_response<R: Read>(
     reader: R,
     handler: Option<&StreamingHandler>,
     elapsed: Duration,
-) -> Result<AgentResponse, String> {
+) -> Result<AgentResponse, StreamError> {
     let mut reader = BufReader::new(reader);
     let mut blocks: Vec<BlockAccumulator> = Vec::new();
     let mut usage = UsageAccumulator::default();
@@ -114,16 +187,20 @@ pub fn parse_streaming_response<R: Read>(
                 // Errors mid-stream arrive as `event: error` with an
                 // `error: {type, message}` object inside `data:`. Surface
                 // the same shape as the non-streaming classifier.
-                let parsed: StreamingErrorEnvelope = serde_json::from_str(&event.data)
-                    .map_err(|e| format!("malformed streaming error event: {e}"))?;
-                return Err(format!(
+                let parsed: StreamingErrorEnvelope =
+                    serde_json::from_str(&event.data).map_err(|e| {
+                        StreamError::Protocol(format!("malformed streaming error event: {e}"))
+                    })?;
+                return Err(StreamError::Protocol(format!(
                     "streaming error ({}): {}",
                     parsed.error.error_type, parsed.error.message
-                ));
+                )));
             }
             "message_start" => {
-                let payload: MessageStartEvent = serde_json::from_str(&event.data)
-                    .map_err(|e| format!("invalid message_start event: {e}"))?;
+                let payload: MessageStartEvent =
+                    serde_json::from_str(&event.data).map_err(|e| {
+                        StreamError::Protocol(format!("invalid message_start event: {e}"))
+                    })?;
                 if let Some(message_usage) = payload.message.usage.as_ref() {
                     usage.merge_input(message_usage);
                 }
@@ -154,8 +231,10 @@ pub fn parse_streaming_response<R: Read>(
                 }
             }
             "content_block_start" => {
-                let payload: ContentBlockStartEvent = serde_json::from_str(&event.data)
-                    .map_err(|e| format!("invalid content_block_start event: {e}"))?;
+                let payload: ContentBlockStartEvent =
+                    serde_json::from_str(&event.data).map_err(|e| {
+                        StreamError::Protocol(format!("invalid content_block_start event: {e}"))
+                    })?;
                 ensure_index(&mut blocks, payload.index);
                 match payload.content_block {
                     StreamContentBlock::Text { text } => {
@@ -205,8 +284,10 @@ pub fn parse_streaming_response<R: Read>(
                 }
             }
             "content_block_delta" => {
-                let payload: ContentBlockDeltaEvent = serde_json::from_str(&event.data)
-                    .map_err(|e| format!("invalid content_block_delta event: {e}"))?;
+                let payload: ContentBlockDeltaEvent =
+                    serde_json::from_str(&event.data).map_err(|e| {
+                        StreamError::Protocol(format!("invalid content_block_delta event: {e}"))
+                    })?;
                 ensure_index(&mut blocks, payload.index);
                 match payload.delta {
                     StreamDelta::TextDelta { text } => {
@@ -238,8 +319,9 @@ pub fn parse_streaming_response<R: Read>(
                 }
             }
             "content_block_stop" => {
-                let payload: IndexEvent = serde_json::from_str(&event.data)
-                    .map_err(|e| format!("invalid content_block_stop event: {e}"))?;
+                let payload: IndexEvent = serde_json::from_str(&event.data).map_err(|e| {
+                    StreamError::Protocol(format!("invalid content_block_stop event: {e}"))
+                })?;
                 if let Some(slot) = blocks.get_mut(payload.index) {
                     match slot {
                         BlockAccumulator::Text { stop_seen, .. }
@@ -254,8 +336,10 @@ pub fn parse_streaming_response<R: Read>(
                 }
             }
             "message_delta" => {
-                let payload: MessageDeltaEvent = serde_json::from_str(&event.data)
-                    .map_err(|e| format!("invalid message_delta event: {e}"))?;
+                let payload: MessageDeltaEvent =
+                    serde_json::from_str(&event.data).map_err(|e| {
+                        StreamError::Protocol(format!("invalid message_delta event: {e}"))
+                    })?;
                 if let Some(message_usage) = payload.usage.as_ref() {
                     usage.merge_output(message_usage);
                 }
@@ -282,13 +366,27 @@ pub fn parse_streaming_response<R: Read>(
     }
 
     if !saw_message_stop && blocks.is_empty() {
-        return Err(String::from(
+        return Err(StreamError::EmptyStream(String::from(
             "streaming response ended before any content was received",
-        ));
+        )));
     }
 
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
+    // Snapshot a useful char-count BEFORE consuming `blocks`, so the
+    // fallback truncation message at the bottom can report how much
+    // content we did manage to assemble without needing to re-walk
+    // (the per-tool detailed error below also re-uses these strings).
+    let total_chars: usize = blocks
+        .iter()
+        .map(|block| match block {
+            BlockAccumulator::Text { text, .. } => text.chars().count(),
+            BlockAccumulator::ToolUse { partial_input, .. } => partial_input.chars().count(),
+            BlockAccumulator::Empty => 0,
+        })
+        .sum();
+    let block_count = blocks.len();
+
     for block in blocks {
         match block {
             BlockAccumulator::Empty => {}
@@ -307,12 +405,26 @@ pub fn parse_streaming_response<R: Read>(
                     serde_json::json!({})
                 } else {
                     serde_json::from_str(&partial_input).map_err(|e| {
-                        format_tool_input_error(&name, &id, &partial_input, &e, stop_seen)
+                        classify_tool_input_error(&name, &id, &partial_input, &e, stop_seen)
                     })?
                 };
                 tool_calls.push(ToolCall::new(id, name, input));
             }
         }
+    }
+
+    // Last-resort truncation guard: every block parsed cleanly (so the
+    // detailed per-tool errors above had no quarrel) but `message_stop`
+    // never arrived. This is the "text answer cut mid-paragraph" case
+    // — no per-block error fires because text blocks just hold whatever
+    // arrived, but the agent loop must still treat it as transient and
+    // retry. (Detailed per-tool truncation errors are emitted above and
+    // take precedence so the user gets the most actionable message.)
+    if !saw_message_stop {
+        return Err(StreamError::Truncated(format!(
+            "streaming response cut before message_stop ({total_chars} chars assembled across {block_count} block(s)). \
+             Retry the prompt, or run with --no-stream if the issue persists."
+        )));
     }
 
     let _ = model; // captured for completeness; not yet surfaced on AgentResponse.
@@ -361,8 +473,8 @@ fn ensure_index(blocks: &mut Vec<BlockAccumulator>, index: usize) {
     }
 }
 
-/// Format the actionable error message we surface when a `tool_use` block's
-/// accumulated `partial_input` doesn't parse as JSON.
+/// Categorise a tool-input JSON failure into the right [`StreamError`]
+/// variant and format the user-facing message.
 ///
 /// We distinguish three failure modes so the user gets a useful next step
 /// instead of an opaque parse error:
@@ -370,25 +482,28 @@ fn ensure_index(blocks: &mut Vec<BlockAccumulator>, index: usize) {
 /// 1. **Mid-stream truncation** (`!stop_seen`) — the upstream server cut
 ///    the SSE connection before sending `content_block_stop` for this
 ///    block. The partial JSON is necessarily incomplete (no closing
-///    quote / brace). Suggest retry or `--no-stream`.
+///    quote / brace). Returned as [`StreamError::Truncated`] so the API
+///    layer can transparently retry.
 /// 2. **UTF-8 corruption** (`partial_input` contains U+FFFD) — some hop
 ///    in the chain (proxy, load balancer, model server's own streamer)
 ///    lossily decoded a chunked UTF-8 sequence and replaced the bad
 ///    bytes with `\u{FFFD}`. The JSON string then either fails to
-///    decode or, if salvageable, holds garbage CJK / emoji. Surface the
-///    diagnosis so the user knows it's upstream, not their input.
-/// 3. **Otherwise** — genuinely malformed JSON. Fall back to the
-///    original parse error.
+///    decode or, if salvageable, holds garbage CJK / emoji. Returned as
+///    [`StreamError::UpstreamCorruption`] — _not_ auto-retried, because
+///    the cause is upstream and a retry may just yield the same bad
+///    chunks at different offsets.
+/// 3. **Otherwise** — genuinely malformed JSON. Returned as
+///    [`StreamError::Malformed`]; the user has to retry by hand.
 ///
 /// `partial_input` is truncated to a reasonable preview length so a 12 KB
 /// HTML write call doesn't dump its entire body into the error message.
-fn format_tool_input_error(
+fn classify_tool_input_error(
     name: &str,
     id: &str,
     partial_input: &str,
     parse_err: &serde_json::Error,
     stop_seen: bool,
-) -> String {
+) -> StreamError {
     const PREVIEW_BYTES: usize = 240;
 
     let has_replacement = partial_input.contains('\u{FFFD}');
@@ -401,19 +516,19 @@ fn format_tool_input_error(
         } else {
             ""
         };
-        format!(
+        StreamError::Truncated(format!(
             "tool_use {name}#{id} stream truncated before content_block_stop ({total_chars} chars assembled){utf8_note}. \
              Retry the prompt, or run with --no-stream if the issue persists. Partial input preview: {preview}"
-        )
+        ))
     } else if has_replacement {
-        format!(
+        StreamError::UpstreamCorruption(format!(
             "tool_use {name}#{id} input JSON contains U+FFFD replacement characters — upstream UTF-8 corruption in the streaming payload. \
              Retry the prompt; if it recurs the upstream API is mis-chunking multibyte sequences. Underlying parse error: {parse_err}. Preview: {preview}"
-        )
+        ))
     } else {
-        format!(
+        StreamError::Malformed(format!(
             "tool_use {name}#{id} input JSON did not assemble cleanly: {parse_err}; partial={preview}"
-        )
+        ))
     }
 }
 
@@ -491,7 +606,7 @@ struct SseEvent {
 /// terminated by a blank line. Multiple `data:` lines within an event
 /// are concatenated with `\n` per the SSE spec. Lines beginning with
 /// `:` are comments (used for keepalives) and are ignored.
-fn read_sse_event<R: BufRead>(reader: &mut R) -> Result<Option<SseEvent>, String> {
+fn read_sse_event<R: BufRead>(reader: &mut R) -> Result<Option<SseEvent>, StreamError> {
     let mut event_type: Option<String> = None;
     let mut data_parts: Vec<String> = Vec::new();
     let mut saw_any_line = false;
@@ -499,9 +614,13 @@ fn read_sse_event<R: BufRead>(reader: &mut R) -> Result<Option<SseEvent>, String
 
     loop {
         line.clear();
-        let bytes = reader
-            .read_line(&mut line)
-            .map_err(|e| format!("failed to read streaming response: {e}"))?;
+        let bytes = reader.read_line(&mut line).map_err(|e| {
+            // I/O errors on the SSE stream mid-flight (TCP RST,
+            // connection reset, proxy timeout) are exactly the
+            // transient class we want to retry. Tag as Truncated so
+            // the API layer treats it as such.
+            StreamError::Truncated(format!("failed to read streaming response: {e}"))
+        })?;
         if bytes == 0 {
             // EOF before terminator. If we collected anything, surface it;
             // otherwise signal end-of-stream.
@@ -646,10 +765,14 @@ mod tests {
 
     /// Helper: drive `parse_streaming_response` with an in-memory SSE
     /// payload and capture every handler invocation in order.
+    ///
+    /// Returns the typed [`StreamError`] on failure so individual tests
+    /// can assert on the variant; for convenience the test body usually
+    /// matches on the variant *and* checks the formatted message.
     fn drive(
         payload: &str,
     ) -> (
-        Result<AgentResponse, String>,
+        Result<AgentResponse, StreamError>,
         Arc<Mutex<Vec<StreamingEvent>>>,
     ) {
         let observed: Arc<Mutex<Vec<StreamingEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -815,9 +938,11 @@ mod tests {
         );
         let (result, _) = drive(payload);
         let err = result.expect_err("error event must surface");
+        assert!(matches!(err, StreamError::Protocol(_)));
+        let msg = err.message();
         assert!(
-            err.contains("overloaded_error") && err.contains("Try later"),
-            "unexpected error surface: {err}"
+            msg.contains("overloaded_error") && msg.contains("Try later"),
+            "unexpected error surface: {msg}"
         );
     }
 
@@ -870,7 +995,11 @@ mod tests {
     fn premature_stream_end_without_any_content_returns_error() {
         let result = parse_streaming_response(b"".as_ref(), None, Duration::ZERO);
         let err = result.expect_err("empty SSE stream must error");
-        assert!(err.contains("ended before any content was received"));
+        assert!(matches!(err, StreamError::EmptyStream(_)));
+        assert!(
+            err.message()
+                .contains("ended before any content was received")
+        );
     }
 
     #[test]
@@ -889,7 +1018,13 @@ mod tests {
         );
         let (result, _) = drive(payload);
         let err = result.expect_err("malformed JSON must surface");
-        assert!(err.contains("tool_use") && err.contains("Read"));
+        // Stream closed cleanly (saw content_block_stop + message_stop)
+        // but the JSON inside is truly malformed — should NOT be
+        // classified as retriable truncation.
+        assert!(matches!(err, StreamError::Malformed(_)));
+        assert!(!err.is_transient_retry());
+        let msg = err.message();
+        assert!(msg.contains("tool_use") && msg.contains("Read"));
     }
 
     #[test]
@@ -916,15 +1051,21 @@ mod tests {
         );
         let (result, _) = drive(payload);
         let err = result.expect_err("truncated tool stream must error");
+        // Variant must be Truncated so the API layer's auto-retry
+        // loop fires; the formatted message must still carry the
+        // human-actionable framing.
         assert!(
-            err.contains("stream truncated before content_block_stop"),
-            "expected truncation framing, got: {err}"
+            matches!(err, StreamError::Truncated(_)),
+            "expected Truncated variant, got {err:?}"
         );
-        assert!(err.contains("Write") && err.contains("toolu_x"));
+        assert!(err.is_transient_retry());
+        let msg = err.message();
         assert!(
-            err.contains("Retry the prompt"),
-            "error must give actionable next step: {err}"
+            msg.contains("stream truncated before content_block_stop")
+                || msg.contains("cut before message_stop"),
+            "expected truncation framing, got: {msg}"
         );
+        assert!(msg.contains("Write") && msg.contains("toolu_x"));
     }
 
     #[test]
@@ -952,13 +1093,22 @@ mod tests {
         );
         let (result, _) = drive(payload);
         let err = result.expect_err("FFFD-tainted JSON must error");
+        // Clean stream close + FFFD corruption → UpstreamCorruption,
+        // NOT Truncated. The retry loop must not fire because the
+        // problem is upstream's lossy decoder, not a transient cut.
         assert!(
-            err.contains("U+FFFD replacement characters"),
-            "expected FFFD framing, got: {err}"
+            matches!(err, StreamError::UpstreamCorruption(_)),
+            "expected UpstreamCorruption variant, got {err:?}"
+        );
+        assert!(!err.is_transient_retry());
+        let msg = err.message();
+        assert!(
+            msg.contains("U+FFFD replacement characters"),
+            "expected FFFD framing, got: {msg}"
         );
         assert!(
-            err.contains("upstream UTF-8 corruption"),
-            "error must blame upstream, not the user: {err}"
+            msg.contains("upstream UTF-8 corruption"),
+            "error must blame upstream, not the user: {msg}"
         );
     }
 
@@ -979,10 +1129,20 @@ mod tests {
         );
         let (result, _) = drive(payload);
         let err = result.expect_err("truncated+corrupt must error");
-        assert!(err.contains("stream truncated"), "got: {err}");
+        // Truncation wins — it's the more actionable framing, and
+        // the upstream UTF-8 mojibake gets a parenthetical note.
         assert!(
-            err.contains("U+FFFD"),
-            "should also mention UTF-8 corruption: {err}"
+            matches!(err, StreamError::Truncated(_)),
+            "expected Truncated variant, got {err:?}"
+        );
+        let msg = err.message();
+        assert!(
+            msg.contains("stream truncated") || msg.contains("cut before message_stop"),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains("U+FFFD"),
+            "should also mention UTF-8 corruption: {msg}"
         );
     }
 
@@ -1009,15 +1169,60 @@ mod tests {
         );
         let (result, _) = drive(&payload);
         let err = result.expect_err("must error");
+        let msg = err.message();
         assert!(
-            err.len() < 2_000,
+            msg.len() < 2_000,
             "error message must stay bounded, got {} bytes",
-            err.len()
+            msg.len()
         );
         assert!(
-            err.contains("more chars"),
-            "preview must show elision: {err}"
+            msg.contains("more chars"),
+            "preview must show elision: {msg}"
         );
+    }
+
+    #[test]
+    fn text_only_stream_cut_before_message_stop_classifies_as_truncated() {
+        // Variant of the truncation case where the model never even
+        // got to a tool call — pure text output cut mid-paragraph.
+        // The block closed cleanly but `message_stop` never arrived,
+        // so the agent loop must treat it as transient and retry.
+        let payload = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello, this is a partial answer that gets cut off mid-\"}}\n\n",
+            // No content_block_stop, no message_stop — connection died.
+        );
+        let (result, _) = drive(payload);
+        let err = result.expect_err("text stream cut must error");
+        assert!(
+            matches!(err, StreamError::Truncated(_)),
+            "text truncation must be Truncated variant, got {err:?}"
+        );
+        assert!(err.is_transient_retry());
+        let msg = err.message();
+        assert!(
+            msg.contains("cut before message_stop"),
+            "expected top-level truncation framing, got: {msg}"
+        );
+        // The chars-assembled count comes from the partial text we did
+        // receive — useful for the user to see how much was lost.
+        assert!(
+            msg.contains("chars assembled"),
+            "must report assembled char count: {msg}"
+        );
+    }
+
+    #[test]
+    fn is_transient_retry_only_fires_for_truncated_variant() {
+        assert!(StreamError::Truncated("x".into()).is_transient_retry());
+        assert!(!StreamError::UpstreamCorruption("x".into()).is_transient_retry());
+        assert!(!StreamError::Malformed("x".into()).is_transient_retry());
+        assert!(!StreamError::EmptyStream("x".into()).is_transient_retry());
+        assert!(!StreamError::Protocol("x".into()).is_transient_retry());
     }
 
     #[test]
