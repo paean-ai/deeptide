@@ -623,6 +623,10 @@ const FIXED_ARG_SUGGESTIONS: &[(&[&str], &[&str])] = &[
         &["queue"],
         &["list", "add", "pop", "clear", "mode", "single", "batch"],
     ),
+    (
+        &["tools", "tool"],
+        &["--read-only", "--writes", "--all", "--details", "--help"],
+    ),
 ];
 
 impl ReplHelper {
@@ -701,6 +705,177 @@ impl ReplHelper {
     fn compute_hint(&self, line: &str, pos: usize) -> Option<String> {
         compute_hint(line, pos, &self.commands)
     }
+}
+
+/// Tab completion for `@<path>` references. Returns `Some((start, pairs))`
+/// when the cursor is currently inside an `@`-prefixed token; returns
+/// `None` to delegate back to the slash-command / argument completers.
+///
+/// Behaviour mirrors what the user gets from Cursor / Claude Code:
+///   * `@<Tab>` lists everything in the cwd
+///   * `@src/<Tab>` lists everything in `src/`
+///   * `@src/ma<Tab>` filters `src/` entries by the `ma` prefix
+///   * Hidden + heavyweight build dirs are skipped so the listing
+///     stays tractable on large monorepos
+///
+/// The replacement value is the path WITHOUT the leading `@`, since
+/// rustyline's `Completer` API replaces from `token_start` and the
+/// caller has already eaten the `@` (we set `token_start = at_pos + 1`).
+fn at_path_completion(line: &str, pos: usize) -> Option<(usize, Vec<Pair>)> {
+    // Identify the @-token under the cursor. Scan backward from `pos`
+    // until we hit a whitespace, start of line, or another `@`.
+    let line_bytes = line.as_bytes();
+    if pos > line_bytes.len() {
+        return None;
+    }
+    let mut start = pos;
+    while start > 0 {
+        let c = line_bytes[start - 1];
+        if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+            break;
+        }
+        start -= 1;
+        if c == b'@' {
+            // Found the @ that anchors this token. Make sure the @ is
+            // at a word boundary, otherwise we don't treat this as a
+            // file reference (matches the parser semantics in core).
+            if start > 0 {
+                let before = line_bytes[start - 1];
+                let is_boundary = matches!(
+                    before,
+                    b' ' | b'\t' | b'\n' | b'\r' | b'(' | b'[' | b'{' | b'\'' | b'"' | b'`' | b','
+                );
+                if !is_boundary {
+                    return None;
+                }
+            }
+            let at_pos = start;
+            let path_prefix = &line[at_pos + 1..pos];
+            let candidates = list_filesystem_candidates(path_prefix);
+            if candidates.is_empty() {
+                return Some((at_pos + 1, vec![]));
+            }
+            let pairs = candidates
+                .into_iter()
+                .map(|(repl, display)| Pair {
+                    display,
+                    replacement: repl,
+                })
+                .collect();
+            return Some((at_pos + 1, pairs));
+        }
+    }
+    None
+}
+
+/// Enumerate filesystem entries matching `prefix`, returned as
+/// `(replacement, display)` pairs. The replacement is the path
+/// fragment that should go in after the `@`; the display has
+/// trailing-`/` for directories so the user can see at a glance what
+/// will be inlined vs what needs further navigation.
+fn list_filesystem_candidates(prefix: &str) -> Vec<(String, String)> {
+    use std::path::Path;
+
+    const MAX_CANDIDATES: usize = 64;
+    // Static deny-list for directory bases we never want to surface
+    // as completion candidates — they're huge, transient, or never
+    // useful to inline. Matching is by name only at the immediate
+    // directory level.
+    const SKIP_NAMES: &[&str] = &[
+        "node_modules",
+        "target",
+        ".git",
+        ".clone",
+        ".claire",
+        "dist",
+        "build",
+        ".next",
+        ".cache",
+        ".turbo",
+        "venv",
+        ".venv",
+        "__pycache__",
+        ".DS_Store",
+    ];
+
+    // Split the prefix into directory portion + filename prefix.
+    // `prefix == "src/foo"` → dir = "src", filename_prefix = "foo".
+    // `prefix == "foo"` → dir = "", filename_prefix = "foo".
+    // `prefix == "src/"` → dir = "src", filename_prefix = "".
+    let (dir_part, name_part) = match prefix.rfind('/') {
+        Some(idx) => (&prefix[..=idx], &prefix[idx + 1..]),
+        None => ("", prefix),
+    };
+
+    let cwd = std::env::current_dir().ok();
+    let search_dir: std::path::PathBuf = if dir_part.is_empty() {
+        cwd.clone().unwrap_or_else(|| Path::new(".").to_path_buf())
+    } else {
+        let candidate = Path::new(dir_part);
+        if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            cwd.clone()
+                .unwrap_or_else(|| Path::new(".").to_path_buf())
+                .join(candidate)
+        }
+    };
+
+    let entries = match std::fs::read_dir(&search_dir) {
+        Ok(it) => it,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    let name_prefix_lower = name_part.to_ascii_lowercase();
+
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name_str = match file_name.to_str() {
+            Some(s) => s.to_owned(),
+            None => continue,
+        };
+        // Filter: skip names in the deny list outright, and skip
+        // hidden files unless the user explicitly typed a leading dot.
+        if SKIP_NAMES.contains(&name_str.as_str()) {
+            continue;
+        }
+        if name_str.starts_with('.') && !name_part.starts_with('.') {
+            continue;
+        }
+        // Case-insensitive prefix match. We deliberately allow
+        // case-insensitive even on case-sensitive filesystems so
+        // typing `@RE<Tab>` finds `README.md`.
+        if !name_str
+            .to_ascii_lowercase()
+            .starts_with(&name_prefix_lower)
+        {
+            continue;
+        }
+
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+        let mut replacement = String::with_capacity(dir_part.len() + name_str.len() + 1);
+        replacement.push_str(dir_part);
+        replacement.push_str(&name_str);
+        if is_dir {
+            replacement.push('/');
+        }
+
+        let display = if is_dir {
+            format!("{name_str}/")
+        } else {
+            name_str
+        };
+        out.push((replacement, display));
+
+        if out.len() >= MAX_CANDIDATES {
+            break;
+        }
+    }
+
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 fn pairs_from_values(token_start: usize, values: &[String]) -> (usize, Vec<Pair>) {
@@ -788,6 +963,16 @@ impl Completer for ReplHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        // `@`-file completion takes priority over slash-command name
+        // matching: if the cursor is currently in an `@<partial-path>`
+        // token, we list matching files instead. Without this short-
+        // circuit, an `@` in the middle of a long sentence would still
+        // get slash-command suggestions even though the user is
+        // obviously typing a file reference.
+        if let Some(pairs) = at_path_completion(line, pos) {
+            return Ok(pairs);
+        }
+
         let Some(result) = CompletionEngine::command_completions(line, pos, &self.commands, 8)
         else {
             // No command-name match: walk the broader argument-completion
@@ -2725,11 +2910,16 @@ impl EnumValue for OutputFormat {
 
 #[cfg(test)]
 mod tests {
+    // Test fixtures use std::fs / tempfile setup where failure means
+    // the test infrastructure is broken, not the code under test —
+    // `.unwrap()` is fine for that. Opt-out is local to this module.
+    #![allow(clippy::unwrap_used)]
+
     use super::{
         Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, FIXED_ARG_SUGGESTIONS, InputFormat, OutputFormat,
-        ReplHelper, VERSION_LONG, VERSION_SHORT, apply_config_fallbacks, build_auth_segment,
-        collect_prompt, compute_hint, configured_backend, effective_base_url, effective_model,
-        format_retry_notice_line, next_permission_mode, normalize_embedded_mode,
+        ReplHelper, VERSION_LONG, VERSION_SHORT, apply_config_fallbacks, at_path_completion,
+        build_auth_segment, collect_prompt, compute_hint, configured_backend, effective_base_url,
+        effective_model, format_retry_notice_line, next_permission_mode, normalize_embedded_mode,
         paean_token_resolved, parse_permission_response, render_system_message,
         summarize_tool_call_for_prompt, truncate_inline, use_color, validate_formats,
     };
@@ -4531,4 +4721,146 @@ mod tests {
             );
         }
     }
+
+    // ---- @-file tab completion ----------------------------------------
+
+    #[test]
+    fn at_path_completion_returns_none_when_no_at_token_under_cursor() {
+        // Plain text with no `@`: completer should defer back to the
+        // slash-command path.
+        let line = "hello world";
+        let result = at_path_completion(line, line.len());
+        assert!(result.is_none(), "expected None");
+    }
+
+    #[test]
+    fn at_path_completion_lists_matching_entries_in_cwd() {
+        // Stage a tempdir with two files, chdir into it, then drive
+        // `at_path_completion` against `@<Tab>`. We can't easily mock
+        // `current_dir`, so we set it for the duration of the test
+        // (single-threaded test guard required).
+        let _guard = SERIAL_CWD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("beta.txt"), "b").unwrap();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let line = "look at @";
+        let (start, pairs) = at_path_completion(line, line.len()).expect("at-completion fired");
+        assert_eq!(start, "look at @".len());
+        let names: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        assert!(names.contains(&"alpha.txt"), "missing alpha.txt: {names:?}");
+        assert!(names.contains(&"beta.txt"), "missing beta.txt: {names:?}");
+
+        if let Some(prev) = prev {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+
+    #[test]
+    fn at_path_completion_filters_by_prefix() {
+        let _guard = SERIAL_CWD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("beta.txt"), "b").unwrap();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let line = "see @alp";
+        let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
+        let names: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        assert_eq!(names, vec!["alpha.txt"], "prefix filter: {names:?}");
+
+        if let Some(prev) = prev {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+
+    #[test]
+    fn at_path_completion_marks_directories_with_trailing_slash() {
+        let _guard = SERIAL_CWD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "x").unwrap();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let line = "@";
+        let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
+        let displays: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        assert!(
+            displays.contains(&"src/"),
+            "dir lacks trailing /: {displays:?}"
+        );
+        assert!(displays.contains(&"README.md"));
+
+        if let Some(prev) = prev {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+
+    #[test]
+    fn at_path_completion_skips_heavy_build_dirs() {
+        // node_modules and target are on the deny list; they should
+        // not surface even when matching a prefix.
+        let _guard = SERIAL_CWD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let (_start, pairs) = at_path_completion("@", 1).expect("fired");
+        let displays: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        assert!(displays.contains(&"src/"));
+        assert!(
+            !displays.contains(&"node_modules/"),
+            "deny-list miss: {displays:?}"
+        );
+        assert!(
+            !displays.contains(&"target/"),
+            "deny-list miss: {displays:?}"
+        );
+
+        if let Some(prev) = prev {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+
+    #[test]
+    fn at_path_completion_handles_subdirectory_paths() {
+        let _guard = SERIAL_CWD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("crates");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("foo.rs"), "f").unwrap();
+        std::fs::write(sub.join("bar.rs"), "b").unwrap();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let line = "@crates/";
+        let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
+        let replacements: Vec<&str> = pairs.iter().map(|p| p.replacement.as_str()).collect();
+        assert!(replacements.contains(&"crates/bar.rs"));
+        assert!(replacements.contains(&"crates/foo.rs"));
+
+        if let Some(prev) = prev {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+
+    #[test]
+    fn at_path_completion_skips_when_at_inside_word() {
+        // `someone@`: char before `@` is `e`, not on the boundary
+        // allow-list → completer must not fire.
+        let line = "someone@";
+        assert!(at_path_completion(line, line.len()).is_none());
+    }
+
+    // Serial guard for tests that mutate process-wide cwd. `OnceLock`
+    // + `Mutex<()>` gives us cross-test exclusion without a
+    // `lazy_static` dep.
+    static SERIAL_CWD: OnceLock<Mutex<()>> = OnceLock::new();
 }

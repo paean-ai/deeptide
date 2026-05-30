@@ -1,5 +1,6 @@
 pub mod agent_loop;
 pub mod api;
+pub mod at_references;
 pub mod background_shell;
 pub mod commands;
 pub mod completion;
@@ -35,6 +36,10 @@ pub use agent_loop::{
     PermissionAskCallback, ToolCall, ToolResultBlock,
 };
 pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ThinkingConfig, ToolChoice};
+pub use at_references::{
+    AtExpansionOptions, AtReference, AttachedFile, ExpansionResult, ExpansionStatus,
+    expand_at_references, parse_at_references,
+};
 pub use commands::{
     ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, ExitCommand,
     HelpCommand, MemoryCommand, NewCommand, RememberCommand, SlashCommand,
@@ -85,7 +90,7 @@ pub use tools::{
     PushNotificationTool, ReadFilesTool, ReadMcpResourceTool, ReadTool, RemoteTriggerTool,
     ReviewArtifactTool, ScreenCaptureTool, SkillTool, SleepTool, SnipTool, SpotlightSearchTool,
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, Tool, ToolContext, ToolRegistry, ToolResult, ToolSearchTool,
+    TodoWriteTool, Tool, ToolContext, ToolMetadata, ToolRegistry, ToolResult, ToolSearchTool,
     VerifyPlanExecutionTool, VideoTranscribeTool, VisionTool, WebFetchTool, WebSearchTool,
     WriteTool,
 };
