@@ -50,6 +50,7 @@ fn request() -> AgentRequest {
         max_turns: 1,
         system: None,
         allowed_tools: None,
+        thinking: None,
     }
 }
 

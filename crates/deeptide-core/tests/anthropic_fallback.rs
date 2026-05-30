@@ -106,6 +106,7 @@ fn request() -> AgentRequest {
         max_turns: 1,
         system: None,
         allowed_tools: None,
+        thinking: None,
     }
 }
 
@@ -199,6 +200,7 @@ fn per_request_model_reaches_the_wire() {
             max_turns: 1,
             system: None,
             allowed_tools: None,
+            thinking: None,
         })
         .expect("respond");
     assert_eq!(response.content, "recovered");
@@ -228,6 +230,7 @@ fn empty_per_request_model_falls_back_to_config_model() {
             max_turns: 1,
             system: None,
             allowed_tools: None,
+            thinking: None,
         })
         .expect("respond");
 

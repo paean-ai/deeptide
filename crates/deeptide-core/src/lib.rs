@@ -7,6 +7,7 @@ pub mod completion;
 pub mod config;
 pub mod context_window;
 pub mod cost;
+pub mod diff_preview;
 pub mod embedded_protocol;
 pub mod hooks;
 pub mod markdown;
@@ -60,6 +61,7 @@ pub use cost::{
     CacheHealth, CostSummary, CostTracker, KnownModel, ModelPricing, TurnRecord, TurnUsage,
     known_models,
 };
+pub use diff_preview::{DiffPreview, DiffPreviewOptions, render_tool_call_diff};
 pub use hooks::{HookEngine, HookEvent, HookOutcome};
 pub use markdown::{MarkdownRenderOptions, MarkdownRenderer, StreamingMarkdownRenderer};
 pub use message_queue::{MessageQueue, QueueMode};

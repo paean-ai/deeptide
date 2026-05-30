@@ -2671,12 +2671,33 @@ fn handle_permission_prompt(
             tool_call.name, summary
         )
     };
+
+    // For file-modifying tools (Write / Edit / AppendFile), render a
+    // unified diff preview so the user can see what's about to change
+    // before approving. The preview is bounded to a few dozen lines so
+    // even a large rewrite doesn't dominate the prompt. Unknown tools
+    // (Bash, Grep, ...) return None and we fall back to the one-line
+    // summary alone.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let diff_block = match deeptide_core::render_tool_call_diff(
+        &tool_call.name,
+        &tool_call.input,
+        &cwd,
+        deeptide_core::DiffPreviewOptions::default(),
+    ) {
+        Some(preview) => render_diff_preview_block(&preview, use_color),
+        None => String::new(),
+    };
+
     let prompt = if use_color {
         "  \x1b[2m[y]es / [n]o / [t]his-tool / [a]ll-yolo\x1b[0m  > "
     } else {
         "  [y]es / [n]o / [t]his-tool / [a]ll-yolo  > "
     };
     let _ = stdout.write_all(header.as_bytes());
+    if !diff_block.is_empty() {
+        let _ = stdout.write_all(diff_block.as_bytes());
+    }
     let _ = stdout.write_all(prompt.as_bytes());
     let _ = stdout.flush();
 
@@ -2729,6 +2750,49 @@ fn parse_permission_response(raw: &str, tool_name: &str) -> AskOutcome {
             reason: format!("user declined ({other})"),
         },
     }
+}
+
+/// Format a [`DiffPreview`] for display inside the permission ask.
+/// Adds a left bar (`│`) so the preview visually nests under the
+/// permission header, colourises `-`/`+` lines when the terminal
+/// supports it, and bookends the block with `───` rules so it's clearly
+/// delimited from the prompt the user types into below.
+fn render_diff_preview_block(preview: &deeptide_core::DiffPreview, use_color: bool) -> String {
+    let mut out = String::new();
+    let rule = if use_color {
+        "\x1b[2m──────── proposed change ────────\x1b[0m"
+    } else {
+        "──────── proposed change ────────"
+    };
+    out.push_str("  ");
+    out.push_str(rule);
+    out.push('\n');
+    if use_color {
+        out.push_str(&format!("  \x1b[1m{}\x1b[0m\n", preview.summary));
+    } else {
+        out.push_str(&format!("  {}\n", preview.summary));
+    }
+    for line in preview.body.lines() {
+        let styled = if !use_color {
+            format!("  │ {line}")
+        } else if let Some(rest) = line.strip_prefix('+') {
+            format!("  │ \x1b[32m+{rest}\x1b[0m")
+        } else if let Some(rest) = line.strip_prefix('-') {
+            format!("  │ \x1b[31m-{rest}\x1b[0m")
+        } else if line.starts_with("@@") {
+            format!("  │ \x1b[36m{line}\x1b[0m")
+        } else if line.starts_with("---") || line.starts_with("+++") {
+            format!("  │ \x1b[2m{line}\x1b[0m")
+        } else {
+            format!("  │ {line}")
+        };
+        out.push_str(&styled);
+        out.push('\n');
+    }
+    out.push_str("  ");
+    out.push_str(rule);
+    out.push_str("\n\n");
+    out
 }
 
 /// Produce a one-line summary of the tool call's most relevant input field

@@ -1102,12 +1102,12 @@ fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
                 "help", "exit", "new", "clear", "compact", "status", "cost", "reminder", "goal",
             ],
         ),
-        ("Model", &["model", "provider", "fast", "tps"]),
+        ("Model", &["model", "provider", "fast", "tps", "think"]),
         ("Memory", &["memory", "remember", "dream"]),
         (
             "Sessions",
             &[
-                "resume", "retry", "sessions", "queue", "export", "copy", "paste",
+                "resume", "retry", "sessions", "queue", "search", "export", "copy", "paste",
             ],
         ),
         ("Permissions", &["permission"]),

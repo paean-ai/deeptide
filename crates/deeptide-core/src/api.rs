@@ -284,7 +284,22 @@ impl AgentBackend for AnthropicBackend {
         } else {
             request.model.clone()
         };
-        match self.try_model_with_stream_retry(&primary, &request, effective_system.as_deref()) {
+        // Same precedence story for the thinking directive: a per-
+        // request override (from `/think`) wins over whatever was
+        // baked into the backend at construction time, but absence of
+        // an override falls back to the construction-time default.
+        // Implemented by temporarily swapping `self.config.thinking`
+        // for the duration of this call — cheap because `ThinkingConfig`
+        // is small, and it keeps `try_model_with_stream_retry` (and the
+        // rest of the request-building plumbing) unchanged.
+        let baseline_thinking = self.config.thinking.clone();
+        if let Some(override_cfg) = request.thinking.clone() {
+            self.config.thinking = Some(override_cfg);
+        }
+        let outcome =
+            self.try_model_with_stream_retry(&primary, &request, effective_system.as_deref());
+        self.config.thinking = baseline_thinking;
+        match outcome {
             Ok(response) => Ok(response),
             Err(failure) => {
                 // On a transient server overload, retry once with the
