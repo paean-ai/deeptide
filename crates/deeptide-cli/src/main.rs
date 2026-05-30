@@ -696,33 +696,66 @@ fn run_interactive(
         MarkdownRenderOptions { color: use_color },
     )));
     let streaming_md_handler = Arc::clone(&streaming_md);
+    let streaming_md_for_retry = Arc::clone(&streaming_md);
+    let did_stream_for_retry = Arc::clone(&did_stream);
+    let spinner_stop_for_retry = Arc::clone(&spinner_stop);
+    let spinner_lock_for_retry = Arc::clone(&spinner_lock);
+    let output_started_for_retry = Arc::clone(&output_started);
+    let use_color_for_retry = use_color;
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
-        if let StreamingEvent::TextDelta { delta, .. } = event {
-            let first = !did_stream_handler.swap(true, Ordering::Relaxed);
-            // Stop the spinner under the lock so it cannot draw a frame over
-            // the text we are about to print.
-            if let Ok(_guard) = spinner_lock_handler.lock() {
-                spinner_stop_handler.store(true, Ordering::Relaxed);
-                output_started_handler.store(true, Ordering::Relaxed);
-                let mut out = io::stdout();
-                if first {
-                    // Erase the spinner line before the first streamed token.
-                    let _ = out.write_all(b"\r\x1b[2K");
+        match event {
+            StreamingEvent::TextDelta { delta, .. } => {
+                let first = !did_stream_handler.swap(true, Ordering::Relaxed);
+                // Stop the spinner under the lock so it cannot draw a frame
+                // over the text we are about to print.
+                if let Ok(_guard) = spinner_lock_handler.lock() {
+                    spinner_stop_handler.store(true, Ordering::Relaxed);
+                    output_started_handler.store(true, Ordering::Relaxed);
+                    let mut out = io::stdout();
+                    if first {
+                        // Erase the spinner line before the first streamed token.
+                        let _ = out.write_all(b"\r\x1b[2K");
+                    }
+                    // Apply incremental markdown rendering. Bold, lists, headers,
+                    // links, and inline code now style correctly even though the
+                    // model is emitting one chunk at a time. Code fences are
+                    // passed through verbatim while open (the body remains
+                    // readable as it streams in).
+                    let rendered = match streaming_md_handler.lock() {
+                        Ok(mut renderer) => renderer.push(delta),
+                        // If the mutex is poisoned, fall back to raw output so the
+                        // user still sees the model response.
+                        Err(_) => delta.clone(),
+                    };
+                    let _ = out.write_all(rendered.as_bytes());
+                    let _ = out.flush();
                 }
-                // Apply incremental markdown rendering. Bold, lists, headers,
-                // links, and inline code now style correctly even though the
-                // model is emitting one chunk at a time. Code fences are
-                // passed through verbatim while open (the body remains
-                // readable as it streams in).
-                let rendered = match streaming_md_handler.lock() {
-                    Ok(mut renderer) => renderer.push(delta),
-                    // If the mutex is poisoned, fall back to raw output so the
-                    // user still sees the model response.
-                    Err(_) => delta.clone(),
-                };
-                let _ = out.write_all(rendered.as_bytes());
-                let _ = out.flush();
             }
+            StreamingEvent::MessageDelta {
+                stop_reason: Some(reason),
+                ..
+            } => {
+                // Surface our synthetic `deeptide:stream-retry:N/M` signal
+                // as a visible REPL notice. Without this the user sees a
+                // ~400 ms+ silent backoff with no clue why; with it they
+                // get "↻ retry 1/3 — stream cut, reconnecting" and a
+                // fresh spinner cycle.
+                //
+                // Real Anthropic stop_reasons (end_turn, tool_use, …)
+                // bypass via `parse_stream_retry_signal` returning None.
+                if let Some(notice) = deeptide_core::parse_stream_retry_signal(reason) {
+                    render_retry_notice(
+                        &notice,
+                        use_color_for_retry,
+                        &did_stream_for_retry,
+                        &output_started_for_retry,
+                        &spinner_stop_for_retry,
+                        &spinner_lock_for_retry,
+                        &streaming_md_for_retry,
+                    );
+                }
+            }
+            _ => {}
         }
     });
 
@@ -1767,11 +1800,134 @@ fn effective_credential(cli: &Cli) -> Option<CloudCredential> {
     None
 }
 
+/// Print a one-line "retrying…" notice when the API layer's auto-retry
+/// loop fires between SSE attempts.
+///
+/// The notice appears as `↻ retry N/M — <reason>` in dimmed cyan so it
+/// reads as a transient status message rather than competing with the
+/// model's actual answer. Operates under the same spinner lock the
+/// `TextDelta` arm uses so the spinner thread cannot draw a frame on
+/// top of (or under) the notice.
+///
+/// Side effects beyond printing:
+///
+/// 1. Resets the in-flight `StreamingMarkdownRenderer` so any partial
+///    line buffered from the doomed attempt doesn't leak into the
+///    retry's output.
+/// 2. Clears `did_stream` and `output_started` so the next `TextDelta`
+///    re-erases the spinner line cleanly (otherwise the first
+///    post-retry token would chain directly onto our notice with no
+///    separator).
+///
+/// `use_color=false` flips ANSI escapes to plain text so the notice
+/// stays readable on terminals without colour or under `--no-color`.
+#[allow(clippy::too_many_arguments)]
+fn render_retry_notice(
+    notice: &deeptide_core::StreamRetryNotice,
+    use_color: bool,
+    did_stream: &Arc<AtomicBool>,
+    output_started: &Arc<AtomicBool>,
+    spinner_stop: &Arc<AtomicBool>,
+    spinner_lock: &Arc<Mutex<()>>,
+    streaming_md: &Arc<Mutex<deeptide_core::StreamingMarkdownRenderer>>,
+) {
+    let Ok(_guard) = spinner_lock.lock() else {
+        return;
+    };
+    // Stop the spinner, clear its line, print the notice, then let the
+    // outer loop restart the spinner during the backoff. The next
+    // TextDelta (or another retry) will re-claim stdout under the lock.
+    spinner_stop.store(true, Ordering::Relaxed);
+    let mut out = io::stdout();
+    let _ = out.write_all(b"\r\x1b[2K");
+
+    // Drain any buffered markdown state — the partial line from the
+    // doomed attempt is now meaningless because we'll get a fresh
+    // delta stream on the retry.
+    let drained = match streaming_md.lock() {
+        Ok(mut renderer) => {
+            let leftover = renderer.flush();
+            renderer.reset();
+            leftover
+        }
+        Err(_) => String::new(),
+    };
+    if !drained.is_empty() {
+        // If the previous attempt had emitted some text already, print
+        // it before the notice so the user can see how far we got.
+        let _ = out.write_all(drained.as_bytes());
+        if !drained.ends_with('\n') {
+            let _ = out.write_all(b"\n");
+        }
+    }
+
+    let line = format_retry_notice_line(notice, use_color);
+    let _ = out.write_all(line.as_bytes());
+    let _ = out.flush();
+
+    // Reset the "we have streamed output" flags so the next real
+    // TextDelta re-erases the spinner line and starts fresh.
+    did_stream.store(false, Ordering::Relaxed);
+    output_started.store(false, Ordering::Relaxed);
+}
+
+/// Truncate a single-line string to at most `max_chars` *display*
+/// characters with a trailing `…` if it had to cut. Uses the unified
+/// `display_width` so CJK / fullwidth content gets accounted at 2
+/// cells per char rather than 1.
+fn truncate_inline(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{truncated}…")
+}
+
+/// Build the rendered retry-notice line (without writing it). Split out
+/// from [`render_retry_notice`] so we can unit-test the formatting
+/// without needing a real spinner thread or stdout capture.
+///
+/// Output shape:
+///
+/// * With reason:     `  ↻ retry N/M — <reason>\n`
+/// * Without reason:  `  ↻ retry N/M\n`
+/// * With colour:     wrapped in dim-cyan ANSI escapes
+///
+/// The leading two-space indent is intentional: it matches the
+/// `└─` left-bar indent of the structured tool-event renderer so
+/// transient status messages visually align with executed-tool output
+/// rather than competing with the model's prose.
+fn format_retry_notice_line(notice: &deeptide_core::StreamRetryNotice, use_color: bool) -> String {
+    let label = if notice.reason.is_empty() {
+        format!("  ↻ retry {}/{}", notice.attempt, notice.max_attempts)
+    } else {
+        // Bound the reason length so a verbose truncation message
+        // doesn't push the spinner off-screen. 80 chars covers the
+        // canonical "streaming response cut before message_stop (N
+        // chars assembled…)" template comfortably.
+        format!(
+            "  ↻ retry {}/{} — {}",
+            notice.attempt,
+            notice.max_attempts,
+            truncate_inline(&notice.reason, 80)
+        )
+    };
+    if use_color {
+        // Dim cyan: visible but signals "transient status, not the
+        // actual answer". Reset at end so subsequent tokens aren't
+        // accidentally coloured.
+        format!("\x1b[2;36m{label}\x1b[0m\n")
+    } else {
+        format!("{label}\n")
+    }
+}
+
 /// Render a [`SystemMessage`] for the interactive REPL. Color is applied
 /// when the user hasn't opted out via `--no-color` / `NO_COLOR`; in plain
 /// mode the output is just the structured fields joined together.
 ///
 /// Styling vocabulary:
+///
 /// - tool batch summary       → dim `· Tools …`
 /// - tool success             → green `✓ <Name>` + dim summary
 /// - tool failure             → red `✗ <Name>` + bright summary
@@ -2216,9 +2372,9 @@ mod tests {
     use super::{
         Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
         build_auth_segment, collect_prompt, configured_backend, effective_base_url,
-        effective_model, next_permission_mode, normalize_embedded_mode, paean_token_resolved,
-        parse_permission_response, render_system_message, summarize_tool_call_for_prompt,
-        use_color, validate_formats,
+        effective_model, format_retry_notice_line, next_permission_mode, normalize_embedded_mode,
+        paean_token_resolved, parse_permission_response, render_system_message,
+        summarize_tool_call_for_prompt, truncate_inline, use_color, validate_formats,
     };
     use clap::Parser;
     use deeptide_core::AskOutcome;
@@ -2268,6 +2424,100 @@ mod tests {
             settings: None,
             add_dir: Vec::new(),
         }
+    }
+
+    #[test]
+    fn retry_notice_renders_compact_label_without_color() {
+        let notice = deeptide_core::StreamRetryNotice {
+            attempt: 1,
+            max_attempts: 3,
+            reason: "stream cut".to_owned(),
+        };
+        let line = format_retry_notice_line(&notice, false);
+        // Plain mode: no ANSI escapes, single newline, indented label.
+        assert_eq!(line, "  ↻ retry 1/3 — stream cut\n");
+        assert!(
+            !line.contains('\x1b'),
+            "plain mode must have no escapes: {line:?}"
+        );
+    }
+
+    #[test]
+    fn retry_notice_wraps_label_in_dim_cyan_when_color_on() {
+        let notice = deeptide_core::StreamRetryNotice {
+            attempt: 2,
+            max_attempts: 3,
+            reason: "upstream proxy cut".to_owned(),
+        };
+        let line = format_retry_notice_line(&notice, true);
+        // Dim (2) + cyan (36) opening, reset (0) closing. Sole newline
+        // at the very end so subsequent TextDelta lands on its own row.
+        assert!(
+            line.starts_with("\x1b[2;36m"),
+            "missing dim-cyan opener: {line:?}"
+        );
+        assert!(
+            line.ends_with("\x1b[0m\n"),
+            "missing reset+newline: {line:?}"
+        );
+        assert!(line.contains("retry 2/3"));
+        assert!(line.contains("upstream proxy cut"));
+    }
+
+    #[test]
+    fn retry_notice_omits_separator_when_reason_is_empty() {
+        // Empty-reason path: the em-dash separator and trailing text
+        // must vanish entirely so we don't render "↻ retry 1/3 —" with
+        // a dangling dash that looks like a truncated message.
+        let notice = deeptide_core::StreamRetryNotice {
+            attempt: 1,
+            max_attempts: 3,
+            reason: String::new(),
+        };
+        let line = format_retry_notice_line(&notice, false);
+        assert_eq!(line, "  ↻ retry 1/3\n");
+        assert!(
+            !line.contains('—'),
+            "no separator allowed when reason is empty: {line:?}"
+        );
+    }
+
+    #[test]
+    fn retry_notice_truncates_long_reasons_inline() {
+        let long_reason: String = "x".repeat(200);
+        let notice = deeptide_core::StreamRetryNotice {
+            attempt: 3,
+            max_attempts: 3,
+            reason: long_reason,
+        };
+        let line = format_retry_notice_line(&notice, false);
+        // Hard cap: the inline truncator keeps reasons at ≤80 chars +
+        // ellipsis so the notice fits on a typical terminal row even
+        // with the "  ↻ retry N/M — " preamble. Total line stays well
+        // under 100 columns.
+        assert!(line.contains('…'), "long reason must be elided: {line:?}");
+        assert!(
+            line.chars().count() < 100,
+            "notice too long: {line:?} ({} chars)",
+            line.chars().count()
+        );
+    }
+
+    #[test]
+    fn truncate_inline_is_a_no_op_for_short_text() {
+        assert_eq!(truncate_inline("hello", 80), "hello");
+        assert_eq!(truncate_inline("", 80), "");
+    }
+
+    #[test]
+    fn truncate_inline_respects_char_count_not_byte_count_for_cjk() {
+        // 中文每字符占 1 个 char 但占 2 个显示格。本函数以 char 计数，
+        // 所以 5 个中文 ≤ 5 不裁剪；6 个 + 上限 5 → 4 个中文 + …。
+        let cjk = "你好世界编程";
+        assert_eq!(truncate_inline(cjk, 6), cjk);
+        let cut = truncate_inline(cjk, 5);
+        assert!(cut.ends_with('…'));
+        assert_eq!(cut.chars().count(), 5);
     }
 
     fn env_guard() -> MutexGuard<'static, ()> {

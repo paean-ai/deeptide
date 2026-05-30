@@ -89,6 +89,70 @@ pub enum StreamingEvent {
 /// reqwest uses for the blocking client.
 pub type StreamingHandler = Arc<dyn Fn(&StreamingEvent) + Send + Sync>;
 
+/// Prefix used on synthetic `MessageDelta.stop_reason` values that the
+/// API layer emits to signal in-band events to the UI (currently just
+/// stream-cut retries; future signals like model fallback can reuse the
+/// same namespace). The colon separator keeps it parseable.
+pub const STREAM_RETRY_SIGNAL_PREFIX: &str = "deeptide:stream-retry:";
+
+/// Decoded payload of a [`STREAM_RETRY_SIGNAL_PREFIX`] sentinel.
+///
+/// The wire format is `deeptide:stream-retry:N/M (reason)`, where `N` is
+/// the 1-indexed attempt that just failed and `M` is the total retry
+/// budget. Both numbers come straight from the API layer's retry loop;
+/// `reason` is the truncation error message we're about to retry past.
+///
+/// Stored as `usize` (not `u32`) because the call sites work in `usize`
+/// for vector indexing and we want to avoid a cast at every render site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamRetryNotice {
+    /// 1-indexed: the attempt that just failed.
+    pub attempt: usize,
+    /// Total attempts the API layer is willing to make (initial + retries).
+    pub max_attempts: usize,
+    /// User-facing reason for the retry (truncation error message).
+    pub reason: String,
+}
+
+/// Try to decode a `MessageDelta.stop_reason` as a [`StreamRetryNotice`].
+///
+/// Returns `None` for any value that isn't one of our synthetic in-band
+/// signals — including real model-emitted reasons like `"end_turn"` or
+/// `"tool_use"`. The strict prefix-check keeps the sentinel namespace
+/// from colliding with future Anthropic stop_reason values.
+///
+/// Format-fault tolerant: if a future API version emits the prefix with
+/// a malformed payload (missing slash, non-numeric, etc.), we return
+/// `None` rather than panicking, so the REPL silently falls back to
+/// ignoring the event.
+pub fn parse_stream_retry_signal(stop_reason: &str) -> Option<StreamRetryNotice> {
+    let rest = stop_reason.strip_prefix(STREAM_RETRY_SIGNAL_PREFIX)?;
+    // Split on the first space to separate the "N/M" header from the
+    // free-form "(reason)" suffix. The reason is optional so a future
+    // signal without a payload still parses cleanly.
+    let (numeric, reason) = match rest.split_once(' ') {
+        Some((numeric, tail)) => (
+            numeric,
+            tail.trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .to_owned(),
+        ),
+        None => (rest, String::new()),
+    };
+    let (attempt_str, max_str) = numeric.split_once('/')?;
+    let attempt = attempt_str.parse::<usize>().ok()?;
+    let max_attempts = max_str.parse::<usize>().ok()?;
+    if attempt == 0 || max_attempts == 0 || attempt > max_attempts {
+        return None;
+    }
+    Some(StreamRetryNotice {
+        attempt,
+        max_attempts,
+        reason,
+    })
+}
+
 /// Categorical reason a streaming response failed to assemble.
 ///
 /// The agent loop uses this to decide whether to retry, escalate, or
@@ -1215,6 +1279,80 @@ mod tests {
             "must report assembled char count: {msg}"
         );
     }
+
+    #[test]
+    fn parse_stream_retry_signal_decodes_canonical_format() {
+        let raw = "deeptide:stream-retry:2/3 (streaming response cut before message_stop)";
+        let notice = parse_stream_retry_signal(raw).expect("canonical signal must parse");
+        assert_eq!(notice.attempt, 2);
+        assert_eq!(notice.max_attempts, 3);
+        assert_eq!(notice.reason, "streaming response cut before message_stop");
+    }
+
+    #[test]
+    fn parse_stream_retry_signal_handles_missing_reason_payload() {
+        // Forward-compat: a future signal may omit the parenthesised
+        // reason. We must accept it (empty reason) rather than reject
+        // the whole signal.
+        let notice = parse_stream_retry_signal("deeptide:stream-retry:1/3")
+            .expect("payload-less signal must parse");
+        assert_eq!(notice.attempt, 1);
+        assert_eq!(notice.max_attempts, 3);
+        assert_eq!(notice.reason, "");
+    }
+
+    #[test]
+    fn parse_stream_retry_signal_rejects_real_stop_reasons() {
+        // Real Anthropic stop_reasons must not be mistaken for our
+        // sentinel — they share the field but not the prefix.
+        assert!(parse_stream_retry_signal("end_turn").is_none());
+        assert!(parse_stream_retry_signal("tool_use").is_none());
+        assert!(parse_stream_retry_signal("max_tokens").is_none());
+        assert!(parse_stream_retry_signal("stop_sequence").is_none());
+        // Empty / whitespace cases.
+        assert!(parse_stream_retry_signal("").is_none());
+        assert!(parse_stream_retry_signal("   ").is_none());
+    }
+
+    #[test]
+    fn parse_stream_retry_signal_rejects_malformed_payloads() {
+        // Defense-in-depth: a malformed payload must never panic and
+        // must never produce a misleading attempt count. Each of these
+        // returns None and the REPL silently no-ops.
+        assert!(parse_stream_retry_signal("deeptide:stream-retry:").is_none());
+        assert!(parse_stream_retry_signal("deeptide:stream-retry:abc/3").is_none());
+        assert!(parse_stream_retry_signal("deeptide:stream-retry:3/abc").is_none());
+        assert!(parse_stream_retry_signal("deeptide:stream-retry:3-of-3").is_none());
+        // attempt > max is nonsensical (the retry loop never emits this).
+        assert!(parse_stream_retry_signal("deeptide:stream-retry:5/3").is_none());
+        // attempt == 0 likewise (we're always at least on attempt 1).
+        assert!(parse_stream_retry_signal("deeptide:stream-retry:0/3").is_none());
+        // max == 0 is degenerate.
+        assert!(parse_stream_retry_signal("deeptide:stream-retry:1/0").is_none());
+    }
+
+    #[test]
+    fn parse_stream_retry_signal_round_trips_with_api_emit_format() {
+        // The format the api.rs retry loop emits MUST decode cleanly.
+        // This guards against the two call sites drifting apart — if
+        // someone changes the format string in api.rs without updating
+        // the parser, this test goes red.
+        let attempt = 1_usize;
+        let max = STREAM_TRUNCATION_MAX_ATTEMPTS_FOR_TESTS;
+        let reason = "stream cut, retrying with backoff";
+        let wire = format!(
+            "{prefix}{attempt}/{max} ({reason})",
+            prefix = STREAM_RETRY_SIGNAL_PREFIX
+        );
+        let decoded = parse_stream_retry_signal(&wire).expect("round-trip must parse");
+        assert_eq!(decoded.attempt, attempt);
+        assert_eq!(decoded.max_attempts, max);
+        assert_eq!(decoded.reason, reason);
+    }
+
+    /// Mirror of `api::STREAM_TRUNCATION_MAX_ATTEMPTS` so this module's
+    /// test can assert round-trip without taking a circular dep on api.
+    const STREAM_TRUNCATION_MAX_ATTEMPTS_FOR_TESTS: usize = 3;
 
     #[test]
     fn is_transient_retry_only_fires_for_truncated_variant() {

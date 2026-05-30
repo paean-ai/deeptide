@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AgentBackend, AgentRequest, AgentResponse, AgentUsage, ConversationMessage, MessageRole,
     StreamingEvent, StreamingHandler, ToolCall, ToolResultBlock,
-    streaming::parse_streaming_response,
+    streaming::{STREAM_RETRY_SIGNAL_PREFIX, parse_streaming_response},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,10 +368,11 @@ impl AnthropicBackend {
                     if let Some(handler) = self.streaming_handler.as_ref() {
                         handler(&StreamingEvent::MessageDelta {
                             stop_reason: Some(format!(
-                                "deeptide:stream-retry:{}/{} ({})",
+                                "{prefix}{}/{} ({})",
                                 attempt + 1,
                                 STREAM_TRUNCATION_MAX_ATTEMPTS,
-                                failure.message
+                                failure.message,
+                                prefix = STREAM_RETRY_SIGNAL_PREFIX,
                             )),
                             output_tokens: None,
                         });
