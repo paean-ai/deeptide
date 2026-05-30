@@ -10,6 +10,8 @@ fn commands() -> Vec<CommandCompletionSource> {
             "Show available commands and keybindings",
             "/help [command]",
         ),
+        CommandCompletionSource::new("exit", ["quit", "q"], "Exit the REPL", "/exit"),
+        CommandCompletionSource::new("new", Vec::<&str>::new(), "Start a new branch", "/new"),
         CommandCompletionSource::new(
             "clear",
             ["cls"],
@@ -27,9 +29,17 @@ fn help_command_lists_commands_by_swift_category_order() {
     let context = CommandContext::builder().all_commands(commands).build();
     let output = text(HelpCommand.execute("", &context));
 
-    assert!(output.contains("Deeptide commands (5):"));
+    assert!(output.contains("Deeptide commands (7):"));
     assert!(output.contains("Core"));
     assert!(output.contains("/help, /h, /?"));
+    assert!(
+        output.contains("/exit, /quit, /q"),
+        "Core section must surface /exit so users discover how to leave the REPL, got:\n{output}"
+    );
+    assert!(
+        output.contains("/new"),
+        "/new must appear in Core (not exiled to Other), got:\n{output}"
+    );
     assert!(output.contains("/clear, /cls"));
     assert!(output.contains("Model"));
     assert!(output.contains("/model, /m"));
@@ -39,6 +49,16 @@ fn help_command_lists_commands_by_swift_category_order() {
     assert!(output.contains("/commit"));
     assert!(output.contains("Keybindings: Enter=submit"));
     assert!(output.contains("Type /help <command> for details"));
+
+    // /new used to fall through to the "Other" section because it wasn't
+    // listed in help_categories(). Guard against that regression.
+    if let Some(other_idx) = output.find("\nOther\n") {
+        let other_block = &output[other_idx..];
+        assert!(
+            !other_block.contains("/new"),
+            "/new must not appear in the 'Other' section, got:\n{output}"
+        );
+    }
 }
 
 #[test]

@@ -35,8 +35,8 @@ pub use agent_loop::{
 };
 pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ThinkingConfig, ToolChoice};
 pub use commands::{
-    ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, HelpCommand,
-    MemoryCommand, NewCommand, RememberCommand, SlashCommand,
+    ClearCommand, CommandContext, CommandResult, CompactCommand, CostCommand, ExitCommand,
+    HelpCommand, MemoryCommand, NewCommand, RememberCommand, SlashCommand,
 };
 pub use completion::{
     CommandCompletionCandidate, CommandCompletionResult, CommandCompletionSource, CompletionEngine,

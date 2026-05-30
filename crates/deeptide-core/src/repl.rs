@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, ClearCommand,
     CommandCompletionSource, CommandContext, CommandResult, CompactCommand, CostCommand,
-    CostTracker, HelpCommand, MemoryCommand, NewCommand, PermissionManager, PermissionMode,
-    PermissionRules, RememberCommand, Rule, SlashCommand, Tool, ToolContext, ToolRegistry,
-    ToolResultSummaryFormatter, WriteTool,
+    CostTracker, ExitCommand, HelpCommand, MemoryCommand, NewCommand, PermissionManager,
+    PermissionMode, PermissionRules, RememberCommand, Rule, SlashCommand, Tool, ToolContext,
+    ToolRegistry, ToolResultSummaryFormatter, WriteTool,
     agent_loop::{ConversationMessage, MessageRole},
     memory::MemorySystem,
     prompt::build_system_prompt,
@@ -2141,7 +2141,7 @@ fn command_result_to_repl_events(result: CommandResult) -> Vec<ReplEvent> {
 fn repl_command_sources() -> Vec<CommandCompletionSource> {
     vec![
         CommandCompletionSource::from_command(&HelpCommand),
-        CommandCompletionSource::new("exit", ["quit", "q"], "Exit the REPL", "/exit"),
+        CommandCompletionSource::from_command(&ExitCommand),
         CommandCompletionSource::from_command(&ClearCommand),
         CommandCompletionSource::from_command(&NewCommand),
         CommandCompletionSource::from_command(&CompactCommand),
