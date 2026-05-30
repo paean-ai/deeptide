@@ -1340,6 +1340,15 @@ fn run_interactive(
         let bar_styled = status_bar::dim(&bar_text, use_color);
         if let Some(bar) = anchored.as_mut() {
             bar.repaint(&bar_styled, &spinner_lock);
+            // Pin the input prompt to the row directly above the
+            // status bar. This is what makes the input box appear
+            // "fixed" at the bottom of the terminal even while
+            // streaming output flows above: rustyline's prompt write
+            // lands at row `rows - 1`, not at the post-stream cursor
+            // position (which would scroll with conversation).
+            if bar.footer_rows() >= 2 {
+                bar.prepare_input_row(&spinner_lock);
+            }
         } else {
             writeln!(stdout, "{bar_styled}").map_err(|error| error.to_string())?;
             stdout.flush().map_err(|error| error.to_string())?;
@@ -1381,6 +1390,20 @@ fn run_interactive(
 
                 if let Err(err) = rl.add_history_entry(content.as_str()) {
                     let _ = err;
+                }
+
+                // After rustyline returned, the cursor is wherever
+                // the user's Enter left it — possibly below the input
+                // row if their text wrapped, possibly on the status
+                // row. Snap back into the scroll region so the
+                // upcoming streamed output lands above the pinned
+                // footer (not on top of the status bar). The status
+                // bar is also repainted in case input overflow
+                // scribbled across row `rows`.
+                if let Some(bar) = anchored.as_mut()
+                    && bar.footer_rows() >= 2
+                {
+                    bar.recover_to_scroll_region(&bar_styled, &spinner_lock);
                 }
 
                 // Reset per-turn streaming + spinner state.
