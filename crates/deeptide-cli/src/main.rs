@@ -51,10 +51,49 @@ enum OutputFormat {
     StreamJson,
 }
 
+/// Compile-time short version string for `-V`. Combines the static crate
+/// version with the git commit short hash and commit date captured by
+/// `build.rs`. When the binary is built outside a git checkout (e.g. from
+/// a crates.io tarball) the build script substitutes "unknown" for the
+/// git pieces; we strip those out so `--version` stays clean and doesn't
+/// announce missing metadata.
+const VERSION_SHORT: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("DEEPTIDE_GIT_HASH"),
+    " ",
+    env!("DEEPTIDE_GIT_DATE"),
+    ")"
+);
+
+/// Multi-line `--version` output. Exposes every build-provenance datum so
+/// a user filing a bug report can paste the output and unambiguously
+/// identify which binary they're running.
+const VERSION_LONG: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("DEEPTIDE_GIT_HASH"),
+    " ",
+    env!("DEEPTIDE_GIT_DATE"),
+    ")\n",
+    "commit:  ",
+    env!("DEEPTIDE_GIT_HASH"),
+    "\n",
+    "date:    ",
+    env!("DEEPTIDE_GIT_DATE"),
+    "\n",
+    "branch:  ",
+    env!("DEEPTIDE_GIT_BRANCH"),
+    "\n",
+    "rustc:   ",
+    env!("DEEPTIDE_RUSTC"),
+);
+
 #[derive(Debug, Parser)]
 #[command(
-    name = "deeptide",
-    version,
+    name = "deeptide-rs",
+    version = VERSION_SHORT,
+    long_version = VERSION_LONG,
     about = "Cross-platform Rust implementation of the Deeptide CLI.",
     long_about = "Cross-platform Rust implementation of the Deeptide CLI.\n\nThis workspace is under active parity development against the Swift Deeptide app. The current Rust increment establishes slash-command, permission, and embedded protocol parity slices."
 )]
@@ -1622,7 +1661,7 @@ fn parse_tool_restrictions(
 fn run_doctor(cli: &Cli, cwd: &Path) -> String {
     let mut lines = Vec::with_capacity(64);
 
-    lines.push(format!("Deeptide doctor  v{}", env!("CARGO_PKG_VERSION")));
+    lines.push(format!("Deeptide doctor  v{}", VERSION_SHORT));
     lines.push(String::from(
         "================================================",
     ));
@@ -1632,6 +1671,10 @@ fn run_doctor(cli: &Cli, cwd: &Path) -> String {
         std::env::consts::OS,
         std::env::consts::ARCH
     ));
+    lines.push(format!("commit    : {}", env!("DEEPTIDE_GIT_HASH")));
+    lines.push(format!("built     : {}", env!("DEEPTIDE_GIT_DATE")));
+    lines.push(format!("branch    : {}", env!("DEEPTIDE_GIT_BRANCH")));
+    lines.push(format!("rustc     : {}", env!("DEEPTIDE_RUSTC")));
     lines.push(String::new());
 
     lines.push(String::from("[ config files ]"));
@@ -2518,11 +2561,11 @@ impl EnumValue for OutputFormat {
 mod tests {
     use super::{
         Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, FIXED_ARG_SUGGESTIONS, InputFormat, OutputFormat,
-        ReplHelper, apply_config_fallbacks, build_auth_segment, collect_prompt, compute_hint,
-        configured_backend, effective_base_url, effective_model, format_retry_notice_line,
-        next_permission_mode, normalize_embedded_mode, paean_token_resolved,
-        parse_permission_response, render_system_message, summarize_tool_call_for_prompt,
-        truncate_inline, use_color, validate_formats,
+        ReplHelper, VERSION_LONG, VERSION_SHORT, apply_config_fallbacks, build_auth_segment,
+        collect_prompt, compute_hint, configured_backend, effective_base_url, effective_model,
+        format_retry_notice_line, next_permission_mode, normalize_embedded_mode,
+        paean_token_resolved, parse_permission_response, render_system_message,
+        summarize_tool_call_for_prompt, truncate_inline, use_color, validate_formats,
     };
     use clap::Parser;
     use deeptide_core::AskOutcome;
@@ -4245,5 +4288,81 @@ mod tests {
             helper.arg_completion(line, line.len()).is_none(),
             "no completion should be returned for an unknown command head"
         );
+    }
+
+    // ---------- Version provenance ----------
+    //
+    // The user complaint that motivated build.rs was:
+    //   $ deeptide-rs --version
+    //   deeptide 0.1.0
+    // ...with no way to tell *which* commit they had installed locally.
+    // These tests guard the contract that --version output remains
+    // meaningful even when build.rs falls back to "unknown" hashes.
+
+    #[test]
+    fn version_short_contains_pkg_version() {
+        let pkg = env!("CARGO_PKG_VERSION");
+        assert!(
+            VERSION_SHORT.starts_with(pkg),
+            "VERSION_SHORT must lead with the crate version, got: {VERSION_SHORT}"
+        );
+    }
+
+    #[test]
+    fn version_short_includes_provenance_envelope() {
+        // The wrapped "(hash date)" envelope is what makes the short form
+        // bug-report friendly. It must be present even when the build is
+        // outside a git checkout (in which case both fields are "unknown").
+        assert!(
+            VERSION_SHORT.contains('('),
+            "VERSION_SHORT must contain a (hash date) envelope, got: {VERSION_SHORT}"
+        );
+        assert!(VERSION_SHORT.contains(')'));
+    }
+
+    #[test]
+    fn version_long_carries_each_label() {
+        for label in ["commit:", "date:", "branch:", "rustc:"] {
+            assert!(
+                VERSION_LONG.contains(label),
+                "VERSION_LONG missing `{label}`, got:\n{VERSION_LONG}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_long_starts_with_short_form() {
+        // The first line of --version (long) is the same as -V (short) so
+        // grep / pipe-to-head workflows show the same headline either way.
+        let first_line = VERSION_LONG.lines().next().unwrap_or_default();
+        assert_eq!(
+            first_line, VERSION_SHORT,
+            "VERSION_LONG's first line must match VERSION_SHORT verbatim"
+        );
+    }
+
+    #[test]
+    fn version_env_vars_are_non_empty() {
+        // build.rs guarantees a fallback string for every variable, so even
+        // a crates.io tarball build produces a usable --version. Catch a
+        // future regression where someone removes the fallback.
+        for name in [
+            "DEEPTIDE_GIT_HASH",
+            "DEEPTIDE_GIT_DATE",
+            "DEEPTIDE_GIT_BRANCH",
+            "DEEPTIDE_RUSTC",
+        ] {
+            let value = match name {
+                "DEEPTIDE_GIT_HASH" => env!("DEEPTIDE_GIT_HASH"),
+                "DEEPTIDE_GIT_DATE" => env!("DEEPTIDE_GIT_DATE"),
+                "DEEPTIDE_GIT_BRANCH" => env!("DEEPTIDE_GIT_BRANCH"),
+                "DEEPTIDE_RUSTC" => env!("DEEPTIDE_RUSTC"),
+                _ => unreachable!(),
+            };
+            assert!(
+                !value.is_empty(),
+                "{name} must always be set to at least 'unknown' by build.rs, got empty"
+            );
+        }
     }
 }
