@@ -222,6 +222,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "deeptide-core",
+ "libc",
  "rustyline",
  "serde_json",
  "tempfile",

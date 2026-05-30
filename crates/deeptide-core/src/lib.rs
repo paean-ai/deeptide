@@ -13,6 +13,7 @@ pub mod memory;
 pub mod memory_capture;
 pub mod memory_hygiene;
 pub mod memory_rank;
+pub mod message_queue;
 pub mod permissions;
 pub mod prompt;
 pub mod repl;
@@ -56,6 +57,7 @@ pub use cost::{
 };
 pub use hooks::{HookEngine, HookEvent, HookOutcome};
 pub use markdown::{MarkdownRenderOptions, MarkdownRenderer, StreamingMarkdownRenderer};
+pub use message_queue::{MessageQueue, QueueMode};
 pub use permissions::{
     PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
     ToolInput,

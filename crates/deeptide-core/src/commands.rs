@@ -1106,7 +1106,9 @@ fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
         ("Memory", &["memory", "remember", "dream"]),
         (
             "Sessions",
-            &["resume", "retry", "sessions", "export", "copy", "paste"],
+            &[
+                "resume", "retry", "sessions", "queue", "export", "copy", "paste",
+            ],
         ),
         ("Permissions", &["permission"]),
         ("Hooks", &["hooks"]),

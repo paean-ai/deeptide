@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,7 @@ use rustyline::{
     KeyCode, KeyEvent, Modifiers, RepeatCount,
 };
 
+mod queue_input;
 mod status_bar;
 
 const DEFAULT_MODEL: &str = "deepseek-v4-pro";
@@ -618,6 +619,10 @@ const FIXED_ARG_SUGGESTIONS: &[(&[&str], &[&str])] = &[
     (&["context", "ctx"], &["files", "all"]),
     (&["debug", "dbg"], &["on", "off"]),
     (&["branch"], &["-b"]),
+    (
+        &["queue"],
+        &["list", "add", "pop", "clear", "mode", "single", "batch"],
+    ),
 ];
 
 impl ReplHelper {
@@ -888,6 +893,21 @@ fn run_interactive(
     let spinner_lock_for_retry = Arc::clone(&spinner_lock);
     let output_started_for_retry = Arc::clone(&output_started);
     let use_color_for_retry = use_color;
+
+    // Late-bound slot for the per-session message queue. We can't capture
+    // `ReplSession::message_queue_handle()` directly here because the REPL
+    // is created several blocks below; instead, the streaming handler holds
+    // a `OnceLock` and pulls the queue out the first time it sees one. The
+    // CLI fills the slot right after constructing the REPL.
+    //
+    // Wrapping in `Arc` so the handler closure can hold one clone and the
+    // post-construction "set" site holds another.
+    let queue_slot: Arc<OnceLock<Arc<Mutex<deeptide_core::MessageQueue>>>> =
+        Arc::new(OnceLock::new());
+    let queue_slot_for_handler = Arc::clone(&queue_slot);
+    let spinner_lock_for_queue = Arc::clone(&spinner_lock);
+    let use_color_for_queue = use_color;
+
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
         match event {
             StreamingEvent::TextDelta { delta, .. } => {
@@ -943,6 +963,16 @@ fn run_interactive(
             }
             _ => {}
         }
+
+        // Mid-turn type-ahead capture for the `/queue` feature. After
+        // every SSE event, opportunistically peek stdin (non-blocking,
+        // libc::poll with timeout=0 on Unix; no-op on other platforms)
+        // and consume any complete line the user typed during the turn.
+        // The cost of the peek is microseconds even when stdin is idle,
+        // so we don't gate it on the event kind.
+        if let Some(queue) = queue_slot_for_handler.get() {
+            drain_pending_stdin_into_queue(queue, &spinner_lock_for_queue, use_color_for_queue);
+        }
     });
 
     let configured = configured_backend_with_handler(cli, Some(streaming_handler))?;
@@ -988,6 +1018,13 @@ fn run_interactive(
     if let Some(append) = cli.append_system_prompt.as_deref() {
         repl = repl.with_appended_system_prompt(append);
     }
+
+    // Hand the streaming handler a stable reference to the per-session
+    // queue. Must happen AFTER `ReplSession::new` so the handle exists;
+    // setting fails iff some other code path already filled the slot
+    // (it shouldn't) — we ignore the result either way to stay
+    // forward-compatible if future code wants to pre-seed the queue.
+    let _ = queue_slot.set(repl.message_queue_handle());
 
     let rl_config = rustyline::config::Config::builder()
         .history_ignore_space(true)
@@ -1074,6 +1111,14 @@ fn run_interactive(
     let api_key_resolved = is_configured;
     let mut auth_paint_tick: u64 = 0;
 
+    // When a turn finishes with messages remaining in the queue, we
+    // populate this with the drained content so the next loop iteration
+    // submits it immediately, bypassing rustyline. Cleared as soon as it
+    // is consumed. Holds at most one entry — `drain_next_queued_prompt`
+    // already decides how to combine multiple queued messages based on
+    // `QueueMode`.
+    let mut pending_queued_input: Option<String> = None;
+
     loop {
         // Paint the status bar (anchored at row N, OR inline above the
         // prompt as a safe fallback when anchoring isn't available).
@@ -1095,7 +1140,23 @@ fn run_interactive(
             stdout.flush().map_err(|error| error.to_string())?;
         }
 
-        let readline = rl.readline(&styled_prompt);
+        // If the previous turn drained a queued prompt, fire it immediately
+        // without going through rustyline. This is what makes the queue
+        // feature feel automatic: the user typed during turn N, the queue
+        // auto-fires turn N+1 with that content. Skip the status-bar repaint
+        // loop body's `rl.readline` and synthesize an `Ok(line)` instead.
+        let readline = match pending_queued_input.take() {
+            Some(queued) => {
+                writeln!(
+                    stdout,
+                    "{}",
+                    render_queue_dispatch_notice(&queued, use_color)
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(queued)
+            }
+            None => rl.readline(&styled_prompt),
+        };
         match readline {
             Ok(line) => {
                 let trimmed = line.trim().to_owned();
@@ -1192,6 +1253,14 @@ fn run_interactive(
                         }
                     }
                 }
+
+                // The turn has finished. If the user typed any messages
+                // during it (captured via mid-turn stdin polling) OR
+                // explicitly enqueued via `/queue add`, drain the queue
+                // and stage the result for automatic submission on the
+                // next iteration. `drain_next_queued_prompt` honours the
+                // configured mode (single = pop head, batch = join all).
+                pending_queued_input = repl.drain_next_queued_prompt();
             }
             Err(ReadlineError::Interrupted) => {
                 // Shift+Tab piggy-backs on rustyline's Interrupt command to
@@ -2109,6 +2178,103 @@ fn format_retry_notice_line(notice: &deeptide_core::StreamRetryNotice, use_color
         format!("\x1b[2;36m{label}\x1b[0m\n")
     } else {
         format!("{label}\n")
+    }
+}
+
+/// Bounded single-line preview used by both the mid-turn "✚ queued"
+/// notice and the post-turn "▶ queued" dispatch notice. Collapses
+/// internal newlines to ` / ` so multi-line input doesn't break the
+/// status line, and truncates at `max_chars` characters (not bytes) so
+/// CJK content fits cleanly.
+fn queue_preview(message: &str, max_chars: usize) -> String {
+    let collapsed: String = message
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    truncate_inline(&collapsed, max_chars)
+}
+
+/// Read every pending complete line off stdin and push each into the
+/// queue. Called from the streaming handler after every SSE event.
+///
+/// Visibility: after consuming a line we print a `✚ queued (#N): …`
+/// notice on its own row so the user has positive confirmation their
+/// input was captured. The notice acquires `spinner_lock` so it can't
+/// tear a concurrent streaming write — the rest of the streaming
+/// handler uses the same lock for that reason.
+///
+/// Failure modes are swallowed (we re-try on the next event tick):
+///   * lock poisoning → can't render notice, skip
+///   * stdin EOF → poll will no longer trigger, harmless
+///   * transient read error → return; the next poll picks up the rest
+fn drain_pending_stdin_into_queue(
+    queue: &Arc<Mutex<deeptide_core::MessageQueue>>,
+    spinner_lock: &Arc<Mutex<()>>,
+    use_color: bool,
+) {
+    // Cap the per-event drain so a runaway producer can't starve the
+    // streaming handler. The loop exits naturally when stdin reports
+    // no more pending data.
+    const MAX_LINES_PER_TICK: usize = 8;
+
+    for _ in 0..MAX_LINES_PER_TICK {
+        if !queue_input::stdin_has_pending_line() {
+            break;
+        }
+        let line = match queue_input::read_pending_line() {
+            Ok(Some(line)) => line,
+            Ok(None) => break, // stdin EOF
+            Err(_) => break,
+        };
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let depth = match queue.lock() {
+            Ok(mut q) => {
+                if !q.push(trimmed) {
+                    continue;
+                }
+                q.len()
+            }
+            Err(_) => break,
+        };
+
+        // Render the per-line confirmation under the spinner lock so a
+        // concurrent stream write doesn't interleave with our newline.
+        // The leading `\r\x1b[2K` clears whatever fragment of streaming
+        // output is on the current row, then we re-emit the notice on
+        // its own row. The streaming text that arrives after this
+        // continues from the next row naturally.
+        let preview = queue_preview(trimmed, 60);
+        let line_text = if use_color {
+            format!("\r\x1b[2K\x1b[2;32m  ✚ queued (#{depth}): {preview}\x1b[0m\n")
+        } else {
+            format!("\r  ✚ queued (#{depth}): {preview}\n")
+        };
+
+        if let Ok(_guard) = spinner_lock.lock() {
+            let mut out = io::stdout();
+            let _ = out.write_all(line_text.as_bytes());
+            let _ = out.flush();
+        }
+    }
+}
+
+/// Notice printed on the row above an auto-dispatched queued prompt, so
+/// the user sees "this prompt was popped off the queue, not freshly
+/// typed". Shown immediately before the REPL submits the queued content
+/// on the next iteration.
+fn render_queue_dispatch_notice(queued: &str, use_color: bool) -> String {
+    let preview = queue_preview(queued, 80);
+    if use_color {
+        format!("\x1b[2;36m  ▶ queued → submit: {preview}\x1b[0m")
+    } else {
+        format!("  ▶ queued → submit: {preview}")
     }
 }
 

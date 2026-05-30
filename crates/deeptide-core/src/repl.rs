@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, ClearCommand,
@@ -126,6 +126,17 @@ pub struct ReplSession {
     /// Whether conversation turns are autosaved to disk. Disabled by
     /// `--no-session-persistence` for privacy / scratch sessions.
     session_persistence: bool,
+    /// Per-session message queue: lines the user typed while the agent was
+    /// busy (or explicitly enqueued via `/queue add`) accumulate here, and
+    /// the CLI drains them after each turn according to the queue's mode.
+    ///
+    /// Wrapped in `Arc<Mutex<…>>` because the CLI's streaming handler
+    /// pushes from a non-blocking stdin poll while the main thread holds
+    /// `ReplSession` — both sides need shared mutable access without
+    /// requiring the session itself to be `Sync`. Cloning the `Arc` is
+    /// cheap and the lock is held for microseconds at a time (push one
+    /// string, or drain N strings).
+    message_queue: Arc<Mutex<crate::message_queue::MessageQueue>>,
 }
 
 /// Configuration + bookkeeping for the persistent dream loop. Default state
@@ -186,6 +197,7 @@ impl ReplSession {
             session_persistence: true,
             session_end_capture: true,
             session_consolidated: false,
+            message_queue: Arc::new(Mutex::new(crate::message_queue::MessageQueue::new())),
         }
     }
 
@@ -561,6 +573,19 @@ impl ReplSession {
         if let Some(auth) = auth {
             segments.push(auth);
         }
+        // Surface message-queue depth ONLY when non-empty. We want
+        // status-bar real estate to be silent when the feature is
+        // unused; the moment something is queued (either via mid-turn
+        // type-ahead or `/queue add`), a `queue N` segment appears so
+        // the user knows automatic submits are pending. Inserted right
+        // after auth so it survives narrow-terminal truncation along
+        // with the other "active session state" indicators (model,
+        // mode, ctx, auth) — `turns` and `cost` get pruned first.
+        if let Ok(q) = self.message_queue.lock()
+            && !q.is_empty()
+        {
+            segments.push(StatusSegment::new("queue", format!("{}", q.len())));
+        }
         segments.push(StatusSegment::new(
             "turns",
             format!("{}/{}", summary.turns.len(), self.agent_loop.max_turns()),
@@ -584,6 +609,33 @@ impl ReplSession {
     /// `repl_command_sources` function.
     pub fn command_sources(&self) -> Vec<CommandCompletionSource> {
         repl_command_sources()
+    }
+
+    /// Borrow the shared message-queue handle. Callers `Arc::clone` it to
+    /// share between the main thread (which drains the queue between
+    /// turns and runs `/queue` slash commands) and the CLI's mid-turn
+    /// stdin poller (which pushes new lines into it from the streaming
+    /// handler). The handle stays valid for the entire session — the
+    /// REPL never replaces the inner queue, only mutates through it.
+    pub fn message_queue_handle(&self) -> Arc<Mutex<crate::message_queue::MessageQueue>> {
+        Arc::clone(&self.message_queue)
+    }
+
+    /// Read-only snapshot of the queued items + current mode + length,
+    /// taken under the lock. Convenience for callers that want to render
+    /// status without keeping the lock alive while writing to stdout.
+    pub fn message_queue_snapshot(&self) -> (Vec<String>, crate::message_queue::QueueMode, usize) {
+        match self.message_queue.lock() {
+            Ok(q) => (q.snapshot(), q.mode(), q.len()),
+            Err(_) => (Vec::new(), crate::message_queue::QueueMode::Single, 0),
+        }
+    }
+
+    /// Pop the next prompt from the queue according to the configured
+    /// mode. The CLI calls this after a turn ends; when it returns
+    /// `Some`, the CLI feeds that string into the next agent submit.
+    pub fn drain_next_queued_prompt(&self) -> Option<String> {
+        self.message_queue.lock().ok()?.drain_next()
     }
 
     fn execute_command(&mut self, command_line: &str) -> Vec<ReplEvent> {
@@ -648,6 +700,10 @@ impl ReplSession {
             "cron" => self.execute_cron_command(args),
             "goal" | "objective" => return self.execute_goal_command(args),
             "cache" | "kvcache" | "manifest" => self.execute_cache_command(args),
+            // `/queue`: manage the per-session message queue (lines typed
+            // mid-turn or explicitly enqueued with `/queue add`). `/q` is
+            // already taken by `/exit`, so we don't claim it as an alias.
+            "queue" => self.execute_queue_command(args),
             _ => CommandResult::Text(crate::commands::render_unknown_command(
                 &name,
                 &context.all_commands(),
@@ -1797,6 +1853,105 @@ impl ReplSession {
         all_events
     }
 
+    /// `/queue [list|clear|add <msg>|pop|mode single|mode batch]`
+    ///
+    /// Manages the per-session message queue. Lines the user types during
+    /// an active agent turn flow into this queue automatically (the CLI's
+    /// streaming handler does the actual polling); the REPL drains it
+    /// between turns according to `QueueMode`. Calling `/queue` with no
+    /// arguments is the same as `/queue list` — it shows the current
+    /// depth, mode, and a preview of each pending message so the user can
+    /// confirm what's about to fire on the next turn.
+    fn execute_queue_command(&mut self, args: &str) -> CommandResult {
+        use crate::message_queue::QueueMode;
+
+        let trimmed = args.trim();
+        let (verb, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((head, tail)) => (head, tail.trim_start()),
+            None => (trimmed, ""),
+        };
+        let verb = verb.to_ascii_lowercase();
+
+        // Lock-once snapshot for verbs that need to render OR write.
+        // Each branch acquires only what it needs.
+        match verb.as_str() {
+            "" | "list" | "show" | "ls" => {
+                let (items, mode, len) = self.message_queue_snapshot();
+                CommandResult::Text(render_queue_list(&items, mode, len))
+            }
+            "clear" | "drop" | "reset" => {
+                let cleared = match self.message_queue.lock() {
+                    Ok(mut q) => q.clear(),
+                    Err(_) => return CommandResult::Text(String::from("Queue lock poisoned.")),
+                };
+                CommandResult::Text(if cleared == 0 {
+                    String::from("Queue already empty.")
+                } else {
+                    format!("Cleared {cleared} queued message(s).")
+                })
+            }
+            "add" | "push" | "enqueue" => {
+                if rest.is_empty() {
+                    return CommandResult::Text(String::from(
+                        "Usage: /queue add <message>\n\nAdds <message> to the back of the queue. The next turn (or all queued turns in batch mode) will fire it automatically.",
+                    ));
+                }
+                let queued = match self.message_queue.lock() {
+                    Ok(mut q) => {
+                        if q.push(rest) {
+                            (q.len(), Some(format_queue_preview(rest)))
+                        } else {
+                            (q.len(), None)
+                        }
+                    }
+                    Err(_) => return CommandResult::Text(String::from("Queue lock poisoned.")),
+                };
+                match queued.1 {
+                    Some(preview) => {
+                        CommandResult::Text(format!("Queued (#{n}): {preview}", n = queued.0))
+                    }
+                    None => CommandResult::Text(String::from(
+                        "Nothing queued: the message was empty or whitespace-only.",
+                    )),
+                }
+            }
+            "pop" | "remove" => {
+                let popped = match self.message_queue.lock() {
+                    Ok(mut q) => q.pop_front(),
+                    Err(_) => return CommandResult::Text(String::from("Queue lock poisoned.")),
+                };
+                CommandResult::Text(match popped {
+                    Some(msg) => format!("Popped: {}", format_queue_preview(&msg)),
+                    None => String::from("Queue is empty; nothing to pop."),
+                })
+            }
+            "mode" => {
+                if rest.is_empty() {
+                    let (_, mode, _) = self.message_queue_snapshot();
+                    return CommandResult::Text(format!(
+                        "Current queue mode: {mode}\n  single  pop one message per turn (default)\n  batch   join the whole queue with blank lines and send as one prompt\n\nUse `/queue mode single` or `/queue mode batch` to switch.",
+                    ));
+                }
+                let parsed = match QueueMode::parse(rest) {
+                    Some(m) => m,
+                    None => {
+                        return CommandResult::Text(format!(
+                            "Unknown queue mode `{rest}`. Use `single` or `batch`.",
+                        ));
+                    }
+                };
+                match self.message_queue.lock() {
+                    Ok(mut q) => q.set_mode(parsed),
+                    Err(_) => return CommandResult::Text(String::from("Queue lock poisoned.")),
+                };
+                CommandResult::Text(format!("Queue mode set to: {parsed}"))
+            }
+            other => CommandResult::Text(format!(
+                "Unknown subcommand `/queue {other}`. Try `/queue list`, `/queue add <msg>`, `/queue pop`, `/queue clear`, or `/queue mode single|batch`.",
+            )),
+        }
+    }
+
     fn execute_cache_command(&self, args: &str) -> CommandResult {
         let raw = args.trim();
         let limit = if raw.is_empty() {
@@ -2359,7 +2514,59 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "Show recent prompt-cache diagnostics for this session",
             "/cache [limit]",
         ),
+        CommandCompletionSource::new(
+            "queue",
+            Vec::<&str>::new(),
+            "Manage the mid-turn message queue (auto-drained after each turn)",
+            "/queue [list | add <msg> | pop | clear | mode single|batch]",
+        ),
     ]
+}
+
+/// Render a single queued message as a short, single-line preview. Used
+/// by `/queue list`, `/queue add`, and `/queue pop` so the user can see
+/// what's about to fire without flooding the terminal with multi-line
+/// blobs. We cap at 80 chars in the message body and collapse interior
+/// newlines to a sentinel so the preview stays on one row.
+fn format_queue_preview(message: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let collapsed: String = message
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if collapsed.chars().count() <= MAX_CHARS {
+        collapsed
+    } else {
+        let truncated: String = collapsed.chars().take(MAX_CHARS).collect();
+        format!("{truncated}…")
+    }
+}
+
+/// Render `/queue list` output. Always shows the mode + depth, even when
+/// empty, so the user can verify their `/queue mode` toggle stuck.
+fn render_queue_list(
+    items: &[String],
+    mode: crate::message_queue::QueueMode,
+    len: usize,
+) -> String {
+    let mut lines = Vec::with_capacity(items.len() + 4);
+    lines.push(format!("Message queue: {len} pending  (mode: {mode})"));
+    if items.is_empty() {
+        lines.push(String::from(
+            "  (empty — type during a turn or use `/queue add <msg>` to populate)",
+        ));
+    } else {
+        for (i, message) in items.iter().enumerate() {
+            lines.push(format!("  {:>2}. {}", i + 1, format_queue_preview(message)));
+        }
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "Subcommands: list · add <msg> · pop · clear · mode single|batch",
+    ));
+    lines.join("\n")
 }
 
 fn unquote_path(value: &str) -> String {
