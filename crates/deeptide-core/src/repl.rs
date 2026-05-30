@@ -490,6 +490,15 @@ impl ReplSession {
         self
     }
 
+    /// Install a callback fired around every tool invocation. See
+    /// [`crate::AgentLoop::with_tool_progress_callback`] for the
+    /// semantic contract; the REPL forwards verbatim so callers
+    /// don't need to reach through `agent_loop()`.
+    pub fn with_tool_progress_callback(mut self, callback: crate::ToolProgressCallback) -> Self {
+        self.agent_loop = self.agent_loop.with_tool_progress_callback(callback);
+        self
+    }
+
     /// Update the active permission mode mid-session. Used by the
     /// Shift+Tab keybinding to cycle Default → AcceptEdits → Plan → Bypass.
     pub fn set_permission_mode(&mut self, mode: crate::permissions::PermissionMode) {

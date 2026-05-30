@@ -37,7 +37,7 @@ pub mod width;
 pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
     AgentUsage, AskOutcome, ConversationMessage, LocalEchoBackend, MessageRole,
-    PermissionAskCallback, ToolCall, ToolResultBlock,
+    PermissionAskCallback, ToolCall, ToolProgressCallback, ToolProgressEvent, ToolResultBlock,
 };
 pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ThinkingConfig, ToolChoice};
 pub use at_references::{

@@ -1233,6 +1233,41 @@ fn run_interactive(
             )
         });
 
+    // Shared state for "what tool is currently executing". The
+    // agent_loop's `tool_progress_callback` writes here under its
+    // own lock; the spinner thread reads under the same lock to
+    // render `⠦ Working · Bash(npm test) (3s)` instead of a
+    // generic `Crunching…`. `None` means "no tool in flight";
+    // we explicitly clear it on Finished so a slow follow-up text
+    // delta doesn't keep a stale tool name on the spinner.
+    let current_tool_phase: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let current_tool_phase_for_callback = Arc::clone(&current_tool_phase);
+    let tool_progress_callback: deeptide_core::ToolProgressCallback = Arc::new(
+        move |event: &deeptide_core::ToolProgressEvent| match event {
+            deeptide_core::ToolProgressEvent::Started { preview, name, .. } => {
+                // Prefer the rich preview; fall back to the bare
+                // tool name when the input was opaque (custom MCP
+                // tool with no string fields, etc.). Never leave
+                // the phase as an empty string — that's the
+                // "collapse to bare verb" signal the spinner uses
+                // for clearing state.
+                let label = if preview.trim().is_empty() {
+                    name.clone()
+                } else {
+                    preview.clone()
+                };
+                if let Ok(mut phase) = current_tool_phase_for_callback.lock() {
+                    *phase = Some(label);
+                }
+            }
+            deeptide_core::ToolProgressEvent::Finished { .. } => {
+                if let Ok(mut phase) = current_tool_phase_for_callback.lock() {
+                    *phase = None;
+                }
+            }
+        },
+    );
+
     let mut repl = ReplSession::new(configured.backend)
         .with_model(configured.model)
         .with_permission_mode(permission_mode)
@@ -1246,7 +1281,8 @@ fn run_interactive(
         .with_additional_dirs(&cli.add_dir)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config))
-        .with_ask_callback(ask_callback);
+        .with_ask_callback(ask_callback)
+        .with_tool_progress_callback(tool_progress_callback);
     if let Some(append) = cli.append_system_prompt.as_deref() {
         repl = repl.with_appended_system_prompt(append);
     }
@@ -1538,8 +1574,9 @@ fn run_interactive(
                     let stop = Arc::clone(&spinner_stop);
                     let started = Arc::clone(&output_started);
                     let lock = Arc::clone(&spinner_lock);
+                    let phase = Arc::clone(&current_tool_phase);
                     Some(thread::spawn(move || {
-                        run_spinner(&stop, &started, &lock, true)
+                        run_spinner(&stop, &started, &lock, true, &phase)
                     }))
                 } else {
                     None
@@ -1675,8 +1712,9 @@ fn run_interactive(
                     let stop = Arc::clone(&spinner_stop);
                     let started = Arc::clone(&output_started);
                     let lock = Arc::clone(&spinner_lock);
+                    let phase = Arc::clone(&current_tool_phase);
                     Some(thread::spawn(move || {
-                        run_spinner(&stop, &started, &lock, true)
+                        run_spinner(&stop, &started, &lock, true, &phase)
                     }))
                 } else {
                     None
@@ -1729,7 +1767,13 @@ fn run_interactive(
 /// pair so it visually recedes behind upcoming streamed text. The setting
 /// must match the rest of the CLI's color policy (`use_color(cli)`) so a
 /// piped or `--no-color` run never emits stray escapes.
-fn run_spinner(stop: &AtomicBool, output_started: &AtomicBool, lock: &Mutex<()>, color: bool) {
+fn run_spinner(
+    stop: &AtomicBool,
+    output_started: &AtomicBool,
+    lock: &Mutex<()>,
+    color: bool,
+    phase: &Mutex<Option<String>>,
+) {
     // Grace period so an instant response never flashes a spinner.
     thread::sleep(Duration::from_millis(150));
     let start = Instant::now();
@@ -1741,7 +1785,16 @@ fn run_spinner(stop: &AtomicBool, output_started: &AtomicBool, lock: &Mutex<()>,
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            let raw = tui::render_spinner_line(tick, start.elapsed().as_secs());
+            // Take a snapshot of the phase under its own short-lived
+            // lock so the painter doesn't hold both `lock` and
+            // `phase` at the same time — keeps the locking order
+            // shallow.
+            let phase_snapshot = phase.lock().ok().and_then(|p| p.clone());
+            let raw = tui::render_spinner_line_with_phase(
+                tick,
+                start.elapsed().as_secs(),
+                phase_snapshot.as_deref(),
+            );
             let line = status_bar::dim(&raw, color);
             let mut out = io::stdout();
             let _ = write!(out, "\r{line}\x1b[K");

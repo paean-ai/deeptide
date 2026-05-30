@@ -583,12 +583,37 @@ pub fn spinner_verb(elapsed_secs: u64) -> &'static str {
 /// Render one spinner status line, e.g. `⠹ Thinking… (6s)`. The elapsed suffix
 /// is omitted in the first second so a quick turn doesn't flash "(0s)".
 pub fn render_spinner_line(tick: usize, elapsed_secs: u64) -> String {
+    render_spinner_line_with_phase(tick, elapsed_secs, None)
+}
+
+/// Same as [`render_spinner_line`] but with an optional in-flight
+/// phase descriptor — typically the running tool (`Bash(npm test)`,
+/// `Read(/etc/hosts)`) so users know *what* is taking wall-clock
+/// time during a multi-second tool call instead of seeing only a
+/// neutral verb. The phase is inserted between the verb and the
+/// elapsed suffix:
+///
+/// ```text
+/// ⠴ Working · Bash(npm test) (3s)
+/// ⠦ Thinking…                        ← no phase, no elapsed suffix
+/// ```
+///
+/// Empty / whitespace-only phases collapse to the bare verb form
+/// so a transient `Some("")` from a race during phase clearing
+/// won't render a stray dot.
+pub fn render_spinner_line_with_phase(
+    tick: usize,
+    elapsed_secs: u64,
+    phase: Option<&str>,
+) -> String {
     let frame = spinner_frame(tick);
     let verb = spinner_verb(elapsed_secs);
-    if elapsed_secs == 0 {
-        format!("{frame} {verb}…")
-    } else {
-        format!("{frame} {verb}… ({elapsed_secs}s)")
+    let trimmed_phase = phase.map(str::trim).filter(|s| !s.is_empty());
+    match (trimmed_phase, elapsed_secs) {
+        (None, 0) => format!("{frame} {verb}…"),
+        (None, n) => format!("{frame} {verb}… ({n}s)"),
+        (Some(phase), 0) => format!("{frame} {verb} · {phase}"),
+        (Some(phase), n) => format!("{frame} {verb} · {phase} ({n}s)"),
     }
 }
 
@@ -596,7 +621,8 @@ pub fn render_spinner_line(tick: usize, elapsed_secs: u64) -> String {
 mod tests {
     use super::{
         InputBar, InputState, StatusLine, StatusSegment, TranscriptItem, TuiFrame,
-        render_output_panel, render_spinner_line, spinner_frame, spinner_verb,
+        render_output_panel, render_spinner_line, render_spinner_line_with_phase, spinner_frame,
+        spinner_verb,
     };
 
     #[test]
@@ -846,5 +872,56 @@ mod tests {
 
         let later = render_spinner_line(3, 6);
         assert!(later.contains("(6s)"), "got: {later}");
+    }
+
+    #[test]
+    fn spinner_phase_inserts_tool_descriptor_between_verb_and_elapsed() {
+        let line = render_spinner_line_with_phase(0, 5, Some("Bash(npm test)"));
+        assert!(line.contains("Bash(npm test)"), "phase missing: {line}");
+        assert!(line.contains("(5s)"), "elapsed missing: {line}");
+        // Phase replaces the ellipsis form ("Working…") with the
+        // separator ("Working · Bash(…)") so the line reads as a
+        // single statement.
+        assert!(
+            !line.contains("…"),
+            "expected no ellipsis with phase: {line}"
+        );
+        assert!(
+            line.contains(" · "),
+            "expected middle-dot separator: {line}"
+        );
+    }
+
+    #[test]
+    fn spinner_phase_at_zero_seconds_skips_elapsed_suffix() {
+        let line = render_spinner_line_with_phase(0, 0, Some("Read(file.rs)"));
+        assert!(line.contains("Read(file.rs)"));
+        assert!(!line.contains("(0s)"), "must hide elapsed at t=0: {line}");
+    }
+
+    #[test]
+    fn spinner_phase_empty_string_collapses_to_bare_verb() {
+        // A transient "Some(\"\")" can happen if the CLI clears
+        // the phase under a race; we never want a stray middle
+        // dot or trailing space showing up.
+        let line = render_spinner_line_with_phase(0, 3, Some(""));
+        assert!(line.contains("(3s)"), "elapsed still present: {line}");
+        assert!(
+            line.contains("…"),
+            "should fall back to verb-with-ellipsis: {line}"
+        );
+        assert!(
+            !line.contains(" · "),
+            "no separator with empty phase: {line}"
+        );
+    }
+
+    #[test]
+    fn spinner_phase_whitespace_only_treated_as_no_phase() {
+        let line = render_spinner_line_with_phase(0, 2, Some("   "));
+        assert!(
+            !line.contains(" · "),
+            "whitespace phase should not render: {line}"
+        );
     }
 }

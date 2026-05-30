@@ -1,7 +1,7 @@
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
     AgentUsage, AskOutcome, ContextWindowConfig, HookEngine, HookEntry, MessageRole,
-    PermissionMode, SettingsHooks, ToolCall,
+    PermissionMode, SettingsHooks, ToolCall, ToolProgressCallback, ToolProgressEvent,
 };
 use std::sync::{Arc, Mutex};
 
@@ -95,6 +95,132 @@ fn agent_loop_executes_tool_calls_and_continues() {
     assert_eq!(
         events.last(),
         Some(&AgentLoopEvent::Terminal(AgentTerminalEvent::Complete))
+    );
+}
+
+#[test]
+fn tool_progress_callback_fires_started_then_finished_with_consistent_indices() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\n").expect("write fixture");
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Snapshot {
+        Started {
+            index: usize,
+            total: usize,
+            name: String,
+            preview: String,
+        },
+        Finished {
+            index: usize,
+            total: usize,
+            name: String,
+            is_error: bool,
+        },
+    }
+
+    let snapshots: Arc<Mutex<Vec<Snapshot>>> = Arc::new(Mutex::new(Vec::new()));
+    let snapshots_for_cb = Arc::clone(&snapshots);
+    let callback: ToolProgressCallback = Arc::new(move |event: &ToolProgressEvent| {
+        let snap = match event {
+            ToolProgressEvent::Started {
+                index,
+                total,
+                name,
+                preview,
+            } => Snapshot::Started {
+                index: *index,
+                total: *total,
+                name: name.clone(),
+                preview: preview.clone(),
+            },
+            ToolProgressEvent::Finished {
+                index,
+                total,
+                name,
+                is_error,
+            } => Snapshot::Finished {
+                index: *index,
+                total: *total,
+                name: name.clone(),
+                is_error: *is_error,
+            },
+        };
+        snapshots_for_cb.lock().expect("snapshot lock").push(snap);
+    });
+
+    let mut loop_ = AgentLoop::new(Box::new(ToolCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3)
+        .with_tool_progress_callback(callback);
+
+    let _ = loop_.run("read notes");
+
+    let recorded = snapshots.lock().expect("snapshot lock").clone();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "expected exactly one Started + one Finished for the single Read call: {recorded:?}"
+    );
+    match &recorded[0] {
+        Snapshot::Started {
+            index,
+            total,
+            name,
+            preview,
+        } => {
+            assert_eq!(*index, 0);
+            assert_eq!(*total, 1);
+            assert_eq!(name, "Read");
+            assert!(
+                preview.starts_with("Read("),
+                "preview must wrap the tool name: {preview}"
+            );
+            assert!(
+                preview.contains("notes.txt"),
+                "preview must surface the descriptor: {preview}"
+            );
+        }
+        other => panic!("first event must be Started, got {other:?}"),
+    }
+    match &recorded[1] {
+        Snapshot::Finished {
+            index,
+            total,
+            name,
+            is_error,
+        } => {
+            assert_eq!(*index, 0);
+            assert_eq!(*total, 1);
+            assert_eq!(name, "Read");
+            assert!(!is_error);
+        }
+        other => panic!("second event must be Finished, got {other:?}"),
+    }
+}
+
+#[test]
+fn agent_loop_emits_tool_result_before_batch_summary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\n").expect("write fixture");
+
+    let mut loop_ = AgentLoop::new(Box::new(ToolCallingBackend::default()))
+        .with_cwd(temp.path())
+        .with_max_turns(3);
+
+    let events = loop_.run("read notes");
+
+    let result_idx = events
+        .iter()
+        .position(|event| matches!(event, AgentLoopEvent::ToolResult { .. }))
+        .expect("ToolResult must appear");
+    let summary_idx = events
+        .iter()
+        .position(|event| matches!(event, AgentLoopEvent::ToolBatchSummary { .. }))
+        .expect("ToolBatchSummary must appear");
+    assert!(
+        result_idx < summary_idx,
+        "expected ToolResult (idx {result_idx}) before ToolBatchSummary (idx {summary_idx})"
     );
 }
 
