@@ -136,17 +136,24 @@ impl AnthropicConfig {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
-            // 16K is the practical floor for tool-use workloads: a
-            // single-file HTML scaffold or a meaningful refactor easily
-            // exceeds 4K tokens in the model's `Write` payload, and
-            // when that limit is hit Anthropic still emits a clean
-            // `content_block_stop`+`message_stop` with
-            // `stop_reason: max_tokens` — leaving us with a partial,
-            // unparseable tool input. Every modern Anthropic-compatible
-            // backend (Claude 3+, DeepSeek-Chat, Paean) accepts 16K
-            // output, so this just makes the common case work without
-            // requiring `--max-tokens` on the command line.
-            max_tokens: 16_384,
+            // 64K matches the practical output cap of every modern
+            // Anthropic-compatible backend we ship against:
+            //
+            //   * Claude 4.5 Sonnet:        64K output
+            //   * DeepSeek-V4-Pro/Flash:    384K output  (1M context)
+            //   * Paean (Anthropic-format): 64K+ output
+            //   * Older Claude 3 / DeepSeek-V3.2: server-side clamped
+            //     to their own limit (8K / 16K), so requesting 64K is
+            //     safe — the API just returns whatever it supports.
+            //
+            // Defaulting to 64K closes the failure mode where a single
+            // `Write` of a non-trivial HTML/code file (~7-10K tokens)
+            // hits the budget mid-call and produces an unparseable
+            // partial tool input. We don't go higher by default because
+            // (a) 384K would be a footgun for billing on first-use and
+            // (b) for outputs larger than 64K the right design is to
+            // chunk via Edit / append-style tools rather than one-shot.
+            max_tokens: 65_536,
             auth_mode: AnthropicAuthMode::ApiKey,
             system_prompt: None,
             tool_choice: ToolChoice::Auto,
@@ -167,7 +174,7 @@ impl AnthropicConfig {
             api_key: token.into(),
             model: model.into(),
             // See `new` — same rationale, applies to bearer-auth backends too.
-            max_tokens: 16_384,
+            max_tokens: 65_536,
             auth_mode: AnthropicAuthMode::BearerToken,
             system_prompt: None,
             tool_choice: ToolChoice::Auto,

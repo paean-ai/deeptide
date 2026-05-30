@@ -645,7 +645,8 @@ fn classify_tool_input_error(
             "tool_use {name}#{id} hit the model's max_tokens budget mid-call \
              ({total_chars} chars produced before stop_reason=max_tokens){utf8_note}. \
              The partial JSON cannot be repaired by retrying with the same budget — \
-             raise --max-tokens (e.g. 16384 or 32768) or split the request into smaller pieces. \
+             raise --max-tokens (default is 65536; DeepSeek V4 accepts up to 384K) \
+             or break the request into smaller chunks using Edit/append-style edits. \
              Partial input preview: {preview}"
         ))
     } else if has_replacement {
