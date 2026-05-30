@@ -67,7 +67,10 @@ pub use safety_guard::{
     AuditInput, AuditReport, Auditor, CodeAuditor, Finding, SafetyGuard, ShellAuditor, Verdict,
 };
 pub use session::{SessionEntry, SessionStore, new_session_id};
-pub use streaming::{StreamError, StreamingEvent, StreamingHandler, parse_streaming_response};
+pub use streaming::{
+    STREAM_RETRY_SIGNAL_PREFIX, StreamError, StreamRetryNotice, StreamingEvent, StreamingHandler,
+    parse_stream_retry_signal, parse_streaming_response,
+};
 pub use tool_batch_labeler::{ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler};
 pub use tool_result_summary::ToolResultSummaryFormatter;
 pub use tools::{
