@@ -627,6 +627,20 @@ const FIXED_ARG_SUGGESTIONS: &[(&[&str], &[&str])] = &[
         &["tools", "tool"],
         &["--read-only", "--writes", "--all", "--details", "--help"],
     ),
+    (
+        &["think", "thinking", "reason", "reasoning"],
+        &[
+            "on", "off", "auto", "low", "medium", "high", "status", "budget",
+        ],
+    ),
+    (&["search", "find", "grep-chat"], &["--regex", "-r"]),
+    (
+        &["checkpoint", "snap", "snapshot"],
+        &[
+            "save", "list", "restore", "drop", "clear", "latest", "--help",
+        ],
+    ),
+    (&["rewind", "undo-turn"], &["latest", "last"]),
 ];
 
 impl ReplHelper {

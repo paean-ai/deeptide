@@ -41,6 +41,55 @@ pub struct AtReference {
     pub path: String,
 }
 
+/// Image format detected by extension. Used by the `Image` expansion
+/// status so the hint block can name the format ("png", "jpeg", "svg")
+/// for the model — this matters because Vision tool calls sometimes
+/// need to be parameterised on format, and it costs nothing to capture
+/// here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Heic,
+    Bmp,
+    Tiff,
+    Svg,
+}
+
+impl ImageKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            ImageKind::Png => "png",
+            ImageKind::Jpeg => "jpeg",
+            ImageKind::Gif => "gif",
+            ImageKind::Webp => "webp",
+            ImageKind::Heic => "heic",
+            ImageKind::Bmp => "bmp",
+            ImageKind::Tiff => "tiff",
+            ImageKind::Svg => "svg",
+        }
+    }
+
+    /// Map a file extension (lowercased, no leading dot) to a known
+    /// image kind. `None` for anything else.
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        let ext = ext.to_ascii_lowercase();
+        Some(match ext.as_str() {
+            "png" => ImageKind::Png,
+            "jpg" | "jpeg" => ImageKind::Jpeg,
+            "gif" => ImageKind::Gif,
+            "webp" => ImageKind::Webp,
+            "heic" | "heif" => ImageKind::Heic,
+            "bmp" => ImageKind::Bmp,
+            "tif" | "tiff" => ImageKind::Tiff,
+            "svg" => ImageKind::Svg,
+            _ => return None,
+        })
+    }
+}
+
 /// Result of expanding a single reference. Tracks whether content was
 /// inlined and, if not, why — so the renderer can produce helpful
 /// "skipped: too large", "skipped: binary", etc. notices.
@@ -61,6 +110,17 @@ pub enum ExpansionStatus {
     /// File appears to be binary (contains NUL bytes in the first
     /// sampled window).
     Binary,
+    /// File looks like a raster/vector image based on extension. We
+    /// don't inline its bytes (that's the multimodal API path, deferred
+    /// to a later iteration) but we DO emit an `<image>` hint block so
+    /// the model can call its Vision tool on the canonical path. This
+    /// gives `@screenshot.png` an immediately-useful affordance without
+    /// requiring multimodal content blocks on the wire.
+    Image {
+        canonical_path: PathBuf,
+        bytes: usize,
+        kind: ImageKind,
+    },
     /// File was unreadable (permission denied, I/O error, etc.).
     Unreadable { reason: String },
     /// Inlining was skipped because the per-message budget was
@@ -82,9 +142,20 @@ pub struct AttachedFile {
 }
 
 impl AttachedFile {
-    /// Was the file actually included in the expanded prompt?
+    /// Was the file actually included in the expanded prompt? Both
+    /// inlined text and image-hint blocks return `true`: from the
+    /// caller's POV both mean "the model sees this attachment" — the
+    /// difference is only in how the payload is delivered.
     pub fn is_inlined(&self) -> bool {
-        matches!(self.status, ExpansionStatus::Inlined { .. })
+        matches!(
+            self.status,
+            ExpansionStatus::Inlined { .. } | ExpansionStatus::Image { .. }
+        )
+    }
+
+    /// Did this reference resolve to an image hint?
+    pub fn is_image(&self) -> bool {
+        matches!(self.status, ExpansionStatus::Image { .. })
     }
 }
 
@@ -292,6 +363,23 @@ pub fn expand_at_references(
                 }
                 display
             }
+            ExpansionStatus::Image {
+                canonical_path,
+                bytes,
+                kind,
+            } => {
+                let display = display_relative_to(canonical_path, cwd);
+                // We don't charge the byte budget for images: their
+                // payload never enters the prompt — only a short hint
+                // does. This keeps the budget honest for text content.
+                inlined_blocks.push(render_image_hint_block(
+                    &display,
+                    canonical_path,
+                    *bytes,
+                    *kind,
+                ));
+                display
+            }
             _ => display_relative_to_or_raw(&r.path, cwd),
         };
 
@@ -338,6 +426,26 @@ fn render_inline_block(display_path: &str, content: &str) -> String {
         "<file path=\"{}\">\n{}\n</file>",
         display_path,
         content.trim_end_matches('\n')
+    )
+}
+
+/// Render a `@image.png`-style reference as an `<image>` hint instead
+/// of inlining bytes (raw image bytes need the multimodal API path,
+/// which is a separate iteration). The block deliberately gives the
+/// model both the display path AND a canonical absolute path so it can
+/// hand the latter to the `Vision` / `screen_capture` tools without
+/// having to second-guess relative-path resolution.
+fn render_image_hint_block(
+    display_path: &str,
+    canonical_path: &Path,
+    bytes: usize,
+    kind: ImageKind,
+) -> String {
+    format!(
+        "<image path=\"{display}\" absolute=\"{abs}\" format=\"{fmt}\" bytes=\"{bytes}\">\nThe user attached an image. Call the Vision tool with `image_path=\"{abs}\"` (or another tool that can read image bytes) if you need to inspect its contents.\n</image>",
+        display = display_path,
+        abs = canonical_path.display(),
+        fmt = kind.label(),
     )
 }
 
@@ -389,6 +497,23 @@ fn classify_and_read(
     }
 
     let size = metadata.len() as usize;
+
+    // Image detection happens BEFORE the size gate: a 5 MB PNG should
+    // still produce a Vision-friendly hint instead of a `TooLarge`
+    // skip. We can still record the size; the model can decide whether
+    // to fetch the image (it's never inlined in this iteration).
+    if let Some(kind) = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(ImageKind::from_extension)
+    {
+        return ExpansionStatus::Image {
+            canonical_path: path.to_path_buf(),
+            bytes: size,
+            kind,
+        };
+    }
+
     if size > options.max_per_file_bytes {
         return ExpansionStatus::TooLarge {
             bytes: size,
@@ -695,5 +820,158 @@ mod tests {
         );
         assert_eq!(r.expanded, "just a plain message");
         assert!(r.attachments.is_empty());
+    }
+
+    // ── ImageKind + image-routing tests ──────────────────────────────
+
+    #[test]
+    fn image_kind_extension_mapping_covers_common_formats() {
+        for (ext, expected) in [
+            ("png", ImageKind::Png),
+            ("PNG", ImageKind::Png),
+            ("jpg", ImageKind::Jpeg),
+            ("JPEG", ImageKind::Jpeg),
+            ("gif", ImageKind::Gif),
+            ("webp", ImageKind::Webp),
+            ("heic", ImageKind::Heic),
+            ("heif", ImageKind::Heic),
+            ("bmp", ImageKind::Bmp),
+            ("tif", ImageKind::Tiff),
+            ("tiff", ImageKind::Tiff),
+            ("svg", ImageKind::Svg),
+        ] {
+            assert_eq!(
+                ImageKind::from_extension(ext),
+                Some(expected),
+                "ext {ext:?} should map to {expected:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn image_kind_rejects_unrelated_extensions() {
+        for ext in ["rs", "txt", "json", "md", ""] {
+            assert!(
+                ImageKind::from_extension(ext).is_none(),
+                "ext {ext:?} should not be an image",
+            );
+        }
+    }
+
+    #[test]
+    fn expander_classifies_png_as_image_not_binary() {
+        let dir = tempdir().unwrap();
+        // PNG magic header; enough to look like a real PNG and contain
+        // NUL bytes (which would have triggered the binary path before).
+        let png = [
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+        ];
+        fs::write(dir.path().join("shot.png"), png).unwrap();
+        let result = expand_at_references(
+            "look at @shot.png",
+            dir.path(),
+            AtExpansionOptions::default(),
+        );
+        let status = &result.attachments[0].status;
+        match status {
+            ExpansionStatus::Image { kind, bytes, .. } => {
+                assert_eq!(*kind, ImageKind::Png);
+                assert!(*bytes > 0);
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+        // And the expanded prompt MUST carry an <image> hint block.
+        assert!(
+            result.expanded.contains("<image path=\"shot.png\""),
+            "expanded body missing image hint: {}",
+            result.expanded,
+        );
+        assert!(result.expanded.contains("Vision tool"));
+        assert!(result.expanded.contains("format=\"png\""));
+    }
+
+    #[test]
+    fn expander_image_hint_includes_absolute_path() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.jpg"), [0xFF, 0xD8, 0xFF, 0xE0]).unwrap();
+        let result = expand_at_references("see @a.jpg", dir.path(), AtExpansionOptions::default());
+        // Absolute path appears so the model can pass it to Vision tool.
+        let abs = dir.path().join("a.jpg").display().to_string();
+        assert!(
+            result.expanded.contains(&format!("absolute=\"{abs}\"")),
+            "expanded body missing abs path {abs}: {}",
+            result.expanded,
+        );
+    }
+
+    #[test]
+    fn expander_image_does_not_consume_byte_budget() {
+        // A 600 KB pretend-PNG plus a 600-byte text file with a 1 KB
+        // total budget. If images charged the budget, the text file
+        // would be `BudgetExhausted`; here it must inline.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("big.png"), vec![0u8; 600 * 1024]).unwrap();
+        fs::write(dir.path().join("notes.txt"), "hello").unwrap();
+
+        let opts = AtExpansionOptions {
+            max_per_file_bytes: 16 * 1024,
+            max_total_bytes: 1024,
+            ..AtExpansionOptions::default()
+        };
+        let result = expand_at_references("@big.png @notes.txt", dir.path(), opts);
+        assert!(matches!(
+            result.attachments[0].status,
+            ExpansionStatus::Image { .. }
+        ));
+        assert!(matches!(
+            result.attachments[1].status,
+            ExpansionStatus::Inlined { .. }
+        ));
+    }
+
+    #[test]
+    fn expander_image_uppercase_extension_is_recognised() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Pic.PNG"), [0x89, b'P', b'N', b'G']).unwrap();
+        let result = expand_at_references("@Pic.PNG", dir.path(), AtExpansionOptions::default());
+        assert!(matches!(
+            result.attachments[0].status,
+            ExpansionStatus::Image {
+                kind: ImageKind::Png,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn expander_svg_routes_as_image_even_though_textual() {
+        // SVG is XML and would otherwise inline as text — but we want
+        // the Vision-tool affordance, so the image classifier wins.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("d.svg"),
+            "<svg xmlns='http://www.w3.org/2000/svg'/>",
+        )
+        .unwrap();
+        let result = expand_at_references("@d.svg", dir.path(), AtExpansionOptions::default());
+        match &result.attachments[0].status {
+            ExpansionStatus::Image { kind, .. } => assert_eq!(*kind, ImageKind::Svg),
+            other => panic!("expected Image, got {other:?}"),
+        }
+        // The SVG's textual contents are NOT inlined as a `<file>` block.
+        assert!(!result.expanded.contains("<file path=\"d.svg\""));
+    }
+
+    #[test]
+    fn attached_file_is_image_helper_distinguishes_image_from_text() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.png"), [0x89, b'P', b'N', b'G']).unwrap();
+        fs::write(dir.path().join("b.txt"), "hi").unwrap();
+        let result =
+            expand_at_references("@a.png @b.txt", dir.path(), AtExpansionOptions::default());
+        assert!(result.attachments[0].is_image());
+        assert!(result.attachments[0].is_inlined());
+        assert!(!result.attachments[1].is_image());
+        assert!(result.attachments[1].is_inlined());
     }
 }
