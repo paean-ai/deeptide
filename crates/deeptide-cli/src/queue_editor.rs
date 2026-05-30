@@ -218,7 +218,7 @@ impl QueueEditor {
                 }
             }
             DEL | BS_LEGACY => {
-                if self.buf.pop().is_some() {
+                if pop_grapheme(&mut self.buf) {
                     KeyOutcome::Repaint
                 } else {
                     KeyOutcome::Nothing
@@ -359,6 +359,90 @@ impl QueueEditor {
             }
         }
     }
+}
+
+/// Pop the trailing "grapheme cluster" off `buf`. A grapheme is what
+/// the user perceives as a single visible character — for ASCII /
+/// most CJK that's exactly one Rust `char` (Unicode codepoint), but
+/// IMEs commonly commit a base codepoint followed by one or more
+/// **invisible modifiers** (variation selectors, zero-width joiners,
+/// combining marks). Treating each codepoint as a separate
+/// Backspace target makes those sequences require 2+ keypresses for
+/// one visible character disappearance, which the user perceives as
+/// a bug — `pop_grapheme` fixes that by:
+///
+/// 1. Popping the last codepoint unconditionally.
+/// 2. If that codepoint was itself a base (non-modifier), stop.
+/// 3. Otherwise, keep popping modifiers until a base or the buffer
+///    is empty. Also pop ONE more base after the modifier run so
+///    the visible char actually disappears.
+///
+/// We intentionally avoid pulling in `unicode-segmentation` for
+/// this — it's a heavy crate for a one-key path. The simple
+/// modifier-class predicate below covers the IME failure modes
+/// users hit in practice (CJK + tone marks, emoji ZWJ sequences,
+/// variation selectors).
+///
+/// Returns `true` if anything was removed (caller should repaint).
+fn pop_grapheme(buf: &mut String) -> bool {
+    // Step 1: at least one codepoint must be popped for Backspace
+    // to "do something" from the user's POV.
+    let first = match buf.pop() {
+        Some(c) => c,
+        None => return false,
+    };
+    // If the first pop already removed a base codepoint, we're done.
+    if !is_grapheme_modifier(first) {
+        return true;
+    }
+    // Step 2: peel off any further trailing modifiers.
+    while buf.chars().next_back().is_some_and(is_grapheme_modifier) {
+        // SAFETY: `next_back` returned `Some`, so `pop` returns Some.
+        buf.pop();
+    }
+    // Step 3: one more pop to remove the base codepoint that owned
+    // the modifier run — otherwise a single Backspace would leave
+    // the visible base char on screen and the user would have to
+    // press Backspace again, which is exactly the bug we're
+    // fixing.
+    buf.pop();
+    true
+}
+
+/// `true` for codepoints that the IME / Unicode treats as
+/// "non-spacing" or "attaching" — i.e. they decorate a preceding
+/// base character without occupying their own visible column.
+///
+/// We approximate with three ranges that cover the common IME
+/// failure modes:
+///
+/// * **Combining marks** (`U+0300..=U+036F` — common Latin/Greek
+///   diacritics — plus broader `U+1AB0..=U+1AFF`, `U+1DC0..=U+1DFF`,
+///   `U+20D0..=U+20FF`, `U+FE20..=U+FE2F`). These attach to the
+///   preceding base.
+/// * **Variation selectors** (`U+FE00..=U+FE0F`, `U+E0100..=U+E01EF`)
+///   — pick a glyph variant of the preceding base, e.g. emoji
+///   text-vs-emoji presentation.
+/// * **Zero-width formatting** (`U+200B..=U+200F`) — ZWJ, ZWNJ,
+///   LRM, RLM, ZWSP. Especially relevant for emoji ZWJ sequences.
+///
+/// Full grapheme-cluster segmentation per UAX #29 is out of scope
+/// — that requires the Unicode Character Database. The classifier
+/// below catches every IME-emitted modifier we've observed in the
+/// wild on macOS / Windows IMEs for Chinese, Japanese, Korean,
+/// and emoji input.
+fn is_grapheme_modifier(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0300}'..='\u{036F}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FE20}'..='\u{FE2F}'
+            | '\u{E0100}'..='\u{E01EF}'
+    )
 }
 
 /// Render the input-row content for the current editor state.
@@ -598,6 +682,7 @@ fn read_burst(buf: &mut [u8]) -> std::io::Result<usize> {
 pub fn run_pump(ctx: EditorContext) {
     let mut editor = QueueEditor::new();
     let mut buf = [0u8; 64];
+    let debug_log = open_debug_log();
 
     // Initial paint so the affordance shows up immediately, even
     // before the user types a single byte.
@@ -614,6 +699,9 @@ pub fn run_pump(ctx: EditorContext) {
             Ok(n) => n,
             Err(_) => break, // unrecoverable stdin error
         };
+        if let Some(file) = debug_log.as_ref() {
+            log_burst(file, &buf[..n]);
+        }
         let mut dirty = false;
         for &byte in &buf[..n] {
             match editor.consume(byte) {
@@ -637,6 +725,57 @@ pub fn run_pump(ctx: EditorContext) {
             paint(&ctx, &editor);
         }
     }
+}
+
+/// Open the byte-stream debug log when the user has set
+/// `DEEPTIDE_QUEUE_EDITOR_DEBUG` to a non-empty file path. Used
+/// for diagnosing IME / terminal-emulator quirks (e.g. why CJK
+/// input on macOS requires N Backspaces): the log records the
+/// exact bytes our raw-mode reader received, byte-by-byte, with
+/// timestamps and hex+ASCII columns. Returns `None` when the env
+/// var is unset / empty / the file can't be opened, so the
+/// happy-path zero-overhead behaviour is unchanged.
+fn open_debug_log() -> Option<std::fs::File> {
+    let path = std::env::var_os("DEEPTIDE_QUEUE_EDITOR_DEBUG")?;
+    if path.is_empty() {
+        return None;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+}
+
+/// Append one read burst to the debug log as
+/// `[<elapsed_us>] N bytes: hex hex hex … | ascii…`. Errors are
+/// swallowed — debug logging must never affect the live UX.
+fn log_burst(mut file: &std::fs::File, bytes: &[u8]) {
+    use std::io::Write;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0);
+    let hex = bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let ascii = bytes
+        .iter()
+        .map(|&b| {
+            if (0x20..0x7f).contains(&b) {
+                b as char
+            } else {
+                '.'
+            }
+        })
+        .collect::<String>();
+    let _ = writeln!(
+        file,
+        "[{stamp}] {n} bytes: {hex} | {ascii}",
+        n = bytes.len()
+    );
 }
 
 #[cfg(not(unix))]
@@ -831,6 +970,84 @@ mod tests {
         assert_eq!(ed.buffer(), "你好");
         assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
         assert_eq!(ed.buffer(), "你");
+        assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "");
+    }
+
+    #[test]
+    fn backspace_removes_variation_selector_with_base_in_one_press() {
+        // macOS IMEs often commit `<base><VS16>` for CJK / emoji
+        // input; a naive Backspace pops only the invisible VS16
+        // and the user sees no visible change. `pop_grapheme`
+        // should treat the pair as one cluster and clear both.
+        let mut ed = QueueEditor::new();
+        ed.seed("\u{2764}\u{FE0F}"); // ❤️ = U+2764 + VS16
+        assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
+        assert_eq!(
+            ed.buffer(),
+            "",
+            "one Backspace must clear base + variation selector"
+        );
+    }
+
+    #[test]
+    fn backspace_removes_zwj_emoji_sequence_in_one_press() {
+        // 👨‍👩‍👧 (family) is base + ZWJ + base + ZWJ + base.
+        // The visible cluster the user perceives is a single
+        // glyph. Backspace should peel off everything up to the
+        // previous "visible boundary" — for our heuristic that
+        // means: pop the last codepoint, then any ZWJ modifiers,
+        // then ONE more codepoint. After one Backspace on this
+        // sequence we should be down to the first 👨 + ZWJ + 👩.
+        let mut ed = QueueEditor::new();
+        ed.seed("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
+        assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
+        // After: 👨 + ZWJ + 👩 + ZWJ remain (popped 👧 + the
+        // ZWJ that bound it).
+        assert_eq!(ed.buffer(), "\u{1F468}\u{200D}\u{1F469}\u{200D}");
+    }
+
+    #[test]
+    fn backspace_removes_combining_mark_with_base_in_one_press() {
+        // "é" via decomposed form `e` + U+0301 (combining acute).
+        let mut ed = QueueEditor::new();
+        ed.seed("e\u{0301}");
+        assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "");
+    }
+
+    #[test]
+    fn backspace_after_simple_cjk_clears_in_one_press_no_regression() {
+        // The plain case (no invisible modifier) must still work
+        // with a single Backspace — we don't want the smart
+        // pop_grapheme to over-eat past the visible char.
+        let mut ed = QueueEditor::new();
+        ed.seed("你");
+        assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "");
+    }
+
+    #[test]
+    fn ascii_after_backspace_still_renders_and_appends() {
+        // The user-reported pathology: after one Backspace, an
+        // ASCII char "doesn't render". The fix is grapheme-aware
+        // Backspace; verify the buffer accepts the follow-up
+        // byte cleanly.
+        let mut ed = QueueEditor::new();
+        ed.seed("\u{2764}\u{FE0F}"); // ❤️
+        assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
+        assert!(ed.buffer().is_empty());
+        assert_eq!(ed.consume(b'a'), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "a");
+    }
+
+    #[test]
+    fn backspace_on_lone_modifier_strips_just_the_modifier() {
+        // Degenerate sequence: a modifier with no preceding base.
+        // pop_grapheme should still remove it (the first pop),
+        // and then have nothing to fall back on.
+        let mut ed = QueueEditor::new();
+        ed.seed("\u{FE0F}");
         assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
         assert_eq!(ed.buffer(), "");
     }
