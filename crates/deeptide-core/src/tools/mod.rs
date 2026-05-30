@@ -94,6 +94,16 @@ pub trait Tool: Send + Sync {
     fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult;
 }
 
+/// Lightweight, plain-data view of a registered tool. Returned by
+/// [`ToolRegistry::metadata`] so discovery surfaces (`/tools`, future
+/// docs generators) can iterate without holding a `&dyn Tool`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolMetadata {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub read_only: bool,
+}
+
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<&'static str, Box<dyn Tool>>,
@@ -190,6 +200,21 @@ impl ToolRegistry {
 
     pub fn names(&self) -> Vec<&'static str> {
         self.tools.keys().copied().collect()
+    }
+
+    /// Iterate over every registered tool's discoverable metadata
+    /// (name, description, and whether it's read-only). Used by the
+    /// `/tools` slash command and any future "list tools" surface so
+    /// callers don't have to know the static set up-front.
+    pub fn metadata(&self) -> Vec<ToolMetadata> {
+        self.tools
+            .values()
+            .map(|tool| ToolMetadata {
+                name: tool.name(),
+                description: tool.description(),
+                read_only: tool.is_read_only(),
+            })
+            .collect()
     }
 
     /// Each registered tool paired with its read-only flag, in name order.

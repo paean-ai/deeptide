@@ -425,14 +425,33 @@ impl ReplSession {
             return self.execute_command(command_line);
         }
 
+        // Expand `@path/to/file` references in the user message BEFORE
+        // forwarding to the agent. Each successfully-resolved reference
+        // gets inlined as a `<file path="…">…</file>` block in a single
+        // attachments appendix. Skipped refs (not-found, binary, too
+        // large, directory) surface as system-message notices so the
+        // user has positive feedback their `@` didn't silently bind to
+        // nothing — matches the Claude Code / Cursor UX.
+        let expansion = crate::at_references::expand_at_references(
+            trimmed,
+            &self.tool_context.cwd,
+            crate::at_references::AtExpansionOptions::default(),
+        );
+        let mut events: Vec<ReplEvent> = Vec::new();
+        if !expansion.attachments.is_empty() {
+            let notice = format_attachment_notice(&expansion);
+            events.push(ReplEvent::Output(notice));
+        }
+        let prompt_to_agent = expansion.expanded;
+
         self.user_turn_count += 1;
         let turns_before = self.agent_loop.cost_tracker().summary().turns.len();
-        let mut events: Vec<ReplEvent> = self
-            .agent_loop
-            .run(trimmed)
-            .into_iter()
-            .filter_map(agent_event_to_repl_event)
-            .collect();
+        events.extend(
+            self.agent_loop
+                .run(&prompt_to_agent)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
 
         // Record per-turn throughput and (optionally) emit debug diagnostics
         // for the turns this run produced, reading the cost summary once.
@@ -704,6 +723,9 @@ impl ReplSession {
             // mid-turn or explicitly enqueued with `/queue add`). `/q` is
             // already taken by `/exit`, so we don't claim it as an alias.
             "queue" => self.execute_queue_command(args),
+            // `/tools`: discovery surface for the agent's tool catalog.
+            // Mirrors the role `/help` plays for slash commands.
+            "tools" | "tool" => self.execute_tools_command(args),
             _ => CommandResult::Text(crate::commands::render_unknown_command(
                 &name,
                 &context.all_commands(),
@@ -1952,6 +1974,96 @@ impl ReplSession {
         }
     }
 
+    /// `/tools [filter] [--read-only|--writes|--all]`
+    ///
+    /// Lists the agent's registered tools so the user can quickly check
+    /// "do I have AppendFile?" or "what tools touch the network?".
+    /// Filter is a case-insensitive substring match against the tool
+    /// name; the optional flags partition by read-only/write capability
+    /// (default: all tools, no partitioning).
+    ///
+    /// Output layout mirrors `/help`: name in fixed-width column,
+    /// description trimmed to one line on the right. Counts on the
+    /// header line so it's obvious at a glance how many tools are
+    /// available and how many were filtered out.
+    fn execute_tools_command(&self, args: &str) -> CommandResult {
+        let mut filter: Option<String> = None;
+        let mut mode = ToolListMode::All;
+        let mut wants_details = false;
+
+        for raw in args.split_whitespace() {
+            match raw {
+                "--read-only" | "--readonly" | "--ro" => mode = ToolListMode::ReadOnly,
+                "--writes" | "--write" | "--wr" => mode = ToolListMode::Writes,
+                "--all" => mode = ToolListMode::All,
+                "--details" | "--full" | "-v" => wants_details = true,
+                "--help" | "-h" => {
+                    return CommandResult::Text(String::from(
+                        "Usage: /tools [filter] [--read-only|--writes|--all] [--details]\n\nList registered agent tools. Optional `filter` is a case-insensitive substring match on the tool name.\n\nFlags:\n  --read-only    Show only tools that don't modify state (Read, Grep, …)\n  --writes       Show only tools that can modify state (Write, Bash, …)\n  --all          Show every tool (default)\n  --details      Print each tool's full description (multi-line)",
+                    ));
+                }
+                other if !other.starts_with("--") => filter = Some(other.to_ascii_lowercase()),
+                other => {
+                    return CommandResult::Text(format!(
+                        "Unknown flag `{other}`. See `/tools --help`."
+                    ));
+                }
+            }
+        }
+
+        let all = self.tool_registry.metadata();
+        let total = all.len();
+        let mut visible: Vec<crate::tools::ToolMetadata> = all
+            .into_iter()
+            .filter(|t| match mode {
+                ToolListMode::All => true,
+                ToolListMode::ReadOnly => t.read_only,
+                ToolListMode::Writes => !t.read_only,
+            })
+            .filter(|t| match &filter {
+                Some(f) => t.name.to_ascii_lowercase().contains(f),
+                None => true,
+            })
+            .collect();
+        visible.sort_by_key(|t| t.name);
+
+        let mut lines = Vec::with_capacity(visible.len() + 3);
+        let mode_label = match mode {
+            ToolListMode::All => "all",
+            ToolListMode::ReadOnly => "read-only",
+            ToolListMode::Writes => "writes",
+        };
+        let filter_part = match &filter {
+            Some(f) => format!(" matching `{f}`"),
+            None => String::new(),
+        };
+        lines.push(format!(
+            "Tools ({} of {total}, {mode_label}){filter_part}:",
+            visible.len()
+        ));
+        if visible.is_empty() {
+            lines.push(String::from(
+                "  (no tools match — try `/tools` to see everything)",
+            ));
+        } else {
+            for t in &visible {
+                let marker = if t.read_only { "·" } else { "✎" };
+                if wants_details {
+                    lines.push(format!("  {marker} {} — {}", t.name, t.description));
+                } else {
+                    let one_line = first_line_summary(t.description, 80);
+                    lines.push(format!("  {marker} {:<22} {one_line}", t.name));
+                }
+            }
+            lines.push(String::new());
+            lines.push(String::from(
+                "Legend: `·` read-only · `✎` may modify state. Use `/tools <filter>` to narrow.",
+            ));
+        }
+
+        CommandResult::Text(lines.join("\n"))
+    }
+
     fn execute_cache_command(&self, args: &str) -> CommandResult {
         let raw = args.trim();
         let limit = if raw.is_empty() {
@@ -2182,6 +2294,91 @@ fn parse_dream_cadence(rest: &str) -> Result<usize, String> {
         ));
     }
     Ok(value)
+}
+
+/// Render the system-message line that announces `@file` expansion to
+/// the user. Shows the per-reference outcome so the user knows exactly
+/// which `@` worked and which didn't.
+///
+/// Examples:
+///   `📎 attached 1 file (3.2 KB): src/main.rs`
+///   `📎 attached 2 files (5.0 KB): a.rs, b.rs · skipped: @nope.rs (not found)`
+fn format_attachment_notice(result: &crate::at_references::ExpansionResult) -> String {
+    use crate::at_references::ExpansionStatus;
+
+    let inlined: Vec<&crate::at_references::AttachedFile> = result
+        .attachments
+        .iter()
+        .filter(|a| a.is_inlined())
+        .collect();
+    let skipped: Vec<&crate::at_references::AttachedFile> = result
+        .attachments
+        .iter()
+        .filter(|a| !a.is_inlined())
+        .collect();
+
+    let mut head = String::new();
+    if !inlined.is_empty() {
+        let total_bytes = result.total_inlined_bytes();
+        let size = humanize_bytes(total_bytes);
+        let noun = if inlined.len() == 1 { "file" } else { "files" };
+        let paths = inlined
+            .iter()
+            .map(|a| a.display_path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        head.push_str(&format!(
+            "📎 attached {} {noun} ({size}): {paths}",
+            inlined.len()
+        ));
+    } else {
+        head.push_str("📎 no files attached");
+    }
+
+    if !skipped.is_empty() {
+        let parts: Vec<String> = skipped
+            .iter()
+            .map(|a| {
+                let reason = match &a.status {
+                    ExpansionStatus::NotFound => "not found".to_owned(),
+                    ExpansionStatus::Directory => "directory".to_owned(),
+                    ExpansionStatus::Binary => "binary".to_owned(),
+                    ExpansionStatus::TooLarge { bytes, limit } => format!(
+                        "too large {} > {}",
+                        humanize_bytes(*bytes),
+                        humanize_bytes(*limit)
+                    ),
+                    ExpansionStatus::BudgetExhausted => "budget exhausted".to_owned(),
+                    ExpansionStatus::Unreadable { reason } => format!("unreadable: {reason}"),
+                    ExpansionStatus::Inlined { .. } => unreachable!(),
+                };
+                format!("{} ({reason})", a.reference)
+            })
+            .collect();
+        head.push_str(" · skipped: ");
+        head.push_str(&parts.join(", "));
+    }
+
+    head
+}
+
+/// Render a byte count using KB / MB / GB units. Two significant digits
+/// (e.g. `3.2 KB`, `1.4 MB`) — enough resolution for prompt-budget
+/// triage without making the line too long.
+fn humanize_bytes(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let n = bytes as f64;
+    if n >= GB {
+        format!("{:.1} GB", n / GB)
+    } else if n >= MB {
+        format!("{:.1} MB", n / MB)
+    } else if n >= KB {
+        format!("{:.1} KB", n / KB)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 fn format_debug_turns(turns: &[crate::TurnRecord]) -> Option<String> {
@@ -2520,7 +2717,35 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "Manage the mid-turn message queue (auto-drained after each turn)",
             "/queue [list | add <msg> | pop | clear | mode single|batch]",
         ),
+        CommandCompletionSource::new(
+            "tools",
+            ["tool"],
+            "List registered agent tools (filter, partition by read-only/writes)",
+            "/tools [filter] [--read-only|--writes|--all] [--details]",
+        ),
     ]
+}
+
+/// Sub-mode of `/tools` controlling which subset of the registry to render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolListMode {
+    All,
+    ReadOnly,
+    Writes,
+}
+
+/// Trim a tool description down to a single-line summary for the table
+/// view. Splits on the first newline, then truncates to `max_chars`
+/// graphemes-ish (chars in practice) with an ellipsis. Keeps `/tools`
+/// readable on standard 80-column terminals.
+fn first_line_summary(description: &str, max_chars: usize) -> String {
+    let first = description.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= max_chars {
+        first.to_owned()
+    } else {
+        let truncated: String = first.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{truncated}…")
+    }
 }
 
 /// Render a single queued message as a short, single-line preview. Used
