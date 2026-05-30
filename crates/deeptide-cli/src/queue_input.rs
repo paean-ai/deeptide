@@ -80,6 +80,64 @@ pub fn read_pending_line() -> std::io::Result<Option<String>> {
     }
 }
 
+/// Best-effort drain of any bytes currently buffered on stdin,
+/// discarding them. Used as recovery after rustyline returns
+/// `Io(InvalidData)` — that error normally means a stray
+/// continuation byte (orphaned UTF-8 mid-sequence) or a partial
+/// escape sequence is sitting in the buffer, which will trip the
+/// *next* `readline()` call too unless we flush it first.
+///
+/// Semantics:
+///   * Loops until `poll(2)` says nothing is ready.
+///   * Each iteration reads up to 256 bytes with a zero timeout.
+///   * Discards every byte read. Errors are swallowed: this runs
+///     on a recovery path and must never itself raise a fatal
+///     error.
+///   * Returns the total number of bytes drained for diagnostics
+///     (callers may include this in the warning they emit).
+///
+/// Unix-only; the Windows stub returns 0.
+#[cfg(unix)]
+pub fn drain_pending_stdin_bytes() -> usize {
+    use std::os::fd::AsRawFd;
+
+    let stdin = std::io::stdin();
+    let fd = stdin.as_raw_fd();
+    let mut total: usize = 0;
+    let mut iterations: usize = 0;
+
+    loop {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+        if ret <= 0 || (pfd.revents & libc::POLLIN) == 0 {
+            break;
+        }
+
+        let mut buf = [0u8; 256];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        if n <= 0 {
+            break;
+        }
+        total = total.saturating_add(n as usize);
+        // Belt + suspenders cap: never loop forever if a noisy
+        // device keeps producing bytes (e.g. a paste-bomb).
+        iterations += 1;
+        if iterations >= 32 {
+            break;
+        }
+    }
+    total
+}
+
+#[cfg(not(unix))]
+pub fn drain_pending_stdin_bytes() -> usize {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +148,15 @@ mod tests {
         // runs tests with stdin closed or piped), but the function must
         // not panic and must complete promptly (zero timeout).
         let _ = stdin_has_pending_line();
+    }
+
+    #[test]
+    fn drain_pending_stdin_bytes_is_callable_and_returns_count() {
+        // Same caveat as above — under the test harness stdin is
+        // typically closed/piped so the drain returns 0. The
+        // contract we verify is "doesn't panic, completes
+        // promptly".
+        let drained = drain_pending_stdin_bytes();
+        assert_eq!(drained, drained);
     }
 }

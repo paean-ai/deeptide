@@ -1747,7 +1747,59 @@ fn run_interactive(
                 }
                 break;
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                // Non-fatal recovery for transient rustyline failures.
+                // The previous behaviour was `return Err(...)`, which
+                // killed the REPL — losing the entire conversation,
+                // any queued messages, and any in-progress tool state
+                // — on a single stdin hiccup. In practice the kinds
+                // of errors we see here (`Io(InvalidData)` from an
+                // orphaned UTF-8 continuation byte, `Errno(EINTR)`,
+                // `WindowResize` on platforms where rustyline
+                // surfaces it as an Err, etc.) are all benign and
+                // self-correcting once we present a fresh prompt.
+                //
+                // We:
+                //   1. Surface a dim warning so the user knows we
+                //      noticed (and isn't left wondering why their
+                //      keystrokes disappeared).
+                //   2. Drain any orphan bytes still sitting in stdin
+                //      — that's almost always the root cause of an
+                //      `InvalidData`, and not draining means the
+                //      *next* readline trips the same error.
+                //   3. Save history so even if a follow-up failure
+                //      *does* escape we don't lose the user's
+                //      typed lines.
+                //   4. `continue` back to the prompt.
+                //
+                // If the failure is genuinely persistent (e.g. stdin
+                // closed forever), rustyline will keep returning the
+                // same error and the next iteration's `readline()`
+                // will hit it again — we'll keep printing the
+                // warning, which is annoying but recoverable.
+                // `Ctrl-D` still works because `Eof` is matched
+                // above this arm.
+                let detail = error.to_string();
+                let drained = queue_input::drain_pending_stdin_bytes();
+                let warn = if drained == 0 {
+                    format!("  input recovered ({detail})")
+                } else {
+                    format!(
+                        "  input recovered ({detail}; discarded {drained} stray byte{plural})",
+                        plural = if drained == 1 { "" } else { "s" }
+                    )
+                };
+                let line = if use_color {
+                    format!("\x1b[2m{warn}\x1b[0m")
+                } else {
+                    warn
+                };
+                let _ = writeln!(stdout, "{line}");
+                if let Some(ref path) = history_path {
+                    save_history(&mut rl, path);
+                }
+                continue;
+            }
         }
     }
 
