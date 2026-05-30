@@ -547,6 +547,40 @@ struct ReplHelper {
     use_color: bool,
 }
 
+/// Static argument-completion table for slash commands whose first argument
+/// is drawn from a small fixed value set. Each entry pairs *all accepted
+/// heads* (canonical name + aliases) with the candidate values, so e.g.
+/// typing `/perm --` and `/permissions --` both yield the same suggestions.
+///
+/// New commands with closed-set first arguments should be added here rather
+/// than special-cased in `Completer::complete`.
+///
+/// `/model` and `/help` are handled separately because their value sets are
+/// dynamic (built from `known_models()` and the live command registry,
+/// respectively).
+const FIXED_ARG_SUGGESTIONS: &[(&[&str], &[&str])] = &[
+    (
+        &["permission", "perm", "permissions"],
+        &["--allow", "--deny", "--remove", "--list"],
+    ),
+    (&["cost"], &["show", "hide", "breakdown"]),
+    (&["provider", "profiles"], &["list", "use", "status"]),
+    (&["tps", "speed"], &["--json", "--reset"]),
+    (&["update", "upgrade"], &["--check", "--force"]),
+    (&["dream"], &["run", "status"]),
+    (&["cron"], &["list", "delete"]),
+    (&["goal", "objective"], &["status", "clear"]),
+    (&["config"], &["show"]),
+    (&["clear", "cls"], &["--yes"]),
+    (&["new"], &["--yes"]),
+    (&["compact", "compress"], &["--yes"]),
+    (&["reminder", "anchor", "reorient"], &["show", "send"]),
+    (&["sessions", "session"], &["latest", "today"]),
+    (&["context", "ctx"], &["files", "all"]),
+    (&["debug", "dbg"], &["on", "off"]),
+    (&["branch"], &["-b"]),
+];
+
 impl ReplHelper {
     fn new(commands: Vec<CommandCompletionSource>, use_color: bool) -> Self {
         // Argument completion for `/model <name>`: the built-in catalog plus the
@@ -563,10 +597,121 @@ impl ReplHelper {
             use_color,
         }
     }
+
+    /// Walk the dynamic argument-completion specs (model, help) and the
+    /// static `FIXED_ARG_SUGGESTIONS` table, returning the first match.
+    /// Each `command` head is tried against `value_completions`, which
+    /// already enforces that the typed token sits in the first-arg slot.
+    fn arg_completion(&self, line: &str, pos: usize) -> Option<(usize, Vec<Pair>)> {
+        // Dynamic: /model <name>
+        let model_refs: Vec<&str> = self.models.iter().map(String::as_str).collect();
+        for head in ["model", "m"] {
+            if let Some(values) =
+                CompletionEngine::value_completions(line, pos, head, &model_refs, 8)
+            {
+                return Some(pairs_from_values(values.token_start, &values.candidates));
+            }
+        }
+
+        // Dynamic: /help <command-name> — surfaces every registered command
+        // (and its aliases) so /help <Tab> works as a "list everything"
+        // affordance distinct from /help showing categorised output.
+        let mut help_targets: Vec<String> = Vec::with_capacity(self.commands.len() * 2);
+        for cmd in &self.commands {
+            help_targets.push(cmd.name.clone());
+            help_targets.extend(cmd.aliases.clone());
+        }
+        let help_refs: Vec<&str> = help_targets.iter().map(String::as_str).collect();
+        for head in ["help", "h", "?"] {
+            if let Some(values) =
+                CompletionEngine::value_completions(line, pos, head, &help_refs, 8)
+            {
+                return Some(pairs_from_values(values.token_start, &values.candidates));
+            }
+        }
+
+        // Static fixed-value table.
+        for (heads, values) in FIXED_ARG_SUGGESTIONS {
+            for head in *heads {
+                if let Some(result) =
+                    CompletionEngine::value_completions(line, pos, head, values, 8)
+                {
+                    return Some(pairs_from_values(result.token_start, &result.candidates));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Compute the inline ghost-text hint for a partially-typed slash
+    /// command. Returns the *tail* (the characters that would be inserted
+    /// if the user accepted the hint) when there is exactly one prefix
+    /// match in the registered command set. Multiple matches → no hint
+    /// (the user should press Tab to see the list and disambiguate);
+    /// substring/fuzzy matches → no hint (would be visually misleading);
+    /// cursor not at end of line → no hint (mid-edit cursor noise).
+    ///
+    /// Exposed at module scope as `compute_hint` so it's unit-testable
+    /// without a full rustyline `Context`.
+    fn compute_hint(&self, line: &str, pos: usize) -> Option<String> {
+        compute_hint(line, pos, &self.commands)
+    }
+}
+
+fn pairs_from_values(token_start: usize, values: &[String]) -> (usize, Vec<Pair>) {
+    let pairs = values
+        .iter()
+        .map(|value| Pair {
+            display: value.clone(),
+            replacement: value.clone(),
+        })
+        .collect();
+    (token_start, pairs)
+}
+
+/// Pure-function inline-hint logic; see `ReplHelper::compute_hint` for the
+/// behavioural contract. Lives outside the impl block so unit tests can
+/// drive it with a synthetic command list and no rustyline state.
+fn compute_hint(line: &str, pos: usize, commands: &[CommandCompletionSource]) -> Option<String> {
+    if pos != line.chars().count() {
+        return None;
+    }
+    let result = CompletionEngine::command_completions(line, pos, commands, 64)?;
+
+    // Only hint on clean *prefix* matches against either the canonical name
+    // (score == 0) or an alias (score == 1). Substring/contains hits (scores
+    // 2 / 3) would jump the hint to a non-adjacent character range which is
+    // visually misleading.
+    let prefix_hits: Vec<_> = result.candidates.iter().filter(|c| c.score <= 1).collect();
+    if prefix_hits.len() != 1 {
+        return None;
+    }
+    let candidate = prefix_hits[0];
+    let target = &candidate.matched_text;
+    let typed_len = result.typed.chars().count();
+    let target_len = target.chars().count();
+    if target_len <= typed_len {
+        return None;
+    }
+    let tail: String = target.chars().skip(typed_len).collect();
+    Some(tail)
 }
 
 impl Helper for ReplHelper {}
-impl Highlighter for ReplHelper {}
+
+impl Highlighter for ReplHelper {
+    fn highlight_hint<'h>(&self, hint: &'h str) -> std::borrow::Cow<'h, str> {
+        if self.use_color {
+            // ANSI dim + faint-grey (24-bit-safe SGR pair: 2;90). Keeps the
+            // ghost text visibly distinct from the user's typed input on
+            // both light and dark terminal themes.
+            std::borrow::Cow::Owned(format!("\x1b[2;90m{hint}\x1b[0m"))
+        } else {
+            std::borrow::Cow::Borrowed(hint)
+        }
+    }
+}
 
 impl Validator for ReplHelper {
     fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
@@ -585,8 +730,8 @@ impl Validator for ReplHelper {
 
 impl Hinter for ReplHelper {
     type Hint = String;
-    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        None
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        self.compute_hint(line, pos)
     }
 }
 
@@ -601,21 +746,11 @@ impl Completer for ReplHelper {
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
         let Some(result) = CompletionEngine::command_completions(line, pos, &self.commands, 8)
         else {
-            // No command-name match: try completing a known command argument,
-            // currently `/model <name>`.
-            let model_refs: Vec<&str> = self.models.iter().map(String::as_str).collect();
-            if let Some(values) =
-                CompletionEngine::value_completions(line, pos, "model", &model_refs, 8)
-            {
-                let pairs = values
-                    .candidates
-                    .iter()
-                    .map(|value| Pair {
-                        display: value.clone(),
-                        replacement: value.clone(),
-                    })
-                    .collect();
-                return Ok((values.token_start, pairs));
+            // No command-name match: walk the broader argument-completion
+            // table (model, help <cmd>, permission flags, cost actions,
+            // provider sub-verbs, etc.).
+            if let Some(pairs) = self.arg_completion(line, pos) {
+                return Ok(pairs);
             }
             return Ok((pos, vec![]));
         };
@@ -2382,14 +2517,16 @@ impl EnumValue for OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, InputFormat, OutputFormat, apply_config_fallbacks,
-        build_auth_segment, collect_prompt, configured_backend, effective_base_url,
-        effective_model, format_retry_notice_line, next_permission_mode, normalize_embedded_mode,
-        paean_token_resolved, parse_permission_response, render_system_message,
-        summarize_tool_call_for_prompt, truncate_inline, use_color, validate_formats,
+        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, FIXED_ARG_SUGGESTIONS, InputFormat, OutputFormat,
+        ReplHelper, apply_config_fallbacks, build_auth_segment, collect_prompt, compute_hint,
+        configured_backend, effective_base_url, effective_model, format_retry_notice_line,
+        next_permission_mode, normalize_embedded_mode, paean_token_resolved,
+        parse_permission_response, render_system_message, summarize_tool_call_for_prompt,
+        truncate_inline, use_color, validate_formats,
     };
     use clap::Parser;
     use deeptide_core::AskOutcome;
+    use deeptide_core::CommandCompletionSource;
     use deeptide_core::permissions::PermissionMode;
     use deeptide_core::{
         AnthropicAuthMode, ConfigData, ProviderProfile, SystemMessage, ThinkingConfig,
@@ -3882,5 +4019,231 @@ mod tests {
         }
         assert!(!paean_token_resolved());
         clear_api_env();
+    }
+
+    // ---------- Slash-command completion & ghost-text hint ----------
+    //
+    // These tests cover the user-reported gaps:
+    //   * `/exit` must appear in the registered command list (regression
+    //     against accidentally removing it from `repl_command_sources`)
+    //   * Tab completion for partial command names must surface candidates
+    //   * Inline hint shows only on unambiguous prefix matches
+    //   * The expanded argument-completion table (FIXED_ARG_SUGGESTIONS)
+    //     covers /permission, /cost, /provider, /tps, /update, /dream,
+    //     /cron, /goal, /config, /clear --yes, /new --yes, /compact --yes,
+    //     /reminder, /sessions, /context, /debug, /branch.
+
+    fn sample_commands() -> Vec<CommandCompletionSource> {
+        vec![
+            CommandCompletionSource::new(
+                "help",
+                ["h", "?"],
+                "Show available commands and keybindings",
+                "/help [command]",
+            ),
+            CommandCompletionSource::new("exit", ["quit", "q"], "Exit the REPL", "/exit"),
+            CommandCompletionSource::new("export", Vec::<&str>::new(), "Export", "/export"),
+            CommandCompletionSource::new("memory", ["mem"], "Manage memory", "/memory"),
+            CommandCompletionSource::new("model", ["m"], "Switch model", "/model <name>"),
+            CommandCompletionSource::new(
+                "permission",
+                ["perm", "permissions"],
+                "Manage permissions",
+                "/permission",
+            ),
+            CommandCompletionSource::new("cost", Vec::<&str>::new(), "Cost", "/cost"),
+            CommandCompletionSource::new(
+                "provider",
+                ["profiles"],
+                "Provider profiles",
+                "/provider",
+            ),
+        ]
+    }
+
+    fn helper() -> ReplHelper {
+        ReplHelper::new(sample_commands(), false)
+    }
+
+    #[test]
+    fn hint_offers_completion_tail_when_prefix_is_unambiguous() {
+        // `/exi` only matches `/exit` as a prefix → hint should be "t".
+        let line = "/exi";
+        assert_eq!(
+            compute_hint(line, line.len(), &sample_commands()).as_deref(),
+            Some("t")
+        );
+    }
+
+    #[test]
+    fn hint_is_empty_for_ambiguous_prefix() {
+        // `/ex` matches both /exit and /export → no hint, user must Tab.
+        let line = "/ex";
+        assert!(
+            compute_hint(line, line.len(), &sample_commands()).is_none(),
+            "ambiguous /ex must not ghost-text — let Tab show the candidate list"
+        );
+    }
+
+    #[test]
+    fn hint_is_empty_for_complete_command() {
+        // Already typed the full name → no trailing ghost text.
+        let line = "/exit";
+        assert!(compute_hint(line, line.len(), &sample_commands()).is_none());
+    }
+
+    #[test]
+    fn hint_is_empty_when_cursor_not_at_end() {
+        // Cursor mid-word: hint would visually clash with the typed tail.
+        let line = "/exit";
+        // pos=3 means cursor sits after "/ex" — hint would still be unambiguous
+        // for the prefix, but rendering it past in-progress edits is jarring.
+        assert!(compute_hint(line, 3, &sample_commands()).is_none());
+    }
+
+    #[test]
+    fn hint_is_empty_for_bare_slash() {
+        // Just `/` → every command matches as score 0 → no hint.
+        let line = "/";
+        assert!(compute_hint(line, line.len(), &sample_commands()).is_none());
+    }
+
+    #[test]
+    fn hint_is_empty_for_non_slash_input() {
+        let line = "hello";
+        assert!(compute_hint(line, line.len(), &sample_commands()).is_none());
+    }
+
+    #[test]
+    fn hint_completes_aliases_when_uniquely_typed() {
+        // `/quit` is an alias for `/exit` and shouldn't appear as a hint —
+        // the alias is itself a complete command. `/qui` should hint `t`
+        // (matched_text is the alias "quit").
+        let line = "/qui";
+        let hint = compute_hint(line, line.len(), &sample_commands());
+        assert_eq!(
+            hint.as_deref(),
+            Some("t"),
+            "hint should complete /quit → /quit (alias path)"
+        );
+    }
+
+    #[test]
+    fn arg_completion_table_contains_critical_commands() {
+        // Sanity check: the table the user expects to feed argument
+        // suggestions doesn't silently shrink.
+        let heads: Vec<&str> = FIXED_ARG_SUGGESTIONS
+            .iter()
+            .flat_map(|(heads, _)| heads.iter().copied())
+            .collect();
+        for required in [
+            "permission",
+            "cost",
+            "provider",
+            "tps",
+            "update",
+            "dream",
+            "cron",
+            "goal",
+            "config",
+            "clear",
+            "new",
+            "compact",
+            "reminder",
+            "sessions",
+            "context",
+            "debug",
+            "branch",
+        ] {
+            assert!(
+                heads.contains(&required),
+                "FIXED_ARG_SUGGESTIONS dropped /{required}; table is now: {heads:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn arg_completion_resolves_permission_flag() {
+        let helper = helper();
+        let line = "/permission --a";
+        let (token_start, pairs) = helper
+            .arg_completion(line, line.len())
+            .expect("/permission --a must suggest --allow");
+        assert_eq!(token_start, "/permission ".len());
+        let suggestions: Vec<String> = pairs.iter().map(|p| p.replacement.clone()).collect();
+        assert!(
+            suggestions.iter().any(|s| s == "--allow"),
+            "expected --allow in suggestions, got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn arg_completion_resolves_permission_via_short_alias() {
+        let helper = helper();
+        // Critical: aliases must trigger the same arg completion as the
+        // canonical name. Previous implementation only matched canonical.
+        let line = "/perm --d";
+        let pairs = helper
+            .arg_completion(line, line.len())
+            .expect("/perm alias must surface the permission arg list");
+        let suggestions: Vec<String> = pairs.1.iter().map(|p| p.replacement.clone()).collect();
+        assert!(
+            suggestions.iter().any(|s| s == "--deny"),
+            "expected --deny via alias /perm, got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn arg_completion_resolves_cost_action() {
+        let helper = helper();
+        let line = "/cost s";
+        let pairs = helper
+            .arg_completion(line, line.len())
+            .expect("/cost s must suggest 'show'");
+        let suggestions: Vec<String> = pairs.1.iter().map(|p| p.replacement.clone()).collect();
+        assert!(
+            suggestions.contains(&"show".to_owned()),
+            "got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn arg_completion_resolves_provider_subverb() {
+        let helper = helper();
+        let line = "/provider l";
+        let pairs = helper
+            .arg_completion(line, line.len())
+            .expect("/provider l must suggest 'list'");
+        let suggestions: Vec<String> = pairs.1.iter().map(|p| p.replacement.clone()).collect();
+        assert!(
+            suggestions.contains(&"list".to_owned()),
+            "got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn arg_completion_resolves_help_for_registered_command() {
+        let helper = helper();
+        // `/help mem` should surface "memory" from the dynamic registered
+        // command list (not the static FIXED_ARG_SUGGESTIONS table).
+        let line = "/help mem";
+        let pairs = helper
+            .arg_completion(line, line.len())
+            .expect("/help mem must surface registered command names");
+        let suggestions: Vec<String> = pairs.1.iter().map(|p| p.replacement.clone()).collect();
+        assert!(
+            suggestions.iter().any(|s| s == "memory"),
+            "expected memory in /help completion, got {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn arg_completion_for_unknown_command_returns_none() {
+        let helper = helper();
+        let line = "/notacommand foo";
+        assert!(
+            helper.arg_completion(line, line.len()).is_none(),
+            "no completion should be returned for an unknown command head"
+        );
     }
 }

@@ -291,6 +291,46 @@ impl CommandContextBuilder {
     }
 }
 
+/// Exit the REPL.
+///
+/// Implemented as a first-class `SlashCommand` so it appears in `/help`,
+/// in tab-completion candidates, and survives a future refactor where
+/// the dispatch switches from hand-rolled string matches to a typed
+/// registry. Aliases match the long-standing dispatch:
+///
+///   /exit, /quit, /q   →   CommandResult::Exit
+///
+/// The REPL's `execute_command` still short-circuits on the same set of
+/// names *before* this struct is dispatched — that ordering is intentional
+/// because exiting needs to drive `finalize_session()` (history save +
+/// goodbye message), which only the REPL itself can do. The struct is
+/// here so the command is *discoverable* and *unit-testable* in pure
+/// `deeptide-core` without spinning up a full REPL.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ExitCommand;
+
+impl SlashCommand for ExitCommand {
+    fn name(&self) -> &'static str {
+        "exit"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["quit", "q"]
+    }
+
+    fn description(&self) -> &'static str {
+        "Exit the REPL"
+    }
+
+    fn usage(&self) -> &'static str {
+        "/exit"
+    }
+
+    fn execute(&self, _args: &str, _context: &CommandContext) -> CommandResult {
+        CommandResult::Exit
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HelpCommand;
 
@@ -716,6 +756,7 @@ fn has_yes_flag(args: &str) -> bool {
 fn builtin_command_sources() -> Vec<CommandCompletionSource> {
     vec![
         CommandCompletionSource::from_command(&HelpCommand),
+        CommandCompletionSource::from_command(&ExitCommand),
         CommandCompletionSource::from_command(&ClearCommand),
         CommandCompletionSource::from_command(&NewCommand),
         CommandCompletionSource::from_command(&CompactCommand),
@@ -1058,7 +1099,7 @@ fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
         (
             "Core",
             &[
-                "help", "exit", "clear", "compact", "status", "cost", "reminder", "goal",
+                "help", "exit", "new", "clear", "compact", "status", "cost", "reminder", "goal",
             ],
         ),
         ("Model", &["model", "provider", "fast", "tps"]),
