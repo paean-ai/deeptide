@@ -155,6 +155,7 @@ impl ToolRegistry {
         registry.register(Box::<SleepTool>::default());
         registry.register(Box::<WriteTool>::default());
         registry.register(Box::<EditTool>::default());
+        registry.register(Box::<AppendFileTool>::default());
         registry.register(Box::<BashTool>::default());
         registry.register(Box::<BashOutputTool>::default());
         registry.register(Box::<KillBashTool>::default());
@@ -762,6 +763,7 @@ impl AgentDefinition {
                     "ExitPlanMode",
                     "Write",
                     "Edit",
+                    "AppendFile",
                     "MemoryWrite",
                     "TaskStop",
                 ],
@@ -3406,6 +3408,13 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
         "WebFetch" => vec!["url", "http", "fetch", "page"],
         "WebSearch" => vec!["web", "internet", "search", "brave", "serper"],
         "Write" => vec!["create", "overwrite", "new file"],
+        "AppendFile" => vec![
+            "append",
+            "incremental write",
+            "chunk",
+            "large file",
+            "extend file",
+        ],
         _ => Vec::new(),
     }
 }
@@ -3796,6 +3805,189 @@ impl Tool for EditTool {
             String::from("1 occurrence")
         };
         ToolResult::text(format!("File edited successfully: {name} ({occurrence})"))
+    }
+}
+
+/// Append text to a file (creating it if it doesn't exist).
+///
+/// Companion to `Write` for *incremental* file construction: when the desired
+/// output exceeds the model's `max_tokens` budget, the model can `Write` a
+/// skeleton and then call `AppendFile` repeatedly for each subsequent chunk,
+/// instead of attempting a single oversized `Write` that risks mid-stream
+/// truncation. This matches the same chunked-build pattern the Edit tool
+/// already enables for targeted modifications.
+///
+/// Contract:
+///   * `file_path` (required, non-empty string) — relative paths resolve
+///     against the workspace, identical to Write.
+///   * `content` (required string) — text to append verbatim, after line-
+///     ending normalization (`\r\n` / lone `\r` → `\n`) to match Write.
+///   * `ensure_trailing_newline` (optional bool, default true) — when the
+///     file does not already end in a newline, insert exactly one `\n`
+///     between the existing tail and the new chunk so logically separate
+///     sections do not collide on the same line. Set to `false` for callers
+///     that need byte-exact concatenation (binary-ish text, partial-line
+///     resumption).
+///
+/// Behaviour:
+///   * If the file does not exist, it is created with `content` (parent
+///     dirs auto-created), exactly like Write.
+///   * If the file exists, it is opened in append mode (`OpenOptions::new()
+///     .append(true)`) so we never read+rewrite the whole file — this keeps
+///     append cost O(chunk_size) regardless of file size and avoids
+///     accidentally clobbering concurrent edits.
+///   * Sensitive-file policy is enforced identically to Write/Edit.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AppendFileTool;
+
+impl Tool for AppendFileTool {
+    fn name(&self) -> &'static str {
+        "AppendFile"
+    }
+
+    fn description(&self) -> &'static str {
+        "Append UTF-8 text to a file (creates the file if missing). Use this instead of multiple Write calls when building large files incrementally."
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn call(&self, input: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error(
+                "AppendFile requires JSON with both `file_path` and `content`. Example: {\"file_path\":\"roguelike.html\",\"content\":\"<chunk>\"}. Retry with the exact requested file path and the chunk to append.",
+            );
+        };
+        if file_path.trim().is_empty() {
+            return ToolResult::error(
+                "AppendFile requires JSON with both `file_path` and `content`. Example: {\"file_path\":\"roguelike.html\",\"content\":\"<chunk>\"}. Retry with the exact requested file path and the chunk to append.",
+            );
+        }
+
+        let Some(content) = input.get("content").and_then(serde_json::Value::as_str) else {
+            return ToolResult::error(
+                "AppendFile requires a string `content` field containing the chunk to append. Retry with JSON keys exactly `file_path` and `content`.",
+            );
+        };
+
+        let ensure_trailing_newline = input
+            .get("ensure_trailing_newline")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+
+        let path = context.resolve_path(file_path);
+        if !crate::sensitive_file::is_allowed(&path) {
+            return ToolResult::error(crate::sensitive_file::denial_message(&path));
+        }
+
+        let existed = path.exists();
+        if !existed
+            && let Some(parent) = path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            return ToolResult::error(format!(
+                "Failed to create parent directory {}: {error}",
+                parent.display()
+            ));
+        }
+
+        // Inject at most one separator newline only when the file is non-empty
+        // and does not already end in `\n`. We deliberately probe the existing
+        // file's terminal byte rather than rewriting the file, so the operation
+        // stays a pure append.
+        let needs_separator = if ensure_trailing_newline && existed {
+            match file_ends_with_newline(&path) {
+                Ok(true) => false,
+                Ok(false) => true,
+                Err(result) => return result,
+            }
+        } else {
+            false
+        };
+
+        let normalized = normalize_line_endings(content);
+
+        let mut file = match fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                return ToolResult::error(format!("Failed to open {}: {error}", path.display()));
+            }
+        };
+
+        let mut written = 0usize;
+        if needs_separator {
+            if let Err(error) = io::Write::write_all(&mut file, b"\n") {
+                return ToolResult::error(format!(
+                    "Failed to append separator to {}: {error}",
+                    path.display()
+                ));
+            }
+            written += 1;
+        }
+
+        if let Err(error) = io::Write::write_all(&mut file, normalized.as_bytes()) {
+            return ToolResult::error(format!("Failed to append to {}: {error}", path.display()));
+        }
+        written += normalized.len();
+
+        // Flush before reporting size so a downstream Read sees the chunk.
+        if let Err(error) = io::Write::flush(&mut file) {
+            return ToolResult::error(format!("Failed to flush {}: {error}", path.display()));
+        }
+
+        let action = if existed { "Appended to" } else { "Created" };
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(file_path);
+        let total_size = match fs::metadata(&path) {
+            Ok(meta) => format_byte_count(usize::try_from(meta.len()).unwrap_or(usize::MAX)),
+            Err(_) => format_byte_count(written),
+        };
+        ToolResult::text(format!(
+            "{action} file: {name} (+{}, total {})\nPath: {}",
+            format_byte_count(written),
+            total_size,
+            path.display()
+        ))
+    }
+}
+
+/// Probe whether `path` ends with a `\n` without reading the full file.
+/// Uses `seek(End - 1)` + a single-byte read so the cost is O(1) regardless
+/// of file size — important because `AppendFile` may be called many times
+/// against a growing file.
+fn file_ends_with_newline(path: &Path) -> Result<bool, ToolResult> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(error) => {
+            return Err(ToolResult::error(format!(
+                "Failed to read {} to check trailing newline: {error}",
+                path.display()
+            )));
+        }
+    };
+    let metadata = match file.metadata() {
+        Ok(m) => m,
+        Err(error) => {
+            return Err(ToolResult::error(format!(
+                "Failed to stat {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    if metadata.len() == 0 {
+        return Ok(true); // empty: treat as "already terminated"
+    }
+    if file.seek(SeekFrom::End(-1)).is_err() {
+        return Ok(false);
+    }
+    let mut buf = [0u8; 1];
+    match file.read_exact(&mut buf) {
+        Ok(()) => Ok(buf[0] == b'\n'),
+        Err(_) => Ok(false),
     }
 }
 

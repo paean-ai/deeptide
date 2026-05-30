@@ -93,6 +93,7 @@ const USING_TOOLS_SECTION: &str = "\
   - To read files use Read instead of cat, head, tail, or sed.
   - To edit files use Edit instead of sed or awk.
   - To write files use Write instead of cat with heredoc or echo redirection.
+  - For very large file outputs that risk exceeding your max output budget in a single tool call, prefer the chunked pattern: emit a skeleton with Write, then call AppendFile repeatedly for each subsequent section. A truncated one-shot Write produces unparseable JSON; many small AppendFile calls do not.
   - To find files use Glob instead of find or ls.
   - To search file contents use Grep instead of grep or rg.
   - Reserve Bash for builds, tests, git, package managers, and shell-only operations.
