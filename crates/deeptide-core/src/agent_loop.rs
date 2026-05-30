@@ -290,6 +290,9 @@ pub struct AgentLoop {
     /// backend or restarting the session. `None` defers to whatever the
     /// backend was constructed with.
     thinking_override: Option<crate::api::ThinkingConfig>,
+    /// Per-tool observability counters. Updated on every dispatch in
+    /// [`AgentLoop::execute_tool_call`] so `/usage` has live data.
+    tool_usage: crate::tool_usage::ToolUsageTracker,
 }
 
 impl AgentLoop {
@@ -315,7 +318,19 @@ impl AgentLoop {
             disallowed_tools: Vec::new(),
             ask_callback: None,
             thinking_override: None,
+            tool_usage: crate::tool_usage::ToolUsageTracker::new(),
         }
+    }
+
+    /// Read-only access to the per-tool observability counters. Used by
+    /// `/usage` to render the dashboard.
+    pub fn tool_usage(&self) -> &crate::tool_usage::ToolUsageTracker {
+        &self.tool_usage
+    }
+
+    /// Clear every per-tool counter. Used by `/usage reset`.
+    pub fn reset_tool_usage(&mut self) {
+        self.tool_usage.reset();
     }
 
     /// Install a callback to invoke when a tool call needs interactive
@@ -726,6 +741,21 @@ impl AgentLoop {
     }
 
     fn execute_tool_call(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
+        // Wall-clock the entire dispatch (permission check + hooks +
+        // actual tool body) so `/usage` reflects what the user would
+        // perceive as "this tool was slow", not just the inner call.
+        let start = std::time::Instant::now();
+        let result = self.execute_tool_call_inner(tool_call);
+        self.tool_usage.record(
+            &tool_call.name,
+            start.elapsed(),
+            result.is_error,
+            result.content.len(),
+        );
+        result
+    }
+
+    fn execute_tool_call_inner(&mut self, tool_call: &ToolCall) -> crate::ToolResult {
         // Enforce sub-agent tool restrictions before any dispatch (including the
         // special-cased EnterPlanMode/ExitPlanMode/Agent/Brief/Snip/CtxInspect
         // paths), so a restricted agent cannot reach a forbidden tool.

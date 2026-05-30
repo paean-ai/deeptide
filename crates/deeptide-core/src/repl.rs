@@ -143,6 +143,13 @@ pub struct ReplSession {
     /// Never persisted — the on-disk session store is the durable
     /// counterpart for cross-process survival.
     checkpoints: crate::checkpoints::CheckpointStore,
+    /// One-shot latch for the proactive context-window warning. The
+    /// REPL emits a single advisory message at the first turn where
+    /// usage crosses [`CONTEXT_WARN_THRESHOLD_PERCENT`]; further turns
+    /// don't re-spam the user. Resets to `0` (no warning yet) on
+    /// `/new`, `/clear`, and `/compact` so a fresh transcript can
+    /// re-warn from scratch.
+    last_context_warn_bucket: u8,
 }
 
 /// Configuration + bookkeeping for the persistent dream loop. Default state
@@ -205,6 +212,7 @@ impl ReplSession {
             session_consolidated: false,
             message_queue: Arc::new(Mutex::new(crate::message_queue::MessageQueue::new())),
             checkpoints: crate::checkpoints::CheckpointStore::new(),
+            last_context_warn_bucket: 0,
         }
     }
 
@@ -483,12 +491,49 @@ impl ReplSession {
             events.push(ReplEvent::Output(debug));
         }
 
+        // Proactive context-window advisory. Emitted at most once per
+        // bucket (80% → 90% → 95%) so the user gets warnings before
+        // they hit the hard cliff but doesn't get spammed on every
+        // turn. Reset by /new, /clear, /compact.
+        if let Some(warn) = self.maybe_context_window_warning() {
+            events.push(ReplEvent::Output(warn));
+        }
+
         if let Some(dream_events) = self.maybe_run_scheduled_dream() {
             events.extend(dream_events);
         }
 
         self.autosave_session();
         events
+    }
+
+    /// Inspect the current transcript size against the model's window
+    /// and return a one-shot warning when it has just crossed a fresh
+    /// threshold. Bumps `last_context_warn_bucket` as a side effect so
+    /// subsequent calls in the same bucket are silent.
+    fn maybe_context_window_warning(&mut self) -> Option<String> {
+        let context_tokens = estimate_repl_context_tokens(self.agent_loop.messages());
+        let window = model_context_window(self.agent_loop.model()) as usize;
+        if window == 0 {
+            return None;
+        }
+        let percent = context_tokens
+            .saturating_mul(100)
+            .checked_div(window)
+            .unwrap_or(0)
+            .min(100) as u8;
+        let bucket = context_warn_bucket(percent);
+        if bucket <= self.last_context_warn_bucket {
+            return None;
+        }
+        self.last_context_warn_bucket = bucket;
+        render_context_warn_message(bucket, percent, self.agent_loop.model())
+    }
+
+    /// Reset the one-shot warning latch so the next big transcript can
+    /// re-warn from bucket 0. Callers: `/new`, `/clear`, `/compact`.
+    fn reset_context_warn_latch(&mut self) {
+        self.last_context_warn_bucket = 0;
     }
 
     /// If the persistent dream loop is enabled and the user-turn cadence has
@@ -680,13 +725,19 @@ impl ReplSession {
             "help" | "h" | "?" => HelpCommand.execute(args, &context),
             "clear" | "cls" => {
                 self.agent_loop.reset();
+                self.reset_context_warn_latch();
                 ClearCommand.execute(args, &context)
             }
             "new" => {
                 self.agent_loop.reset();
+                self.reset_context_warn_latch();
                 NewCommand.execute(args, &context)
             }
-            "compact" | "compress" => self.execute_compact_command(args),
+            "compact" | "compress" => {
+                let result = self.execute_compact_command(args);
+                self.reset_context_warn_latch();
+                result
+            }
             "cost" => CostCommand.execute(args, &context),
             "model" | "m" => self.execute_model_command(args),
             "provider" | "profiles" => self.execute_provider_command(args),
@@ -745,6 +796,16 @@ impl ReplSession {
             "checkpoint" | "snap" | "snapshot" => self.execute_checkpoint_command(args),
             "checkpoints" => self.execute_checkpoint_command("list"),
             "rewind" | "undo-turn" => self.execute_rewind_command(args),
+            // `/usage`: per-tool observability dashboard. Use a separate
+            // verb from `/cost` (model spend) and `/cache` (prompt
+            // cache) so each command has a single responsibility.
+            "usage" | "tooltime" | "telemetry" => self.execute_usage_command(args),
+            // `/test` + `/lint`: detect project toolchain (Cargo,
+            // package.json, pyproject, go.mod, Gemfile) and either
+            // print the suggested command (default) or run it
+            // synchronously (`--run`). See `execute_toolchain_command`.
+            "test" | "tests" => self.execute_toolchain_command(args, ToolchainAction::Test),
+            "lint" | "check" => self.execute_toolchain_command(args, ToolchainAction::Lint),
             _ => CommandResult::Text(crate::commands::render_unknown_command(
                 &name,
                 &context.all_commands(),
@@ -2506,6 +2567,131 @@ impl ReplSession {
         self.checkpoints.len()
     }
 
+    // ── /usage ───────────────────────────────────────────────────────
+    //
+    // Per-tool observability. The data source is
+    // `AgentLoop::tool_usage()`, populated automatically on every
+    // dispatch in `execute_tool_call`.  The command lives in the REPL
+    // (not on `AgentLoop` directly) because it needs to render — the
+    // renderer stays decoupled so it's testable without firing a real
+    // turn.
+
+    fn execute_usage_command(&mut self, args: &str) -> CommandResult {
+        let trimmed = args.trim();
+        let (verb, _rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((head, tail)) => (head.to_ascii_lowercase(), tail.trim()),
+            None => (trimmed.to_ascii_lowercase(), ""),
+        };
+
+        match verb.as_str() {
+            "" | "show" | "list" => {
+                CommandResult::Text(render_tool_usage(self.agent_loop.tool_usage(), false))
+            }
+            "--json" | "json" => {
+                CommandResult::Text(render_tool_usage(self.agent_loop.tool_usage(), true))
+            }
+            "reset" | "clear" => {
+                let total = self.agent_loop.tool_usage().total_invocations();
+                self.agent_loop.reset_tool_usage();
+                CommandResult::Text(if total == 0 {
+                    String::from("Tool usage telemetry already empty.")
+                } else {
+                    format!("Cleared {total} tool invocation sample(s).")
+                })
+            }
+            "--help" | "help" | "-h" => CommandResult::Text(String::from(
+                "Usage: /usage [show | --json | reset]\n\n\
+                 Per-tool activity dashboard. Tracks invocations, success/error\n\
+                 counts, total + average + peak duration, and cumulative result\n\
+                 bytes for every tool dispatched in this session.\n\
+                 \n\
+                 Subcommands:\n  \
+                   /usage           Render the dashboard (default)\n  \
+                   /usage --json    Emit a machine-readable JSON snapshot\n  \
+                   /usage reset     Discard every sample (start over)",
+            )),
+            other => CommandResult::Text(format!(
+                "Unknown subcommand `/usage {other}`. Try `/usage`, `/usage --json`, or `/usage reset`.",
+            )),
+        }
+    }
+
+    // ── /test + /lint ────────────────────────────────────────────────
+    //
+    // Auto-detect the project's primary toolchain (Cargo, package.json,
+    // pyproject.toml, go.mod, Gemfile) and either suggest or run the
+    // corresponding test/lint command. The default is to *suggest*
+    // (print the command, don't execute) because we want users to opt
+    // into long-running subprocess execution explicitly; pass `--run`
+    // or `-r` to actually fire it.
+
+    fn execute_toolchain_command(&self, args: &str, action: ToolchainAction) -> CommandResult {
+        let mut run = false;
+        let mut want_help = false;
+        for token in args.split_whitespace() {
+            match token {
+                "--run" | "-r" | "run" => run = true,
+                "--help" | "-h" | "help" => want_help = true,
+                other => {
+                    return CommandResult::Text(format!(
+                        "Unknown flag `{other}`. Usage: /{verb} [--run]",
+                        verb = action.verb(),
+                    ));
+                }
+            }
+        }
+
+        if want_help {
+            return CommandResult::Text(action.help_text());
+        }
+
+        let cwd = &self.tool_context.cwd;
+        let kinds = crate::project_toolchain::detect_toolchains(cwd);
+        if kinds.is_empty() {
+            return CommandResult::Text(format!(
+                "No known project toolchain found under {}. \
+                 Looked for: Cargo.toml, package.json, pyproject.toml, setup.py, requirements.txt, go.mod, Gemfile.",
+                cwd.display(),
+            ));
+        }
+
+        // Pick the first detected toolchain by stated precedence. When
+        // a polyglot repo has multiple, show the others as a hint so
+        // the user can re-run with a more specific tool.
+        let primary = &kinds[0];
+        let other_kinds: Vec<&str> = kinds.iter().skip(1).map(|k| k.label()).collect();
+        let command = match action {
+            ToolchainAction::Test => primary.test_command(),
+            ToolchainAction::Lint => primary.lint_command(),
+        };
+        let Some(cmd) = command else {
+            return CommandResult::Text(format!(
+                "Detected {} but no default {} command. Pass `--run` flags or run manually.",
+                primary.label(),
+                action.verb(),
+            ));
+        };
+
+        if !run {
+            let mut out = format!(
+                "Detected toolchain: {}\nSuggested {} command:\n  {}\n",
+                primary.label(),
+                action.verb(),
+                cmd.display(),
+            );
+            if !other_kinds.is_empty() {
+                out.push_str(&format!("Also detected: {}\n", other_kinds.join(", ")));
+            }
+            out.push_str(&format!(
+                "Run it inside the REPL with `/{verb} --run` (synchronous; output streamed when done).",
+                verb = action.verb(),
+            ));
+            return CommandResult::Text(out);
+        }
+
+        CommandResult::Text(run_toolchain_command(cwd, &cmd, action))
+    }
+
     fn execute_cache_command(&self, args: &str) -> CommandResult {
         let raw = args.trim();
         let limit = if raw.is_empty() {
@@ -3235,7 +3421,265 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "Restore an in-memory checkpoint (empty = newest)",
             "/rewind [id|index|label]",
         ),
+        CommandCompletionSource::new(
+            "usage",
+            ["tooltime", "telemetry"],
+            "Per-tool observability dashboard (invocations, durations, bytes)",
+            "/usage [show | --json | reset]",
+        ),
+        CommandCompletionSource::new(
+            "test",
+            ["tests"],
+            "Auto-detect & suggest the project's test command (`--run` to execute)",
+            "/test [--run]",
+        ),
+        CommandCompletionSource::new(
+            "lint",
+            ["check"],
+            "Auto-detect & suggest the project's lint command (`--run` to execute)",
+            "/lint [--run]",
+        ),
     ]
+}
+
+/// Context-window thresholds (percent of model window) at which the
+/// REPL emits a one-shot advisory. The bucket index returned by
+/// [`context_warn_bucket`] is monotonic so we only fire each step once
+/// per "fresh transcript window".
+///
+/// Bucket 0 → no warning yet. Bucket 1 → 80%+. Bucket 2 → 90%+.
+/// Bucket 3 → 95%+. The renderer maps each bucket to a tailored
+/// message — at 80% the user gets a gentle nudge, at 95% a hard
+/// recommendation to `/compact` immediately.
+const CONTEXT_WARN_THRESHOLDS: &[u8] = &[80, 90, 95];
+
+/// Map a usage percentage to the highest threshold it cleared.
+/// Returns 0 when no threshold is crossed.
+fn context_warn_bucket(percent: u8) -> u8 {
+    let mut bucket = 0u8;
+    for (idx, threshold) in CONTEXT_WARN_THRESHOLDS.iter().enumerate() {
+        if percent >= *threshold {
+            bucket = (idx as u8) + 1;
+        }
+    }
+    bucket
+}
+
+/// Render the advisory message for a given bucket. Returns `None`
+/// for bucket 0 so callers can early-out.
+fn render_context_warn_message(bucket: u8, percent: u8, model: &str) -> Option<String> {
+    let advice = match bucket {
+        1 => "consider /compact when convenient",
+        2 => "compact soon — `/compact` summarises the transcript without losing key facts",
+        3 => "running out of headroom — `/compact` or `/new` strongly recommended NOW",
+        _ => return None,
+    };
+    Some(format!(
+        "⚠ context {percent}% of {model}'s window; {advice}.",
+    ))
+}
+
+/// Which verb the user invoked: `/test` vs `/lint`. Used by
+/// `execute_toolchain_command` to switch defaults between the two
+/// paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolchainAction {
+    Test,
+    Lint,
+}
+
+impl ToolchainAction {
+    fn verb(self) -> &'static str {
+        match self {
+            ToolchainAction::Test => "test",
+            ToolchainAction::Lint => "lint",
+        }
+    }
+
+    fn help_text(self) -> String {
+        format!(
+            "Usage: /{verb} [--run]\n\n\
+             Auto-detect the current project's toolchain and suggest (or run)\n\
+             the appropriate {verb} command.\n\
+             \n\
+             Detection markers (in order):\n  \
+               Cargo.toml          → cargo\n  \
+               package.json        → npm / pnpm / yarn / bun (by lockfile)\n  \
+               pyproject.toml      → ruff (lint) / pytest (test)\n  \
+               setup.py            → pytest\n  \
+               requirements.txt    → pytest\n  \
+               go.mod              → go\n  \
+               Gemfile             → bundle exec rubocop / rake test\n\
+             \n\
+             Flags:\n  \
+               --run, -r           Execute the suggested command (synchronous)\n  \
+               --help, -h          Show this help",
+            verb = self.verb(),
+        )
+    }
+}
+
+/// Spawn the toolchain command synchronously and render the captured
+/// stdout/stderr plus a one-line summary. Output is buffered; for
+/// long-running test suites the user sees nothing until the process
+/// exits. That's a limitation we accept for the simple first cut;
+/// streaming would require a separate event channel into the CLI.
+fn run_toolchain_command(
+    cwd: &std::path::Path,
+    cmd: &crate::project_toolchain::ToolchainCommand,
+    action: ToolchainAction,
+) -> String {
+    let start = std::time::Instant::now();
+    let mut command = std::process::Command::new(&cmd.program);
+    command.args(&cmd.args).current_dir(cwd);
+
+    let output = match command.output() {
+        Ok(out) => out,
+        Err(err) => {
+            return format!(
+                "Failed to spawn `{display}`: {err}\n\
+                 Is `{program}` installed and on PATH?",
+                display = cmd.display(),
+                program = cmd.program,
+            );
+        }
+    };
+
+    let elapsed = start.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let status_label = if output.status.success() {
+        format!("PASSED in {}", format_duration_ms(elapsed))
+    } else {
+        match output.status.code() {
+            Some(code) => format!("FAILED (exit {code}) in {}", format_duration_ms(elapsed)),
+            None => format!("FAILED (signal) in {}", format_duration_ms(elapsed)),
+        }
+    };
+
+    let mut body = format!("$ {} ({})\n", cmd.display(), action.verb());
+    if !stdout.is_empty() {
+        body.push_str(&stdout);
+        if !stdout.ends_with('\n') {
+            body.push('\n');
+        }
+    }
+    if !stderr.is_empty() {
+        body.push_str("--- stderr ---\n");
+        body.push_str(&stderr);
+        if !stderr.ends_with('\n') {
+            body.push('\n');
+        }
+    }
+    body.push_str(&status_label);
+    body
+}
+
+/// Render the `/usage` dashboard. Lives outside the impl block so the
+/// renderer can be unit-tested against a hand-rolled
+/// `ToolUsageTracker` without standing up a full agent loop.
+///
+/// `as_json = true` emits a compact JSON object instead of the table.
+/// We keep the structure small and stable: callers piping `/usage --json`
+/// into `jq` shouldn't have to chase schema churn.
+fn render_tool_usage(tracker: &crate::tool_usage::ToolUsageTracker, as_json: bool) -> String {
+    if as_json {
+        return render_tool_usage_json(tracker);
+    }
+
+    if tracker.is_empty() {
+        return String::from(
+            "Tool usage: 0 invocation(s). Run a turn that exercises a tool and re-check.",
+        );
+    }
+
+    let rows = tracker.sorted_by_total_duration();
+    let total = tracker.total_invocations();
+    let unique = tracker.len();
+
+    // Compute an aggregate error count for the header so the user
+    // immediately sees "the agent failed 7/42 tool calls".
+    let total_errors: u64 = rows.iter().map(|(_, e)| e.error_count()).sum();
+
+    let mut lines = Vec::with_capacity(rows.len() + 4);
+    lines.push(format!(
+        "Tool usage: {total} call(s) across {unique} tool(s), {total_errors} error(s)",
+    ));
+    // Column widths picked so the longest built-in tool name (e.g.
+    // `ListMcpResources` = 16 chars) fits without truncation.
+    lines.push(format!(
+        "  {:<22}  {:>6}  {:>6}  {:>6}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "tool", "calls", "ok", "err", "total", "avg", "peak", "bytes",
+    ));
+    for (name, entry) in &rows {
+        lines.push(format!(
+            "  {:<22}  {:>6}  {:>6}  {:>6}  {:>9}  {:>9}  {:>9}  {:>9}",
+            truncate_for_column(name, 22),
+            entry.invocations(),
+            entry.success_count(),
+            entry.error_count(),
+            format_duration_ms(entry.total_duration()),
+            format_duration_ms(entry.average_duration()),
+            format_duration_ms(entry.peak_duration()),
+            humanize_bytes(entry.total_result_bytes() as usize),
+        ));
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "  Use `/usage --json` for machine-readable output, `/usage reset` to clear.",
+    ));
+    lines.join("\n")
+}
+
+fn render_tool_usage_json(tracker: &crate::tool_usage::ToolUsageTracker) -> String {
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    for (name, entry) in tracker.sorted_by_total_duration() {
+        entries.push(serde_json::json!({
+            "tool": name,
+            "invocations": entry.invocations(),
+            "success": entry.success_count(),
+            "errors": entry.error_count(),
+            "total_ms": entry.total_duration().as_millis() as u64,
+            "avg_ms": entry.average_duration().as_millis() as u64,
+            "peak_ms": entry.peak_duration().as_millis() as u64,
+            "result_bytes": entry.total_result_bytes(),
+        }));
+    }
+    let payload = serde_json::json!({
+        "total_invocations": tracker.total_invocations(),
+        "unique_tools": tracker.len(),
+        "tools": entries,
+    });
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| String::from("{}"))
+}
+
+/// Pretty-print a `Duration` as either `<NNNms>` or `<N.NNs>` depending
+/// on magnitude. Caps at 9 chars to fit the `/usage` column width.
+fn format_duration_ms(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.2}s", ms as f64 / 1_000.0)
+    } else {
+        let minutes = ms / 60_000;
+        let seconds = (ms % 60_000) / 1_000;
+        format!("{minutes}m{seconds}s")
+    }
+}
+
+/// Chop a tool name down to fit a fixed column. We append a `…`
+/// sentinel so the user sees the name was truncated; built-in tools
+/// fit comfortably in 22 chars so this only fires for very long MCP
+/// names.
+fn truncate_for_column(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        return name.to_owned();
+    }
+    let mut s: String = name.chars().take(max - 1).collect();
+    s.push('…');
+    s
 }
 
 /// Render the body of `/think status`. Lives outside the impl block so
@@ -4210,5 +4654,68 @@ mod cwd_format_tests {
             let formatted = format_cwd_for_status(&PathBuf::from("/Users/ryan"));
             assert_eq!(formatted, "~");
         });
+    }
+}
+
+#[cfg(test)]
+mod context_warn_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::{CONTEXT_WARN_THRESHOLDS, context_warn_bucket, render_context_warn_message};
+
+    #[test]
+    fn bucket_is_zero_below_any_threshold() {
+        for pct in 0..CONTEXT_WARN_THRESHOLDS[0] {
+            assert_eq!(context_warn_bucket(pct), 0, "pct={pct}");
+        }
+    }
+
+    #[test]
+    fn bucket_one_at_80_percent_through_89_percent() {
+        for pct in CONTEXT_WARN_THRESHOLDS[0]..CONTEXT_WARN_THRESHOLDS[1] {
+            assert_eq!(context_warn_bucket(pct), 1, "pct={pct}");
+        }
+    }
+
+    #[test]
+    fn bucket_two_at_90_through_94_percent() {
+        for pct in CONTEXT_WARN_THRESHOLDS[1]..CONTEXT_WARN_THRESHOLDS[2] {
+            assert_eq!(context_warn_bucket(pct), 2, "pct={pct}");
+        }
+    }
+
+    #[test]
+    fn bucket_three_at_95_percent_and_above() {
+        for pct in CONTEXT_WARN_THRESHOLDS[2]..=100 {
+            assert_eq!(context_warn_bucket(pct), 3, "pct={pct}");
+        }
+    }
+
+    #[test]
+    fn render_bucket_zero_returns_none() {
+        assert!(render_context_warn_message(0, 50, "any-model").is_none());
+    }
+
+    #[test]
+    fn render_includes_model_and_percent() {
+        let msg = render_context_warn_message(1, 82, "my-model").expect("bucket 1 has message");
+        assert!(msg.contains("82%"));
+        assert!(msg.contains("my-model"));
+        assert!(msg.to_ascii_lowercase().contains("compact"));
+    }
+
+    #[test]
+    fn render_message_escalates_with_bucket() {
+        let b1 = render_context_warn_message(1, 80, "m").unwrap();
+        let b2 = render_context_warn_message(2, 90, "m").unwrap();
+        let b3 = render_context_warn_message(3, 95, "m").unwrap();
+        assert!(
+            b1.len() < b2.len() || b1 != b2,
+            "b1 vs b2 should differ: {b1} | {b2}",
+        );
+        assert!(
+            b3.to_ascii_uppercase().contains("NOW"),
+            "highest bucket should emphasise urgency: {b3}",
+        );
     }
 }

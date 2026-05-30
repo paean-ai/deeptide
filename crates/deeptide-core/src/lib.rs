@@ -18,6 +18,7 @@ pub mod memory_hygiene;
 pub mod memory_rank;
 pub mod message_queue;
 pub mod permissions;
+pub mod project_toolchain;
 pub mod prompt;
 pub mod repl;
 pub mod routing;
@@ -27,6 +28,7 @@ pub mod session;
 pub mod streaming;
 pub mod tool_batch_labeler;
 pub mod tool_result_summary;
+pub mod tool_usage;
 pub mod tools;
 pub mod tps;
 pub mod tui;
@@ -71,6 +73,9 @@ pub use permissions::{
     PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
     ToolInput,
 };
+pub use project_toolchain::{
+    NodePackageManager, ProjectKind, PythonMarker, ToolchainCommand, detect_toolchains,
+};
 pub use prompt::build_system_prompt;
 pub use repl::{ReplEvent, ReplSession, SystemMessage};
 pub use routing::{EscalationPolicy, Route, RoutingBackend};
@@ -84,6 +89,7 @@ pub use streaming::{
 };
 pub use tool_batch_labeler::{ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler};
 pub use tool_result_summary::ToolResultSummaryFormatter;
+pub use tool_usage::{ToolUsageEntry, ToolUsageTracker};
 pub use tools::{
     AgentTool, AppendFileTool, AskUserQuestionTool, AudioTranscribeTool, BashTool, BriefTool,
     ClipboardTool, CrashLogTool, CronCreateTool, CronDeleteTool, CronListTool, CtxInspectTool,

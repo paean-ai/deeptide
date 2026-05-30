@@ -641,6 +641,12 @@ const FIXED_ARG_SUGGESTIONS: &[(&[&str], &[&str])] = &[
         ],
     ),
     (&["rewind", "undo-turn"], &["latest", "last"]),
+    (
+        &["usage", "tooltime", "telemetry"],
+        &["show", "--json", "reset", "--help"],
+    ),
+    (&["test", "tests"], &["--run", "-r", "--help"]),
+    (&["lint", "check"], &["--run", "-r", "--help"]),
 ];
 
 impl ReplHelper {
