@@ -745,7 +745,7 @@ impl AgentDefinition {
         vec![
             Self {
                 kind: "general-purpose",
-                max_turns: 15,
+                max_turns: 60,
                 is_read_only: false,
                 allowed_tools: None,
                 disallowed_tools: &["Agent", "EnterPlanMode", "ExitPlanMode", "MemoryWrite"],
@@ -753,7 +753,7 @@ impl AgentDefinition {
             },
             Self {
                 kind: "Explore",
-                max_turns: 10,
+                max_turns: 40,
                 is_read_only: true,
                 allowed_tools: Some(&[
                     "Read",
@@ -779,7 +779,7 @@ impl AgentDefinition {
             },
             Self {
                 kind: "Plan",
-                max_turns: 15,
+                max_turns: 60,
                 is_read_only: true,
                 allowed_tools: None,
                 disallowed_tools: &[

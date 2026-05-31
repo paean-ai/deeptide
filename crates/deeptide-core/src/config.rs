@@ -524,7 +524,7 @@ impl ConfigStore {
             &merged
                 .max_turns
                 .map(|n| n.to_string())
-                .unwrap_or_else(|| "(unset — default 25)".to_owned()),
+                .unwrap_or_else(|| "(unset — default 200)".to_owned()),
         ));
         lines.push(kv(
             "max_tokens",

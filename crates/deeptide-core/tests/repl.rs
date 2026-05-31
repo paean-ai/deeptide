@@ -939,13 +939,18 @@ fn repl_honors_max_turns_setting() {
 
     let events = repl.submit("keep going");
 
-    assert!(events.iter().any(|event| {
-        matches!(
+    // The notice should include the actual cap and a hint on how to
+    // raise it — checked loosely so future copy edits to either half of
+    // the message stay non-breaking.
+    assert!(
+        events.iter().any(|event| matches!(
             event,
             ReplEvent::System(SystemMessage::Notice(notice))
-                if notice == "Maximum turns reached."
-        )
-    }));
+                if notice.contains("Maximum turns reached (1)")
+                && notice.contains("--max-turns")
+        )),
+        "expected a max-turns notice with cap and --max-turns hint, got: {events:?}",
+    );
     assert_eq!(repl.agent_loop().max_turns(), 1);
 }
 

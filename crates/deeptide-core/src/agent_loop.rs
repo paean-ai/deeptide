@@ -204,7 +204,13 @@ pub enum AgentLoopEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentTerminalEvent {
     Complete,
-    MaxTurnsReached,
+    /// The agent hit the per-prompt turn cap before the model produced a
+    /// terminal assistant message. `cap` carries the configured ceiling
+    /// so the UI layer can surface a helpful "raise via --max-turns N"
+    /// hint without re-reading the loop's state.
+    MaxTurnsReached {
+        cap: usize,
+    },
     ModelError(String),
     /// The transcript exceeded the model's hard context limit even after
     /// compaction, so the run was stopped rather than issuing a doomed request.
@@ -357,7 +363,11 @@ impl AgentLoop {
             messages: Vec::new(),
             cost_tracker: CostTracker::new(),
             model: String::from("unconfigured"),
-            max_turns: 25,
+            // Keep in sync with the clap default in
+            // crates/deeptide-cli/src/main.rs::Cli::max_turns and the
+            // "(unset — default N)" display string in
+            // crates/deeptide-core/src/config.rs.
+            max_turns: 200,
             current_run_step: 0,
             tool_registry: ToolRegistry::with_builtin_tools(),
             tool_context: ToolContext::new(
@@ -632,7 +642,9 @@ impl AgentLoop {
 
             if self.current_run_step >= self.max_turns {
                 events.push(AgentLoopEvent::Terminal(
-                    AgentTerminalEvent::MaxTurnsReached,
+                    AgentTerminalEvent::MaxTurnsReached {
+                        cap: self.max_turns,
+                    },
                 ));
                 return events;
             }
@@ -1213,10 +1225,10 @@ fn render_subagent_result(kind: &str, model: &str, events: &[AgentLoopEvent]) ->
                     content.trim()
                 ));
             }
-            AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => {
+            AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached { cap }) => {
                 lines.push(String::new());
-                lines.push(String::from(
-                    "Sub-agent stopped after reaching the turn limit.",
+                lines.push(format!(
+                    "Sub-agent stopped after reaching the turn limit ({cap} turns)."
                 ));
             }
             _ => {}

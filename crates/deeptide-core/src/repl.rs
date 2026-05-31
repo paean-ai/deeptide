@@ -3440,9 +3440,14 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
             label,
             failed_count,
         })),
-        AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => Some(ReplEvent::System(
-            SystemMessage::Notice(String::from("Maximum turns reached.")),
-        )),
+        AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached { cap }) => {
+            // Surface the actual cap and how to raise it. Users hitting
+            // this in long refactor sessions want a one-line hint, not
+            // a generic "Maximum turns reached." with no recourse.
+            Some(ReplEvent::System(SystemMessage::Notice(format!(
+                "Maximum turns reached ({cap}). Raise with --max-turns N or set `max_turns` in settings.json."
+            ))))
+        }
         AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)) => Some(ReplEvent::System(
             SystemMessage::Notice(format!("Model error: {error}")),
         )),
