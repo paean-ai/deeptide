@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1152,9 +1152,28 @@ fn run_interactive(
     // so the flag can't be applied twice.
     let editor_mode_cycle: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
+    // Streamed-character counter for the live spinner stats panel.
+    // The streaming handler atomically adds each TextDelta /
+    // ToolUseInputDelta payload's char count; `run_spinner` divides
+    // by 4 and renders it as `↓ N tokens`. Reset to 0 at the start
+    // of each turn (just before spawning the spinner) so the
+    // counter shows *this turn's* throughput, not cumulative.
+    //
+    // `chars` (Unicode codepoints) rather than `bytes` because the
+    // estimate we care about is "perceived progress", and UTF-8
+    // byte count over-weights CJK by 3x relative to ASCII. Chars
+    // are wrong for tokens too, but in a consistent direction.
+    let stream_chars_received: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let stream_chars_handler = Arc::clone(&stream_chars_received);
+
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
         match event {
             StreamingEvent::TextDelta { delta, .. } => {
+                // Live progress counter for the spinner's stats
+                // panel. Counted before we touch the spinner /
+                // markdown locks so a contended lock never costs
+                // us a visible "tokens received" tick.
+                stream_chars_handler.fetch_add(delta.chars().count(), Ordering::Relaxed);
                 let first = !did_stream_handler.swap(true, Ordering::Relaxed);
                 // Stop the spinner under the lock so it cannot draw a frame
                 // over the text we are about to print.
@@ -1185,6 +1204,16 @@ fn run_interactive(
                     let _ = out.write_all(rendered.as_bytes());
                     let _ = out.flush();
                 }
+            }
+            StreamingEvent::ToolUseInputDelta { partial_json, .. } => {
+                // Tool-argument JSON is still model output — count
+                // its chars so the spinner's "↓ N tokens" panel
+                // keeps ticking during long tool-args generation
+                // (e.g. a multi-kilobyte Write payload). Without
+                // this the user sees the elapsed clock climb but
+                // the token counter freeze, which reads as
+                // "stuck".
+                stream_chars_handler.fetch_add(partial_json.chars().count(), Ordering::Relaxed);
             }
             StreamingEvent::MessageDelta {
                 stop_reason: Some(reason),
@@ -1669,13 +1698,21 @@ fn run_interactive(
                 // Animate an activity spinner on a background thread while the
                 // synchronous turn runs, so model thinking and tool execution
                 // aren't silent. Skipped when color is off (plain/log output).
+                //
+                // Reset the per-turn streamed-char counter just before
+                // we spawn so the spinner's `↓ N tokens` stat shows
+                // *this turn's* throughput. The streaming handler will
+                // start adding to it as soon as the first
+                // `TextDelta` / `ToolUseInputDelta` arrives.
+                stream_chars_received.store(0, Ordering::Relaxed);
                 let spinner_handle = if use_color {
                     let stop = Arc::clone(&spinner_stop);
                     let started = Arc::clone(&output_started);
                     let lock = Arc::clone(&spinner_lock);
                     let phase = Arc::clone(&current_tool_phase);
+                    let chars = Arc::clone(&stream_chars_received);
                     Some(thread::spawn(move || {
-                        run_spinner(&stop, &started, &lock, true, &phase)
+                        run_spinner(&stop, &started, &lock, true, &phase, &chars)
                     }))
                 } else {
                     None
@@ -1829,13 +1866,15 @@ fn run_interactive(
                 did_stream.store(false, Ordering::Relaxed);
                 output_started.store(false, Ordering::Relaxed);
                 spinner_stop.store(false, Ordering::Relaxed);
+                stream_chars_received.store(0, Ordering::Relaxed);
                 let spinner_handle = if use_color {
                     let stop = Arc::clone(&spinner_stop);
                     let started = Arc::clone(&output_started);
                     let lock = Arc::clone(&spinner_lock);
                     let phase = Arc::clone(&current_tool_phase);
+                    let chars = Arc::clone(&stream_chars_received);
                     Some(thread::spawn(move || {
-                        run_spinner(&stop, &started, &lock, true, &phase)
+                        run_spinner(&stop, &started, &lock, true, &phase, &chars)
                     }))
                 } else {
                     None
@@ -1946,6 +1985,7 @@ fn run_spinner(
     lock: &Mutex<()>,
     color: bool,
     phase: &Mutex<Option<String>>,
+    stream_chars: &AtomicUsize,
 ) {
     // Grace period so an instant response never flashes a spinner.
     thread::sleep(Duration::from_millis(150));
@@ -1963,10 +2003,17 @@ fn run_spinner(
             // `phase` at the same time — keeps the locking order
             // shallow.
             let phase_snapshot = phase.lock().ok().and_then(|p| p.clone());
-            let raw = tui::render_spinner_line_with_phase(
+            // Estimated tokens received this turn. Chars-to-tokens
+            // is approximated as `chars / 4` (the conventional
+            // English heuristic); the value is intentionally an
+            // estimate for progress feedback, not billing.
+            let chars = stream_chars.load(Ordering::Relaxed);
+            let tokens_estimate = chars / 4;
+            let raw = tui::render_spinner_line_rich(
                 tick,
                 start.elapsed().as_secs(),
                 phase_snapshot.as_deref(),
+                tokens_estimate,
             );
             let line = status_bar::dim(&raw, color);
             let mut out = io::stdout();
