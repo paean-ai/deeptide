@@ -803,11 +803,53 @@ fn at_path_completion(line: &str, pos: usize) -> Option<(usize, Vec<Pair>)> {
 }
 
 /// Enumerate filesystem entries matching `prefix`, returned as
-/// `(replacement, display)` pairs. The replacement is the path
-/// fragment that should go in after the `@`; the display has
-/// trailing-`/` for directories so the user can see at a glance what
-/// will be inlined vs what needs further navigation.
+/// `(replacement, display)` pairs sorted by relevance (score asc,
+/// mtime desc, alpha). The replacement is the path fragment that
+/// should go in after the `@`; the display has trailing-`/` for
+/// directories so the user can see at a glance what will be inlined
+/// vs what needs further navigation.
+///
+/// Matching tiers (T1.3)
+/// =====================
+///
+/// We keep three relevance bands so the most expected hits land at
+/// the top of the Tab list and the inline `@` palette hint:
+///
+/// 1. **Prefix match** (score 0) — `name_lower.starts_with(prefix_lower)`.
+///    Backwards-compatible with the old prefix-only behaviour: typing
+///    `@RE<Tab>` still surfaces `README.md` first.
+/// 2. **Substring match** (score 1) — `name_lower.contains(prefix_lower)`.
+///    `@modelcfg` finds `agent_modelcfg.rs`, `@.test` finds `unit.test.ts`.
+/// 3. **Subsequence match** (score 2) — every char of the prefix
+///    appears in `name` in order (with gaps). `@modtest` finds
+///    `models/test.rs`. This is the "fzf-style" tier and intentionally
+///    last so it doesn't shadow cleaner matches.
+///
+/// Empty `name_part` skips matching entirely and just lists the
+/// directory.
 fn list_filesystem_candidates(prefix: &str) -> Vec<(String, String)> {
+    list_filesystem_candidates_ranked(prefix)
+        .into_iter()
+        .map(|m| (m.replacement, m.display))
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FsCandidate {
+    replacement: String,
+    display: String,
+    /// 0 = prefix, 1 = substring, 2 = subsequence. Lower is better.
+    score: u8,
+    /// Seconds since UNIX epoch from the entry's mtime, 0 when
+    /// metadata read failed. Used as a tiebreaker so recently-edited
+    /// files float above stale ones at the same score.
+    mtime_secs: i64,
+    /// Lower-cased name without the directory prefix — used for the
+    /// final alphabetical tiebreaker.
+    sort_key: String,
+}
+
+fn list_filesystem_candidates_ranked(prefix: &str) -> Vec<FsCandidate> {
     use std::path::Path;
 
     const MAX_CANDIDATES: usize = 64;
@@ -860,7 +902,7 @@ fn list_filesystem_candidates(prefix: &str) -> Vec<(String, String)> {
         Err(_) => return Vec::new(),
     };
 
-    let mut out: Vec<(String, String)> = Vec::new();
+    let mut out: Vec<FsCandidate> = Vec::new();
     let name_prefix_lower = name_part.to_ascii_lowercase();
 
     for entry in entries.flatten() {
@@ -877,17 +919,30 @@ fn list_filesystem_candidates(prefix: &str) -> Vec<(String, String)> {
         if name_str.starts_with('.') && !name_part.starts_with('.') {
             continue;
         }
-        // Case-insensitive prefix match. We deliberately allow
-        // case-insensitive even on case-sensitive filesystems so
-        // typing `@RE<Tab>` finds `README.md`.
-        if !name_str
-            .to_ascii_lowercase()
-            .starts_with(&name_prefix_lower)
-        {
+
+        // Score this entry against the typed name prefix. Empty
+        // prefix → score 0 (everything is a match). Otherwise pick
+        // the BEST tier the name qualifies for.
+        let name_lower = name_str.to_ascii_lowercase();
+        let score = if name_prefix_lower.is_empty() || name_lower.starts_with(&name_prefix_lower) {
+            0
+        } else if name_lower.contains(&name_prefix_lower) {
+            1
+        } else if is_subsequence(&name_prefix_lower, &name_lower) {
+            2
+        } else {
             continue;
-        }
+        };
 
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+        let mtime_secs = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
 
         let mut replacement = String::with_capacity(dir_part.len() + name_str.len() + 1);
         replacement.push_str(dir_part);
@@ -899,17 +954,50 @@ fn list_filesystem_candidates(prefix: &str) -> Vec<(String, String)> {
         let display = if is_dir {
             format!("{name_str}/")
         } else {
-            name_str
+            name_str.clone()
         };
-        out.push((replacement, display));
+        out.push(FsCandidate {
+            replacement,
+            display,
+            score,
+            mtime_secs,
+            sort_key: name_lower,
+        });
 
         if out.len() >= MAX_CANDIDATES {
             break;
         }
     }
 
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.sort_by(|a, b| {
+        // Score ascending (0 prefix > 1 substring > 2 subsequence).
+        a.score
+            .cmp(&b.score)
+            // Then most-recently-modified first — this nudges files
+            // the user is actively editing to the top of the list
+            // within their relevance band.
+            .then_with(|| b.mtime_secs.cmp(&a.mtime_secs))
+            // Finally alphabetical for deterministic output.
+            .then_with(|| a.sort_key.cmp(&b.sort_key))
+    });
+
     out
+}
+
+/// Subsequence check: every char of `needle` appears in `haystack`
+/// in order (gaps allowed). Both inputs are expected pre-lowercased
+/// by the caller. Empty needle → always matches.
+fn is_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut h_iter = haystack.chars();
+    'outer: for nc in needle.chars() {
+        for hc in h_iter.by_ref() {
+            if hc == nc {
+                continue 'outer;
+            }
+        }
+        return false;
+    }
+    true
 }
 
 fn pairs_from_values(token_start: usize, values: &[String]) -> (usize, Vec<Pair>) {
@@ -930,6 +1018,18 @@ fn compute_hint(line: &str, pos: usize, commands: &[CommandCompletionSource]) ->
     if pos != line.chars().count() {
         return None;
     }
+
+    // ── @path file-mention palette hint (T1.3) ──────────────────────
+    // Detect a `@<prefix>` token under the cursor and, if it has
+    // multiple filesystem matches, surface them as a dim inline
+    // palette — same pattern as the slash-command palette (T1.2) so
+    // users learn one convention. We deliberately run this BEFORE
+    // the slash-command lookup so an `@`-anchored line never falls
+    // through to "no candidates" because of the `/` prefix check.
+    if let Some(hint) = compute_at_path_hint(line, pos) {
+        return Some(hint);
+    }
+
     let result = CompletionEngine::command_completions(line, pos, commands, 64)?;
 
     // Only hint on clean *prefix* matches against either the canonical name
@@ -972,6 +1072,92 @@ fn compute_hint(line: &str, pos: usize, commands: &[CommandCompletionSource]) ->
     }
 
     None
+}
+
+/// Build an inline palette hint for an `@<prefix>` file mention.
+/// Returns `None` when the cursor isn't inside an `@`-anchored token
+/// or when there's nothing useful to surface (zero / exactly one
+/// match — Tab handles the single-match case fine).
+///
+/// Format (dim ghost-text after the cursor):
+///
+/// ```text
+///   main.rs · queue_editor.rs · diff_preview.rs  +5 more (Tab)
+/// ```
+///
+/// Note the items here are *file names* not slash commands — the
+/// `·` separator and `(Tab)` teach-text intentionally mirror the
+/// slash-command palette (T1.2) so users learn one convention.
+fn compute_at_path_hint(line: &str, pos: usize) -> Option<String> {
+    // We re-implement the @-token boundary scan instead of calling
+    // `at_path_completion` because the latter performs filesystem
+    // I/O for every keystroke and we want to avoid that when the
+    // cursor *isn't* in an @-token. Cheap byte scan first; bail
+    // before any syscalls when there's no @-anchor.
+    let line_bytes = line.as_bytes();
+    if pos > line_bytes.len() {
+        return None;
+    }
+    let mut at_pos: Option<usize> = None;
+    let mut idx = pos;
+    while idx > 0 {
+        let c = line_bytes[idx - 1];
+        if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+            break;
+        }
+        idx -= 1;
+        if c == b'@' {
+            if idx > 0 {
+                let before = line_bytes[idx - 1];
+                let is_boundary = matches!(
+                    before,
+                    b' ' | b'\t' | b'\n' | b'\r' | b'(' | b'[' | b'{' | b'\'' | b'"' | b'`' | b','
+                );
+                if !is_boundary {
+                    return None;
+                }
+            }
+            at_pos = Some(idx);
+            break;
+        }
+    }
+    let at_pos = at_pos?;
+
+    let path_prefix = &line[at_pos + 1..pos];
+    let candidates = list_filesystem_candidates_ranked(path_prefix);
+
+    // No candidates → silent (consistent with slash-command behaviour
+    // when no commands match). Single candidate → also silent because
+    // rustyline's Tab will autocomplete immediately, and a one-item
+    // palette is just noise.
+    if candidates.len() < 2 {
+        return None;
+    }
+
+    Some(at_path_palette_hint(&candidates))
+}
+
+/// Render up to four candidate display names as a dim inline
+/// palette. Mirrors [`multi_command_palette_hint`]'s format so users
+/// who learn the slash-command palette get the same convention here.
+fn at_path_palette_hint(candidates: &[FsCandidate]) -> String {
+    const MAX_INLINE: usize = 4;
+    let total = candidates.len();
+    let take = total.min(MAX_INLINE);
+    let names: Vec<&str> = candidates
+        .iter()
+        .take(take)
+        .map(|c| c.display.as_str())
+        .collect();
+    let head = names.join(" · ");
+    if total > MAX_INLINE {
+        format!(
+            "  {head}  +{remaining} more (Tab)",
+            remaining = total - take
+        )
+    } else {
+        format!("  {head}  (Tab)")
+    }
 }
 
 /// Build an inline "discovery palette" hint summarising N matching
@@ -3817,13 +4003,14 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, FIXED_ARG_SUGGESTIONS, InputFormat,
+        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, FIXED_ARG_SUGGESTIONS, FsCandidate, InputFormat,
         LiveToolArgsTicker, OutputFormat, ReplHelper, VERSION_LONG, VERSION_SHORT,
         apply_config_fallbacks, at_path_completion, build_auth_segment, collect_prompt,
-        compute_hint, configured_backend, drain_live_tool_args, effective_base_url,
-        effective_model, format_retry_notice_line, next_permission_mode, normalize_embedded_mode,
-        paean_token_resolved, parse_permission_response, render_system_message,
-        summarize_tool_call_for_prompt, truncate_inline, use_color, validate_formats,
+        compute_at_path_hint, compute_hint, configured_backend, drain_live_tool_args,
+        effective_base_url, effective_model, format_retry_notice_line, is_subsequence,
+        next_permission_mode, normalize_embedded_mode, paean_token_resolved,
+        parse_permission_response, render_system_message, summarize_tool_call_for_prompt,
+        truncate_inline, use_color, validate_formats,
     };
     use clap::Parser;
     use deeptide_core::AskOutcome;
@@ -5819,6 +6006,226 @@ mod tests {
         // allow-list → completer must not fire.
         let line = "someone@";
         assert!(at_path_completion(line, line.len()).is_none());
+    }
+
+    // ── T1.3 fuzzy `@path` + inline palette hint ───────────────────
+
+    #[test]
+    fn is_subsequence_recognises_chars_in_order_with_gaps() {
+        assert!(is_subsequence("mdt", "models/test.rs"));
+        assert!(is_subsequence("rst", "robust"));
+        assert!(is_subsequence("", "anything"));
+        assert!(!is_subsequence("xyz", "abcdef"));
+        assert!(!is_subsequence("tsr", "robust"), "order matters");
+    }
+
+    #[test]
+    fn at_path_completion_substring_match_finds_inner_token() {
+        // `modelcfg` doesn't prefix-match `agent_modelcfg.rs`, but it
+        // is a clean substring → score 1 → should still surface.
+        let _guard = SERIAL_CWD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("agent_modelcfg.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("unrelated.rs"), "x").unwrap();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let line = "@modelcfg";
+        let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
+        let displays: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        assert!(
+            displays.contains(&"agent_modelcfg.rs"),
+            "expected substring match to surface agent_modelcfg.rs: {displays:?}"
+        );
+
+        if let Some(prev) = prev {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+
+    #[test]
+    fn at_path_completion_subsequence_match_finds_scattered_chars() {
+        // `modtst` → m..o..d..t..s..t with gaps in `models_test.rs`.
+        // Score 2 (subsequence) — the lowest band, but still a match.
+        let _guard = SERIAL_CWD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("models_test.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("completely_unrelated.rs"), "x").unwrap();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let line = "@modtst";
+        let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
+        let displays: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        assert!(
+            displays.contains(&"models_test.rs"),
+            "expected subsequence match: {displays:?}"
+        );
+        assert!(
+            !displays.contains(&"completely_unrelated.rs"),
+            "non-match should NOT surface: {displays:?}"
+        );
+
+        if let Some(prev) = prev {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+
+    #[test]
+    fn at_path_completion_ranks_prefix_above_substring_above_subsequence() {
+        // For the prefix `te`:
+        //   * `test.rs`      → prefix (score 0)
+        //   * `latest.rs`    → substring (score 1, contains "te")
+        //   * `tale.rs`      → subsequence (score 2, t,a,l,e contains t..e)
+        // All three should appear, in that score order.
+        let _guard = SERIAL_CWD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("latest.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("tale.rs"), "x").unwrap();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let line = "@te";
+        let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
+        let order: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        // test.rs (prefix) must come before latest.rs (substring),
+        // which must come before tale.rs (subsequence).
+        let test_idx = order.iter().position(|d| *d == "test.rs");
+        let latest_idx = order.iter().position(|d| *d == "latest.rs");
+        let tale_idx = order.iter().position(|d| *d == "tale.rs");
+        assert!(
+            test_idx.is_some() && latest_idx.is_some() && tale_idx.is_some(),
+            "missing entries: {order:?}"
+        );
+        assert!(
+            test_idx < latest_idx,
+            "prefix should rank above substring: {order:?}"
+        );
+        assert!(
+            latest_idx < tale_idx,
+            "substring should rank above subsequence: {order:?}"
+        );
+
+        if let Some(prev) = prev {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+
+    #[test]
+    fn fs_candidate_sort_orders_by_score_then_mtime_then_alpha() {
+        // Pure test of the sort comparator — no filesystem mtime
+        // surgery required. Construct candidates with controlled
+        // (score, mtime, sort_key) tuples and verify they end up in
+        // the expected order after `sort_by`.
+        let mut items = [
+            FsCandidate {
+                replacement: "zebra.rs".into(),
+                display: "zebra.rs".into(),
+                score: 1,
+                mtime_secs: 9000,
+                sort_key: "zebra.rs".into(),
+            },
+            FsCandidate {
+                replacement: "alpha_old.rs".into(),
+                display: "alpha_old.rs".into(),
+                score: 0,
+                mtime_secs: 1000,
+                sort_key: "alpha_old.rs".into(),
+            },
+            FsCandidate {
+                replacement: "alpha_new.rs".into(),
+                display: "alpha_new.rs".into(),
+                score: 0,
+                mtime_secs: 9000,
+                sort_key: "alpha_new.rs".into(),
+            },
+            FsCandidate {
+                replacement: "subseq.rs".into(),
+                display: "subseq.rs".into(),
+                score: 2,
+                mtime_secs: 9000,
+                sort_key: "subseq.rs".into(),
+            },
+        ];
+        items.sort_by(|a, b| {
+            a.score
+                .cmp(&b.score)
+                .then_with(|| b.mtime_secs.cmp(&a.mtime_secs))
+                .then_with(|| a.sort_key.cmp(&b.sort_key))
+        });
+        let order: Vec<&str> = items.iter().map(|c| c.display.as_str()).collect();
+        // Expected:
+        //   score 0 / mtime 9000 → alpha_new.rs
+        //   score 0 / mtime 1000 → alpha_old.rs
+        //   score 1 / mtime 9000 → zebra.rs
+        //   score 2 / mtime 9000 → subseq.rs
+        assert_eq!(
+            order,
+            vec!["alpha_new.rs", "alpha_old.rs", "zebra.rs", "subseq.rs"]
+        );
+    }
+
+    #[test]
+    fn at_path_hint_renders_palette_for_multiple_matches() {
+        // When typing `@a` with multiple files matching, the inline
+        // hint should preview them as a dim palette (T1.3 mirrors
+        // T1.2's slash-command palette).
+        let _guard = SERIAL_CWD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("aria.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("apex.txt"), "x").unwrap();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let line = "tell me about @a";
+        let hint = compute_at_path_hint(line, line.len()).expect("palette hint expected");
+        // Mentions at least two of the matching files in the inline
+        // palette format with `(Tab)` teach-text.
+        assert!(hint.contains("(Tab)"), "missing teach-text: {hint}");
+        let mentioned = ["alpha.txt", "aria.txt", "apex.txt"]
+            .iter()
+            .filter(|n| hint.contains(*n))
+            .count();
+        assert!(
+            mentioned >= 2,
+            "expected ≥2 of {{alpha/aria/apex}}.txt in hint: {hint}"
+        );
+
+        if let Some(prev) = prev {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+
+    #[test]
+    fn at_path_hint_silent_for_single_match() {
+        // Single candidate: Tab autocompletes immediately, so the
+        // inline palette would just be noise.
+        let _guard = SERIAL_CWD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("only_one.txt"), "x").unwrap();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let line = "look @on";
+        assert!(
+            compute_at_path_hint(line, line.len()).is_none(),
+            "single match should not produce inline palette"
+        );
+
+        if let Some(prev) = prev {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+
+    #[test]
+    fn at_path_hint_silent_when_not_in_at_token() {
+        // No `@` under cursor → must defer back to slash-command path
+        // by returning None.
+        assert!(compute_at_path_hint("plain text", 10).is_none());
+        // `@` inside a word (e.g. email) → boundary check fails.
+        assert!(compute_at_path_hint("alice@example", 13).is_none());
     }
 
     // Serial guard for tests that mutate process-wide cwd. `OnceLock`
