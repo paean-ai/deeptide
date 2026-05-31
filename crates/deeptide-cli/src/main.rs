@@ -184,8 +184,10 @@ struct Cli {
     #[arg(
         long,
         env = "DEEPTIDE_MAX_TURNS",
-        default_value_t = 25,
-        help = "Safety cap on agentic turns per prompt."
+        default_value_t = 200,
+        help = "Safety cap on agentic turns per prompt. Default 200 covers \
+                long multi-file refactors; raise via --max-turns N or set \
+                `max_turns` in settings.json (or DEEPTIDE_MAX_TURNS env)."
     )]
     max_turns: usize,
 
@@ -457,7 +459,12 @@ fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
     {
         cli.base_url = u.clone();
     }
-    if cli.max_turns == 25
+    // Only adopt the config value when the CLI flag is still on the
+    // *current* clap default — otherwise an explicit `--max-turns N` on
+    // the command line would silently lose to a stale settings.json.
+    // 200 mirrors the clap default just above; bump both together if it
+    // changes.
+    if cli.max_turns == 200
         && let Some(t) = cfg.max_turns
     {
         cli.max_turns = t;
@@ -2443,8 +2450,10 @@ fn run_prompt(
         match event {
             AgentLoopEvent::Assistant(message) => assistant = Some(message.content),
             AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)) => return Err(error),
-            AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached) => {
-                return Err(String::from("maximum turns reached"));
+            AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached { cap }) => {
+                return Err(format!(
+                    "maximum turns reached ({cap}). Raise the cap with --max-turns N or set `max_turns` in settings.json."
+                ));
             }
             AgentLoopEvent::Terminal(AgentTerminalEvent::Blocked) => {
                 return Err(String::from(
@@ -3737,7 +3746,7 @@ mod tests {
             thinking: None,
             effort: None,
             max_output_tokens: 65_536,
-            max_turns: 25,
+            max_turns: 200,
             system_prompt: None,
             system_prompt_file: None,
             append_system_prompt: None,

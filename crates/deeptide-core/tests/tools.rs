@@ -414,7 +414,7 @@ fn agent_tool_validates_swift_agent_types_and_reports_runtime_gap() {
     // asked for must still be present.
     assert!(explore.content.contains("Type: Explore"));
     assert!(explore.content.contains("Model: fast-model"));
-    assert!(explore.content.contains("Max turns: 10"));
+    assert!(explore.content.contains("Max turns: 40"));
     assert!(explore.content.contains("Read-only: true"));
     assert!(explore.content.contains("ListMcpResources"));
 }
