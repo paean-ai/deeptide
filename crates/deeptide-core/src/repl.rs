@@ -852,11 +852,18 @@ impl ReplSession {
             crate::Severity::Neutral
         };
 
+        // Segment order IS priority order: `StatusLine::render` keeps the
+        // leading segments and drops the trailing ones first when the terminal
+        // is too narrow to fit them all. So the high-value, volatile session
+        // metrics the user actively watches — `model`, `mode`, and especially
+        // `ctx` (context/token usage) — lead, and the longer, more static
+        // context (`cwd`, `git`) plus the low-priority `turns`/`cost` trail and
+        // get pruned first. Putting `cwd`/`git` ahead of `ctx` (as we used to)
+        // let a long working-directory path push the token indicator off a
+        // narrow tab entirely — the exact thing the user shouldn't lose.
         let mut segments = vec![
             StatusSegment::new("model", self.agent_loop.model()),
             StatusSegment::new("mode", mode_label).with_severity(mode_severity),
-            StatusSegment::new("cwd", cwd),
-            StatusSegment::new("git", branch),
             StatusSegment::new("ctx", ctx_value).with_severity(ctx_severity),
         ];
         if let Some(auth) = auth {
@@ -898,6 +905,11 @@ impl ReplSession {
                 format!("{}/{}", active, todo.total()),
             ));
         }
+        // Static context — useful but recoverable elsewhere (`pwd`, the shell
+        // prompt, `git status`), so it trails the live metrics and is the first
+        // thing dropped on a narrow terminal.
+        segments.push(StatusSegment::new("cwd", cwd));
+        segments.push(StatusSegment::new("git", branch));
         segments.push(StatusSegment::new(
             "turns",
             format!("{}/{}", summary.turns.len(), self.agent_loop.max_turns()),
