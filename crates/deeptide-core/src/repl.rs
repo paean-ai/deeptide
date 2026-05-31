@@ -733,13 +733,14 @@ impl ReplSession {
             Goal:\n\
             - Review recent useful session history.\n\
             - Extract durable project facts, decisions, preferences, recurring constraints, and unresolved follow-ups.\n\
-            - Save or update concise long-term memory in `.deeptide/MEMORY.md` or project memory files.\n\
-            - Merge duplicate or stale entries instead of appending noise.\n\n\
+            - Persist each kept fact with the `MemoryWrite` tool (title, body, reason; scope `project` unless it is a cross-project user preference, then `global`). Do NOT write memory files by hand — `MemoryWrite` is the only path that lands in the location future sessions load from.\n\
+            - Before writing, call `MemorySearch` for the same fact; if it is already stored, skip it — do NOT write a duplicate (`MemoryWrite` only appends new shards, it cannot edit one in place).\n\n\
             Rules:\n\
             - Execute exactly once.\n\
             - Do not edit system prompts, settings, cron jobs, or provider configuration.\n\
+            - Do not edit `MEMORY.md` or files under the memory directory directly — go through `MemoryWrite`.\n\
             - Do not add memories that are generic, obvious, temporary, secret, or unsupported by session history.\n\
-            - Keep memory files compact and human-readable."
+            - Keep each memory shard concise and human-readable."
         );
         self.agent_loop
             .run(&prompt)

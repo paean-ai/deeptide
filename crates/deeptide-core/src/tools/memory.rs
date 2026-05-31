@@ -161,13 +161,27 @@ fn search_memory(query: &str, scope: &str, max_results: usize, cwd: &Path) -> To
     for (scope_label, dir) in dirs {
         collect_memory_hits(scope_label, &dir, &needle, &mut hits);
     }
-    // Stable de-dup by path before ranking (path order keeps it deterministic).
+    // De-dup the same logical memory that exists in both the canonical and the
+    // legacy dir of a scope (during migration): key on (scope, file name) and
+    // keep the first seen. `memory_search_dirs` lists the canonical dir first,
+    // so canonical wins and the legacy copy is dropped — mirroring the loader's
+    // canonical-over-legacy resolution. `retain` preserves that insertion order.
+    let mut seen = std::collections::HashSet::new();
+    hits.retain(|hit| {
+        let name = hit
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        seen.insert((hit.scope, name))
+    });
+    // Deterministic order into the ranker (its index tie-break is then stable).
     hits.sort_by(|left, right| {
         left.scope
             .cmp(right.scope)
             .then_with(|| left.path.cmp(&right.path))
     });
-    hits.dedup_by(|left, right| left.path == right.path);
 
     if hits.is_empty() {
         return ToolResult::text("No matching Deeptide memory files found.");
@@ -326,17 +340,33 @@ fn first_markdown_heading(content: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn first_matching_memory_line(needle: &str, content: &str) -> Option<String> {
-    strip_frontmatter(content).lines().find_map(|line| {
+/// Pick the snippet line to show under a memory hit. BM25 ranks on individual
+/// query terms, so requiring the *whole* query as a contiguous substring (the
+/// old behaviour) left multi-word queries with no `match:` line even when the
+/// file ranked first. Instead, return the line that contains the most query
+/// terms (ties → the first such line), or `None` if no line shares any term —
+/// keeping the snippet consistent with why the file ranked.
+fn first_matching_memory_line(query: &str, content: &str) -> Option<String> {
+    let terms = crate::memory_rank::tokenize(query);
+    if terms.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, String)> = None;
+    for line in strip_frontmatter(content).lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed == "---" {
-            return None;
+            continue;
         }
-        trimmed
-            .to_ascii_lowercase()
-            .contains(needle)
-            .then(|| trimmed.to_owned())
-    })
+        let lower = trimmed.to_ascii_lowercase();
+        let hits = terms
+            .iter()
+            .filter(|term| lower.contains(term.as_str()))
+            .count();
+        if hits > 0 && best.as_ref().is_none_or(|(best_hits, _)| hits > *best_hits) {
+            best = Some((hits, trimmed.to_owned()));
+        }
+    }
+    best.map(|(_, line)| line)
 }
 
 fn parse_memory_type(raw: &str) -> Option<MemoryType> {
