@@ -1510,6 +1510,13 @@ fn run_interactive(
     let current_tool_phase_for_handler = Arc::clone(&current_tool_phase);
     let current_tool_phase_for_callback = Arc::clone(&current_tool_phase);
 
+    // Turn-scoped count of tools that have FINISHED this turn. Surfaced in the
+    // progress line ("· N done") so a long, multi-tool turn never reads as idle
+    // between tool rounds. Reset to 0 at the start of each turn.
+    let tools_done: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let tools_done_for_callback = Arc::clone(&tools_done);
+    let tools_done_for_handler = Arc::clone(&tools_done);
+
     // Live "preparing tool" ticker — see [`LiveToolArgsTicker`] for
     // the full rationale. Mid-turn, when the model has already
     // streamed some preamble text (which kills the main spinner) and
@@ -1602,12 +1609,21 @@ fn run_interactive(
                     *phase = Some(format!("Preparing {name}"));
                 }
                 if did_stream_handler.load(Ordering::Relaxed) {
-                    // Acquire the same lock the spinner & text
-                    // writers use, write a single `\n` to drop us
-                    // onto a fresh line below the assistant
-                    // markdown, then spawn the ticker.
+                    // Acquire the same lock the spinner & text writers use, then:
+                    //  1. Flush any partial narration line held by the markdown
+                    //     renderer, so the model's between-tool text (which often
+                    //     arrives without a trailing newline) doesn't run on into
+                    //     the next text segment after the tool.
+                    //  2. Write a single `\n` to drop us onto a fresh line below
+                    //     the assistant markdown, then spawn the ticker.
                     if let Ok(_guard) = live_tool_args_lock_for_handler.lock() {
                         let mut out = io::stdout();
+                        if let Ok(mut renderer) = streaming_md_handler.lock() {
+                            let pending = renderer.flush();
+                            if !pending.is_empty() {
+                                let _ = out.write_all(pending.as_bytes());
+                            }
+                        }
                         let _ = out.write_all(b"\n");
                         let _ = out.flush();
                     }
@@ -1618,6 +1634,7 @@ fn run_interactive(
                     let baseline = live_tool_args_chars_for_handler.load(Ordering::Relaxed);
                     let name_for_thread = name.clone();
                     let color = live_tool_args_use_color;
+                    let done_for_thread = Arc::clone(&tools_done_for_handler);
                     let handle = thread::spawn(move || {
                         run_tool_args_ticker(
                             &stop_for_thread,
@@ -1627,6 +1644,7 @@ fn run_interactive(
                             &name_for_thread,
                             Instant::now(),
                             color,
+                            &done_for_thread,
                         );
                     });
                     if let Ok(mut slot) = live_tool_args_handler.lock() {
@@ -1833,8 +1851,12 @@ fn run_interactive(
                 }
             }
             deeptide_core::ToolProgressEvent::Finished { .. } => {
+                // Count the completed tool and keep a running "N done" label in
+                // the phase, so between tools the spinner shows progress instead
+                // of reverting to a bare "Working".
+                let n = tools_done_for_callback.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Ok(mut phase) = current_tool_phase_for_callback.lock() {
-                    *phase = None;
+                    *phase = Some(format!("{n} tool{} done", if n == 1 { "" } else { "s" }));
                 }
             }
         },
@@ -2242,6 +2264,7 @@ fn run_interactive(
                 // start adding to it as soon as the first
                 // `TextDelta` / `ToolUseInputDelta` arrives.
                 stream_chars_received.store(0, Ordering::Relaxed);
+                tools_done.store(0, Ordering::Relaxed);
                 let spinner_handle = if invokes_agent && use_color {
                     let stop = Arc::clone(&spinner_stop);
                     let started = Arc::clone(&output_started);
@@ -2412,6 +2435,7 @@ fn run_interactive(
                 output_started.store(false, Ordering::Relaxed);
                 spinner_stop.store(false, Ordering::Relaxed);
                 stream_chars_received.store(0, Ordering::Relaxed);
+                tools_done.store(0, Ordering::Relaxed);
                 let spinner_handle = if use_color {
                     let stop = Arc::clone(&spinner_stop);
                     let started = Arc::clone(&output_started);
@@ -2585,6 +2609,7 @@ fn drain_live_tool_args(slot: &Mutex<Option<LiveToolArgsTicker>>) {
 /// but draws under a separate stop flag and reports tokens **for
 /// this tool's args alone** (subtracting `baseline_chars` from the
 /// shared turn counter).
+#[allow(clippy::too_many_arguments)] // internal progress-ticker helper; args are all distinct primitives
 fn run_tool_args_ticker(
     stop: &AtomicBool,
     lock: &Mutex<()>,
@@ -2593,6 +2618,7 @@ fn run_tool_args_ticker(
     tool_name: &str,
     started_at: Instant,
     color: bool,
+    tools_done: &AtomicUsize,
 ) {
     // Match `run_spinner`'s 150 ms grace so a quick BlockStop never
     // produces a flash. The model often emits the full tool_use in
@@ -2601,7 +2627,6 @@ fn run_tool_args_ticker(
     if stop.load(Ordering::Relaxed) {
         return;
     }
-    let phase = format!("Preparing {tool_name}");
     let mut tick = 0usize;
     while !stop.load(Ordering::Relaxed) {
         if let Ok(_guard) = lock.lock() {
@@ -2613,6 +2638,14 @@ fn run_tool_args_ticker(
             // never produces a negative token count.
             let scoped_chars = total_chars.saturating_sub(baseline_chars);
             let tokens_estimate = scoped_chars / 4;
+            // Append a running "· N done" so a multi-tool turn shows cumulative
+            // progress, not just the current tool.
+            let done = tools_done.load(Ordering::Relaxed);
+            let phase = if done > 0 {
+                format!("Preparing {tool_name} · {done} done")
+            } else {
+                format!("Preparing {tool_name}")
+            };
             let raw = tui::render_spinner_line_rich(
                 tick,
                 started_at.elapsed().as_secs(),
