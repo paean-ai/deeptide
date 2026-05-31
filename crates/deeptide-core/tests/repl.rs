@@ -1862,3 +1862,34 @@ fn no_session_capture_makes_exit_instant() {
         "capture disabled must skip the end-of-session consolidation entirely"
     );
 }
+
+#[test]
+fn model_menu_opens_for_bare_command_and_tags_current() {
+    let repl = ReplSession::new(Box::new(StaticBackend)).with_model("deepseek-chat");
+    // Bare /model → a picker; a concrete name → run directly (no menu).
+    let menu = repl
+        .menu_for("/model")
+        .expect("bare /model should open a picker");
+    assert_eq!(menu.title, "Switch model");
+    assert!(
+        menu.choices
+            .iter()
+            .any(|c| c.label.contains("deepseek-chat") && c.label.contains("current")),
+        "current model should lead and be tagged: {:?}",
+        menu.choices
+    );
+    assert!(menu.choices.iter().all(|c| c.action.starts_with("/model ")));
+    assert!(
+        repl.menu_for("/model flash").is_none(),
+        "a named model runs directly"
+    );
+}
+
+#[test]
+fn resume_menu_is_none_without_saved_sessions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+    // No sessions on disk → no picker (falls through to the listing path).
+    assert!(repl.menu_for("/resume").is_none());
+    assert!(repl.menu_for("/resume some-id").is_none());
+}

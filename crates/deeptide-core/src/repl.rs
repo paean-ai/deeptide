@@ -1714,8 +1714,78 @@ impl ReplSession {
             .unwrap_or((command, ""));
         match name.to_ascii_lowercase().as_str() {
             "import" => self.import_menu_for_args(args),
+            "resume" | "load" | "restore" => self.resume_menu(args),
+            "model" | "m" => self.model_menu(args),
             _ => None,
         }
+    }
+
+    /// `/resume` (no id) → a picker of saved sessions for this project; each row
+    /// resumes that session. `None` when an id is given or there are none.
+    fn resume_menu(&self, args: &str) -> Option<ReplMenu> {
+        if !args.trim().is_empty() {
+            return None;
+        }
+        let choices: Vec<ReplMenuChoice> = SessionStore::list(&self.tool_context.cwd)
+            .into_iter()
+            .take(30)
+            .map(|entry| {
+                let preview = if entry.preview.is_empty() {
+                    "(empty)".to_owned()
+                } else {
+                    entry.preview.clone()
+                };
+                ReplMenuChoice {
+                    label: format!(
+                        "{}  \"{}\"  ({} msgs)",
+                        session_short(&entry.session_id),
+                        preview,
+                        entry.message_count
+                    ),
+                    action: format!("/resume {}", entry.session_id),
+                }
+            })
+            .collect();
+        if choices.is_empty() {
+            return None;
+        }
+        Some(ReplMenu {
+            title: String::from("Resume a session"),
+            footer: String::from(
+                "/sessions for the full list  ·  /sessions --all to import from other agents",
+            ),
+            choices,
+        })
+    }
+
+    /// `/model` (no name) → a picker of known models; each row switches to it.
+    /// `None` when a name is given. The current model leads and is tagged.
+    fn model_menu(&self, args: &str) -> Option<ReplMenu> {
+        if !args.trim().is_empty() {
+            return None;
+        }
+        let current = self.agent_loop.model().to_owned();
+        let mut names: Vec<String> = vec![current.clone()];
+        for model in crate::cost::known_models() {
+            if !names.iter().any(|n| n == model.name) {
+                names.push(model.name.to_owned());
+            }
+        }
+        let choices: Vec<ReplMenuChoice> = names
+            .into_iter()
+            .map(|name| {
+                let tag = if name == current { "  · current" } else { "" };
+                ReplMenuChoice {
+                    label: format!("{name}{tag}"),
+                    action: format!("/model {name}"),
+                }
+            })
+            .collect();
+        Some(ReplMenu {
+            title: String::from("Switch model"),
+            footer: String::from("or type a name/alias directly: /model <name|flash|pro>"),
+            choices,
+        })
     }
 
     /// The `/import` menu for the given args, or `None` when the args name a
