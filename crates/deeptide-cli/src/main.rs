@@ -1166,6 +1166,39 @@ fn run_interactive(
     let stream_chars_received: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let stream_chars_handler = Arc::clone(&stream_chars_received);
 
+    // Shared "current tool name / preview" state. Two writers:
+    //   * the streaming handler sets it to `Preparing <name>` on
+    //     `ToolUseStart` (model committed to a tool, args streaming);
+    //   * the agent_loop's `tool_progress_callback` (further down)
+    //     overwrites it with the rich preview when the tool actually
+    //     runs (`⠦ Bash(npm test)`).
+    // The spinner thread reads it as `phase`. `None` = no tool in
+    // flight; both writers clear back to `None` on their respective
+    // exit events.
+    let current_tool_phase: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let current_tool_phase_for_handler = Arc::clone(&current_tool_phase);
+    let current_tool_phase_for_callback = Arc::clone(&current_tool_phase);
+
+    // Live "preparing tool" ticker — see [`LiveToolArgsTicker`] for
+    // the full rationale. Mid-turn, when the model has already
+    // streamed some preamble text (which kills the main spinner) and
+    // then commits to a tool_use, we spawn a small dedicated thread
+    // here to keep the elapsed/tokens panel ticking while args
+    // stream in.
+    //
+    // We share it via Arc<Mutex<Option<_>>> because:
+    //   * `streaming_handler` (called from the backend's SSE thread)
+    //     needs to spawn / stop / replace it across ToolUseStart and
+    //     BlockStop events.
+    //   * The post-stream cleanup path (on the REPL thread) also
+    //     needs access so it can drain a leftover ticker if the
+    //     stream was truncated without a matching BlockStop.
+    let live_tool_args: Arc<Mutex<Option<LiveToolArgsTicker>>> = Arc::new(Mutex::new(None));
+    let live_tool_args_handler = Arc::clone(&live_tool_args);
+    let live_tool_args_lock_for_handler = Arc::clone(&spinner_lock);
+    let live_tool_args_chars_for_handler = Arc::clone(&stream_chars_received);
+    let live_tool_args_use_color = use_color;
+
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
         match event {
             StreamingEvent::TextDelta { delta, .. } => {
@@ -1214,6 +1247,105 @@ fn run_interactive(
                 // the token counter freeze, which reads as
                 // "stuck".
                 stream_chars_handler.fetch_add(partial_json.chars().count(), Ordering::Relaxed);
+            }
+            StreamingEvent::ToolUseStart { index, name, .. } => {
+                // Two-headed response to "model is about to stream
+                // tool args":
+                //
+                //  (a) Update the *shared* `current_tool_phase` so
+                //      the main spinner (when still alive — i.e. no
+                //      text streamed yet this turn) flips its
+                //      activity label from a generic "Thinking" to
+                //      "Preparing <name>". This is the cheap case:
+                //      a single mutex write, no new threads.
+                //
+                //  (b) If text already streamed this turn, the main
+                //      spinner is dead (we stopped it on the first
+                //      `TextDelta`). The user would otherwise see
+                //      total silence while a multi-kilobyte tool
+                //      payload streams in. Drop a one-line live
+                //      ticker on a fresh row below the streamed
+                //      text and start animating it with the rich
+                //      "Preparing <name> · Ns · ↓ N tokens" panel.
+                if let Ok(mut phase) = current_tool_phase_for_handler.lock() {
+                    *phase = Some(format!("Preparing {name}"));
+                }
+                if did_stream_handler.load(Ordering::Relaxed) {
+                    // Acquire the same lock the spinner & text
+                    // writers use, write a single `\n` to drop us
+                    // onto a fresh line below the assistant
+                    // markdown, then spawn the ticker.
+                    if let Ok(_guard) = live_tool_args_lock_for_handler.lock() {
+                        let mut out = io::stdout();
+                        let _ = out.write_all(b"\n");
+                        let _ = out.flush();
+                    }
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let stop_for_thread = Arc::clone(&stop);
+                    let lock_for_thread = Arc::clone(&live_tool_args_lock_for_handler);
+                    let chars_for_thread = Arc::clone(&live_tool_args_chars_for_handler);
+                    let baseline = live_tool_args_chars_for_handler.load(Ordering::Relaxed);
+                    let name_for_thread = name.clone();
+                    let color = live_tool_args_use_color;
+                    let handle = thread::spawn(move || {
+                        run_tool_args_ticker(
+                            &stop_for_thread,
+                            &lock_for_thread,
+                            &chars_for_thread,
+                            baseline,
+                            &name_for_thread,
+                            Instant::now(),
+                            color,
+                        );
+                    });
+                    if let Ok(mut slot) = live_tool_args_handler.lock() {
+                        // If a previous ticker is still around
+                        // (shouldn't be — BlockStop is the canonical
+                        // exit) tear it down before replacing so we
+                        // don't leak a thread.
+                        if let Some(old) = slot.take() {
+                            old.stop.store(true, Ordering::Relaxed);
+                            if let Some(h) = old.handle {
+                                let _ = h.join();
+                            }
+                        }
+                        *slot = Some(LiveToolArgsTicker {
+                            stop,
+                            handle: Some(handle),
+                            block_index: *index,
+                        });
+                    }
+                }
+            }
+            StreamingEvent::BlockStop { index } => {
+                // Whichever content block just closed, clear the
+                // matching ticker. Index-matching keeps us from
+                // accidentally killing the ticker for tool_use #2
+                // when text-block #1 closes (the model emits text
+                // blocks too, each with its own BlockStop).
+                let to_join = if let Ok(mut slot) = live_tool_args_handler.lock() {
+                    match slot.as_ref() {
+                        Some(active) if active.block_index == *index => slot.take(),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(mut ticker) = to_join {
+                    ticker.stop.store(true, Ordering::Relaxed);
+                    if let Some(h) = ticker.handle.take() {
+                        let _ = h.join();
+                    }
+                    // Clear the "Preparing <name>" phase that the
+                    // ToolUseStart arm installed so the main
+                    // spinner (if it ever resumes) doesn't render a
+                    // stale tool name. The tool_progress callback
+                    // will repopulate it when the tool actually
+                    // runs.
+                    if let Ok(mut phase) = current_tool_phase_for_handler.lock() {
+                        *phase = None;
+                    }
+                }
             }
             StreamingEvent::MessageDelta {
                 stop_reason: Some(reason),
@@ -1346,15 +1478,11 @@ fn run_interactive(
         },
     );
 
-    // Shared state for "what tool is currently executing". The
-    // agent_loop's `tool_progress_callback` writes here under its
-    // own lock; the spinner thread reads under the same lock to
-    // render `⠦ Working · Bash(npm test) (3s)` instead of a
-    // generic `Crunching…`. `None` means "no tool in flight";
-    // we explicitly clear it on Finished so a slow follow-up text
-    // delta doesn't keep a stale tool name on the spinner.
-    let current_tool_phase: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let current_tool_phase_for_callback = Arc::clone(&current_tool_phase);
+    // `current_tool_phase` / `current_tool_phase_for_callback` are
+    // declared further up alongside the streaming handler's
+    // captures, because the handler also writes to the phase on
+    // `ToolUseStart` (model committed to a tool, args streaming).
+    // The `Finished` arm below clears it for the symmetric exit.
     let tool_progress_callback: deeptide_core::ToolProgressCallback = Arc::new(
         move |event: &deeptide_core::ToolProgressEvent| match event {
             deeptide_core::ToolProgressEvent::Started { preview, name, .. } => {
@@ -1724,6 +1852,14 @@ fn run_interactive(
 
                 let events = repl.submit(&content);
 
+                // Defensive: tear down any live tool-args ticker
+                // still in flight. The streaming handler joins its
+                // own ticker on `BlockStop`, but a truncated stream
+                // or network blip can leave one orphaned. Without
+                // this drain it would keep printing into the next
+                // turn's render area.
+                drain_live_tool_args(&live_tool_args);
+
                 // Halt the spinner and reclaim its line before printing results.
                 spinner_stop.store(true, Ordering::Relaxed);
                 if let Some(handle) = spinner_handle {
@@ -1886,6 +2022,11 @@ fn run_interactive(
 
                 let events = repl.finalize_session();
 
+                // Mirror the regular turn's defensive ticker drain
+                // (see comment in the main submit path). Cheap when
+                // there's nothing to drain — just an Arc lock.
+                drain_live_tool_args(&live_tool_args);
+
                 spinner_stop.store(true, Ordering::Relaxed);
                 if let Some(handle) = spinner_handle {
                     let _ = handle.join();
@@ -1983,6 +2124,116 @@ fn run_interactive(
 /// pair so it visually recedes behind upcoming streamed text. The setting
 /// must match the rest of the CLI's color policy (`use_color(cli)`) so a
 /// piped or `--no-color` run never emits stray escapes.
+/// Live indicator shown while the model is streaming a tool_use's
+/// JSON arguments **after** the main spinner has already been killed
+/// by an earlier `TextDelta`.
+///
+/// Without it the user sees the spinner disappear after the model's
+/// preamble text and then long silence while a multi-kilobyte tool
+/// payload streams in — reads as "stuck", which is exactly the
+/// symptom the user reported. With it, a single line below the
+/// streamed text repaints every 120 ms with the verb, tool name,
+/// elapsed seconds, and estimated tokens received.
+///
+/// ## Lifecycle
+///
+/// Spawned by the streaming handler on `ToolUseStart` (only when
+/// `did_stream == true`, i.e. text already ran and the main spinner
+/// is dead). Stopped + joined + line-cleared on `BlockStop` for the
+/// matching block index. Also cleaned up defensively at turn end so
+/// an aborted ticker (truncated stream, network blip) can't leak.
+///
+/// `baseline_chars` snapshots `stream_chars_received` at start so the
+/// "↓ N tokens" panel reports tokens **for this tool's args**, not
+/// cumulative-since-turn-start (which would mix in the preceding
+/// text's char count and read as wrong).
+struct LiveToolArgsTicker {
+    /// Set to `true` to end the ticker's animation loop.
+    stop: Arc<AtomicBool>,
+    /// `Some` until the owning handler joins the thread; taken
+    /// out on stop.
+    handle: Option<std::thread::JoinHandle<()>>,
+    /// Anthropic content-block index this ticker is tracking. The
+    /// matching `BlockStop` carries the same index.
+    block_index: usize,
+}
+
+/// Defensive teardown for a [`LiveToolArgsTicker`] left behind by an
+/// abnormal stream termination (truncated SSE, network blip, model
+/// emitting `ToolUseStart` without a matching `BlockStop`). Called
+/// at turn boundaries so the orphan can't keep painting into the
+/// next turn.
+///
+/// No-op when the slot is already empty, so calling it
+/// unconditionally is cheap.
+fn drain_live_tool_args(slot: &Mutex<Option<LiveToolArgsTicker>>) {
+    let to_join = slot.lock().ok().and_then(|mut s| s.take());
+    if let Some(mut ticker) = to_join {
+        ticker.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = ticker.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Animation loop for [`LiveToolArgsTicker`]. Mirrors `run_spinner`
+/// but draws under a separate stop flag and reports tokens **for
+/// this tool's args alone** (subtracting `baseline_chars` from the
+/// shared turn counter).
+fn run_tool_args_ticker(
+    stop: &AtomicBool,
+    lock: &Mutex<()>,
+    stream_chars: &AtomicUsize,
+    baseline_chars: usize,
+    tool_name: &str,
+    started_at: Instant,
+    color: bool,
+) {
+    // Match `run_spinner`'s 150 ms grace so a quick BlockStop never
+    // produces a flash. The model often emits the full tool_use in
+    // one SSE frame for short inputs (e.g. TodoWrite).
+    thread::sleep(Duration::from_millis(150));
+    if stop.load(Ordering::Relaxed) {
+        return;
+    }
+    let phase = format!("Preparing {tool_name}");
+    let mut tick = 0usize;
+    while !stop.load(Ordering::Relaxed) {
+        if let Ok(_guard) = lock.lock() {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let total_chars = stream_chars.load(Ordering::Relaxed);
+            // Saturate so a stale snapshot (counter reset mid-turn)
+            // never produces a negative token count.
+            let scoped_chars = total_chars.saturating_sub(baseline_chars);
+            let tokens_estimate = scoped_chars / 4;
+            let raw = tui::render_spinner_line_rich(
+                tick,
+                started_at.elapsed().as_secs(),
+                Some(&phase),
+                tokens_estimate,
+            );
+            let line = status_bar::dim(&raw, color);
+            let mut out = io::stdout();
+            // Same redraw pattern as `run_spinner`: carriage return
+            // to column 0, paint, then EL to wipe stale glyphs from
+            // the previous (longer) frame.
+            let _ = write!(out, "\r{line}\x1b[K");
+            let _ = out.flush();
+        }
+        tick = tick.wrapping_add(1);
+        thread::sleep(Duration::from_millis(120));
+    }
+    // Wipe our line on exit so whatever renders next (tool header,
+    // assistant text continuation) lands on a clean row.
+    if let Ok(_guard) = lock.lock() {
+        let mut out = io::stdout();
+        let _ = write!(out, "\r\x1b[2K");
+        let _ = out.flush();
+    }
+}
+
 fn run_spinner(
     stop: &AtomicBool,
     output_started: &AtomicBool,
@@ -3450,9 +3701,10 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, FIXED_ARG_SUGGESTIONS, InputFormat, OutputFormat,
-        ReplHelper, VERSION_LONG, VERSION_SHORT, apply_config_fallbacks, at_path_completion,
-        build_auth_segment, collect_prompt, compute_hint, configured_backend, effective_base_url,
+        Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, FIXED_ARG_SUGGESTIONS, InputFormat,
+        LiveToolArgsTicker, OutputFormat, ReplHelper, VERSION_LONG, VERSION_SHORT,
+        apply_config_fallbacks, at_path_completion, build_auth_segment, collect_prompt,
+        compute_hint, configured_backend, drain_live_tool_args, effective_base_url,
         effective_model, format_retry_notice_line, next_permission_mode, normalize_embedded_mode,
         paean_token_resolved, parse_permission_response, render_system_message,
         summarize_tool_call_for_prompt, truncate_inline, use_color, validate_formats,
@@ -5397,4 +5649,94 @@ mod tests {
     // + `Mutex<()>` gives us cross-test exclusion without a
     // `lazy_static` dep.
     static SERIAL_CWD: OnceLock<Mutex<()>> = OnceLock::new();
+
+    // ── LiveToolArgsTicker lifecycle ────────────────────────────────
+    //
+    // The ticker thread itself is hard to unit test (it animates
+    // against `io::stdout()` and times its own sleep). Instead we
+    // exercise the `drain_live_tool_args` helper and the public
+    // structural fields it depends on, since that's the only public
+    // surface other code interacts with.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn drain_live_tool_args_is_noop_when_slot_is_empty() {
+        let slot: Mutex<Option<LiveToolArgsTicker>> = Mutex::new(None);
+        drain_live_tool_args(&slot);
+        assert!(slot.lock().unwrap().is_none(), "slot must remain empty");
+    }
+
+    #[test]
+    fn drain_live_tool_args_stops_and_joins_ticker_thread() {
+        // Spawn a tiny stub thread that just polls the stop flag.
+        // Standing in for `run_tool_args_ticker` keeps the test out
+        // of stdout / lock territory while still exercising the
+        // shutdown handshake the real path uses.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_for_thread.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+
+        let slot: Mutex<Option<LiveToolArgsTicker>> = Mutex::new(Some(LiveToolArgsTicker {
+            stop: Arc::clone(&stop),
+            handle: Some(handle),
+            block_index: 7,
+        }));
+
+        drain_live_tool_args(&slot);
+
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "drain must flip the stop flag so the worker can exit"
+        );
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "drain must clear the slot after joining"
+        );
+    }
+
+    #[test]
+    fn drain_live_tool_args_drops_handle_so_slot_is_safe_to_refill() {
+        // After drain the slot must be `None`, not `Some(_)` with
+        // an already-joined handle — otherwise the next
+        // `ToolUseStart` would replace a ghost ticker and double
+        // up on stop signals.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_for_thread.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let slot: Mutex<Option<LiveToolArgsTicker>> = Mutex::new(Some(LiveToolArgsTicker {
+            stop,
+            handle: Some(handle),
+            block_index: 0,
+        }));
+
+        drain_live_tool_args(&slot);
+        // Re-arm to confirm the slot is genuinely re-usable.
+        let stop2 = Arc::new(AtomicBool::new(false));
+        let stop2_for_thread = Arc::clone(&stop2);
+        let handle2 = std::thread::spawn(move || {
+            while !stop2_for_thread.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        {
+            let mut guard = slot.lock().unwrap();
+            *guard = Some(LiveToolArgsTicker {
+                stop: stop2,
+                handle: Some(handle2),
+                block_index: 42,
+            });
+        }
+        drain_live_tool_args(&slot);
+        assert!(slot.lock().unwrap().is_none());
+    }
 }
