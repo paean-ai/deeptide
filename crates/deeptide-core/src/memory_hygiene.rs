@@ -26,6 +26,24 @@ pub fn jaccard(a: &str, b: &str) -> f64 {
     if union == 0.0 { 0.0 } else { inter / union }
 }
 
+/// Overlap (containment) coefficient of the two texts' term sets:
+/// `|A ∩ B| / min(|A|, |B|)`, in `[0.0, 1.0]`.
+///
+/// Unlike [`jaccard`], a short string fully contained in a much longer one
+/// scores ~1.0 — the right measure for matching a short memory *title* against
+/// a longer candidate *fact*, where Jaccard's union denominator inflates with
+/// the long side and understates a real duplicate.
+pub fn overlap_coefficient(a: &str, b: &str) -> f64 {
+    let sa: HashSet<String> = tokenize(a).into_iter().collect();
+    let sb: HashSet<String> = tokenize(b).into_iter().collect();
+    let min = sa.len().min(sb.len());
+    if min == 0 {
+        return 0.0;
+    }
+    let inter = sa.intersection(&sb).count() as f64;
+    inter / min as f64
+}
+
 /// A detected near-duplicate pair (indices into the input slice) and their
 /// similarity.
 #[derive(Debug, Clone, PartialEq)]
@@ -121,6 +139,9 @@ fn looks_like_path(token: &str) -> bool {
 
 /// Of the paths a memory entry references, the ones that no longer exist under
 /// `root`. A non-empty result means the entry is stale by dead reference.
+///
+/// `root` must be the project root the entry's relative paths are anchored to;
+/// running it against an unrelated cwd would false-flag every path as dead.
 pub fn dead_references(text: &str, root: &Path) -> Vec<String> {
     referenced_paths(text)
         .into_iter()

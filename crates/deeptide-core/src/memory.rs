@@ -4,6 +4,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub const MEMORY_INDEX_FILE: &str = "MEMORY.md";
+/// Caps on the cached memory **core** injected into the system prompt.
+///
+/// NOTE: `truncate_memory` runs *after* `load_memory_index` has expanded each
+/// `MEMORY.md` index entry into the referenced file's full body, so these bound
+/// the concatenated **bodies** (in lines / bytes) — they are not a count of
+/// memory entries. In practice the resident core is only the first handful of
+/// files; everything past the cap is reached on demand via `MemorySearch`.
 pub const MEMORY_MAX_LINES: usize = 200;
 pub const MEMORY_MAX_BYTES: usize = 25 * 1024;
 
@@ -543,9 +550,7 @@ pub fn truncate_memory(text: &str) -> String {
         } else {
             String::from("more available via MemorySearch")
         };
-        out.push_str(&format!(
-            "\n\n...(memory core capped at {why} per tide-spec/0.1 section 13.1; {tail})..."
-        ));
+        out.push_str(&format!("\n\n...(memory core capped at {why}; {tail})..."));
     }
 
     out
