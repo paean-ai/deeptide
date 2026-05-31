@@ -109,5 +109,6 @@ pub use tools::{
 };
 pub use tps::{TpsRecord, TpsSample};
 pub use tui::{
-    InputBar, InputLayout, StatusLine, StatusSegment, TranscriptItem, TranscriptKind, TuiFrame,
+    InputBar, InputLayout, Severity, StatusLine, StatusSegment, TranscriptItem, TranscriptKind,
+    TuiFrame,
 };

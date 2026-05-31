@@ -1532,10 +1532,14 @@ fn run_interactive(
         let auth_segment =
             build_auth_segment(api_key_resolved, paean_token_resolved(), auth_paint_tick);
         auth_paint_tick = auth_paint_tick.wrapping_add(1);
-        let bar_text = repl
+        // `render_styled` emits per-segment SGR so `mode bypass`
+        // / `ctx 96%` / missing-auth pop against the otherwise
+        // dim bar. With color off it returns the same plain
+        // string as `render`, so the previous `status_bar::dim`
+        // wrap-everything path is no longer needed.
+        let bar_styled = repl
             .status_line_with_auth(Some(auth_segment))
-            .render(bar_width);
-        let bar_styled = status_bar::dim(&bar_text, use_color);
+            .render_styled(bar_width, use_color);
         if let Some(bar) = anchored.as_mut() {
             bar.repaint(&bar_styled, &spinner_lock);
             // Pin the input prompt to the row directly above the
@@ -3342,7 +3346,12 @@ fn build_auth_segment(api_key_resolved: bool, paean_resolved: bool, tick: u64) -
         }
         (true, false) => StatusSegment::new("key", "ok"),
         (false, true) => StatusSegment::new("paean", "ok"),
-        (false, false) => StatusSegment::new("auth", "—"),
+        // Bold-red `auth —` so the user immediately spots a
+        // mis-configured session instead of wondering why every
+        // turn fails with an auth error.
+        (false, false) => {
+            StatusSegment::new("auth", "—").with_severity(deeptide_core::Severity::Alert)
+        }
     }
 }
 
