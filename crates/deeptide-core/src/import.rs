@@ -805,7 +805,7 @@ mod tests {
             .turns
             .iter()
             .find(|t| t.role == ImportedRole::User && t.kind == TurnKind::Message)
-            .unwrap();
+            .expect("a human user message");
         assert_eq!(user.text, "Use pnpm, never npm.");
         assert!(!user.text.contains("ignore me"));
         // Assistant text + a tool_use + a tool_result all captured.
@@ -832,7 +832,7 @@ mod tests {
             .turns
             .iter()
             .find(|t| t.role == ImportedRole::User && t.kind == TurnKind::Message)
-            .unwrap();
+            .expect("a human user message");
         assert_eq!(user.text, "Deploy to cn-shanghai.");
         assert!(
             t.turns
