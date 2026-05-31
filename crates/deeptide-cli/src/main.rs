@@ -303,6 +303,28 @@ struct Cli {
     list_sessions: bool,
 
     #[arg(
+        long = "import",
+        value_name = "TOOL",
+        help = "Import a prior session from another agent (claude|codex|deeptide) for this directory before the first prompt."
+    )]
+    import: Option<String>,
+
+    #[arg(
+        long = "import-session",
+        value_name = "ID",
+        help = "Which session to import (id prefix). Defaults to the most recent for this directory."
+    )]
+    import_session: Option<String>,
+
+    #[arg(
+        long = "import-as",
+        value_name = "MODE",
+        default_value = "context",
+        help = "How to bring the imported session in: `context` (splice a live handoff) or `memory` (distil durable facts)."
+    )]
+    import_as: String,
+
+    #[arg(
         long = "list-models",
         action = ArgAction::SetTrue,
         help = "List models with built-in pricing data and exit (no API key required)."
@@ -1901,6 +1923,19 @@ fn run_interactive(
         .map_err(|error| error.to_string())?;
     }
 
+    // --import <tool>: bring in a prior session from another agent (Claude Code,
+    // Codex) before the first prompt. Renders the same events the `/import`
+    // slash command would.
+    if let Some(tool) = cli.import.as_deref() {
+        let selector = cli.import_session.as_deref().unwrap_or("--latest");
+        let import_args = format!("{tool} {selector} --as {}", cli.import_as);
+        for event in repl.run_import(&import_args) {
+            if let deeptide_core::ReplEvent::Output(text) = event {
+                writeln!(stdout, "{text}").map_err(|error| error.to_string())?;
+            }
+        }
+    }
+
     // Anchor the status bar to the bottom row of the terminal so it doesn't
     // scroll with conversation content. Falls back (returns None) on non-
     // TTY stdout, `TERM=dumb`, or terminals too small to host the bar — in
@@ -2756,6 +2791,33 @@ fn run_prompt(
     if let Some(session_id) = resolve_resume_id(cli, cwd) {
         let messages = deeptide_core::SessionStore::load(cwd, &session_id)?;
         loop_.restore_messages(messages);
+    }
+
+    // --import <tool> --import-as context: prepend a framed handoff from a
+    // foreign session so the one-shot prompt continues prior work. (Memory-mode
+    // import is interactive-only; it needs its own agent pass.)
+    if let Some(tool) = cli.import.as_deref() {
+        if cli.import_as != "memory" {
+            if let Some(source) = deeptide_core::import::SourceTool::parse(tool) {
+                let selector = cli.import_session.as_deref().unwrap_or("--latest");
+                match deeptide_core::import::resolve_ref(cwd, source, selector)
+                    .and_then(|r| deeptide_core::import::parse_file(&r.path, source))
+                {
+                    Ok(t) if t.message_turns() > 0 => {
+                        let handoff = deeptide_core::import::handoff_message(&t, 8);
+                        let mut combined = vec![handoff];
+                        combined.extend(loop_.messages().to_vec());
+                        loop_.restore_messages(combined);
+                    }
+                    Ok(_) => eprintln!("[import] session had no conversational content; skipped."),
+                    Err(e) => eprintln!("[import] {e}"),
+                }
+            } else {
+                eprintln!("[import] unknown source `{tool}`; use claude, codex, or deeptide.");
+            }
+        } else {
+            eprintln!("[import] --import-as memory is interactive-only; run deeptide without --print.");
+        }
     }
 
     let events = loop_.run(prompt);

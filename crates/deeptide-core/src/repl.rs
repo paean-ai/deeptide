@@ -440,6 +440,18 @@ impl ReplSession {
         Ok(count)
     }
 
+    /// CLI-facing entry for `/import` — same arg grammar as the slash command
+    /// (`<tool> [<id>|--latest] [--as memory|context]`). Returns the events the
+    /// REPL would emit so the caller can render them identically.
+    pub fn run_import(&mut self, args: &str) -> Vec<ReplEvent> {
+        self.execute_import_command(args)
+    }
+
+    /// CLI-facing entry for `/continue` — newest foreign session → live handoff.
+    pub fn run_continue(&mut self, args: &str) -> Vec<ReplEvent> {
+        self.execute_continue_command(args)
+    }
+
     pub fn with_pricing_overrides(
         mut self,
         overrides: std::collections::HashMap<String, crate::ModelPricing>,
@@ -1016,6 +1028,8 @@ impl ReplSession {
             "keybindings" | "keys" => self.execute_keybindings_command(args),
             "sessions" | "session" => self.execute_sessions_command(args),
             "resume" | "load" | "restore" => self.execute_resume_command(args),
+            "import" => return self.execute_import_command(args),
+            "continue" | "handoff" => return self.execute_continue_command(args),
             "open" => self.execute_open_command(args),
             "paste" | "p" => self.execute_paste_command(args),
             "doctor" => self.execute_doctor_command(args),
@@ -1383,8 +1397,20 @@ impl ReplSession {
     }
 
     fn execute_sessions_command(&self, args: &str) -> CommandResult {
-        if args.split_whitespace().count() > 1 {
-            return CommandResult::Text(String::from("Usage: /sessions [filter]"));
+        // `--all` widens the listing to importable sessions from other agents
+        // (Claude Code, Codex) discovered for this project.
+        let want_all = args.split_whitespace().any(|a| a == "--all" || a == "-a");
+        let filter_args: Vec<&str> = args
+            .split_whitespace()
+            .filter(|a| *a != "--all" && *a != "-a")
+            .collect();
+        if filter_args.len() > 1 {
+            return CommandResult::Text(String::from("Usage: /sessions [filter] [--all]"));
+        }
+        let args = filter_args.first().copied().unwrap_or("");
+
+        if want_all {
+            return self.execute_sessions_all_command(args);
         }
 
         let entries = SessionStore::list(&self.tool_context.cwd);
@@ -1430,6 +1456,47 @@ impl ReplSession {
         CommandResult::Text(lines.join("\n"))
     }
 
+    /// `/sessions --all`: native deeptide sessions plus importable sessions
+    /// from other agents (Claude Code, Codex), newest first.
+    fn execute_sessions_all_command(&self, filter: &str) -> CommandResult {
+        let refs = crate::import::discover(&self.tool_context.cwd);
+        let native = SessionStore::list(&self.tool_context.cwd);
+        if refs.is_empty() && native.is_empty() {
+            return CommandResult::Text(String::from(
+                "No sessions found for this project (deeptide, Claude Code, or Codex).",
+            ));
+        }
+        let filter = filter.trim().to_ascii_lowercase();
+        let mut lines = vec![String::from("Importable sessions (newest first):")];
+        let mut shown = 0;
+        for r in refs.iter() {
+            if shown >= 25 {
+                break;
+            }
+            let id = session_short(&r.session_id);
+            if !filter.is_empty() && !id.to_ascii_lowercase().contains(&filter) {
+                continue;
+            }
+            lines.push(format!(
+                "  [{}] {}  →  /import {} {}",
+                r.source.label(),
+                id,
+                r.source.label(),
+                id,
+            ));
+            shown += 1;
+        }
+        if shown == 0 {
+            lines.push(String::from("  (none matched)"));
+        }
+        lines.push(String::new());
+        lines.push(String::from(
+            "Use `/import <tool> <id> --as memory` to distil it, or `--as context` \
+             (or `/continue <tool>`) for a live handoff.",
+        ));
+        CommandResult::Text(lines.join("\n"))
+    }
+
     fn execute_resume_command(&mut self, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.split_whitespace().count() > 1 {
@@ -1450,6 +1517,154 @@ impl ReplSession {
             }
             Err(e) => CommandResult::Text(format!("Cannot resume: {e}")),
         }
+    }
+
+    /// Resolve `<source> [<id>|--latest]` to a concrete foreign session for the
+    /// current project. Empty/`--latest`/`latest` picks the newest.
+    fn resolve_import_ref(
+        &self,
+        source: crate::import::SourceTool,
+        selector: &str,
+    ) -> Result<crate::import::SessionRef, String> {
+        crate::import::resolve_ref(&self.tool_context.cwd, source, selector)
+    }
+
+    /// `/import <tool> [<id>|--latest] [--as memory|context]` — bring an
+    /// external agent's session into deeptide. `--as memory` (default) distils
+    /// durable facts via the consolidation pass; `--as context` splices a
+    /// framed handoff block into the live conversation.
+    fn execute_import_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let mut tokens = args.split_whitespace().peekable();
+        let Some(source_raw) = tokens.next() else {
+            return vec![ReplEvent::Output(String::from(
+                "Usage: /import <claude|codex|deeptide> [<id>|--latest] [--as memory|context]\n\
+                 List candidates with /sessions --all.",
+            ))];
+        };
+        let Some(source) = crate::import::SourceTool::parse(source_raw) else {
+            return vec![ReplEvent::Output(format!(
+                "Unknown source `{source_raw}`. Use claude, codex, or deeptide."
+            ))];
+        };
+        // Split remaining args into a selector and an `--as <mode>`.
+        let mut selector = String::new();
+        let mut mode = "memory";
+        while let Some(tok) = tokens.next() {
+            if tok == "--as" || tok == "-a" {
+                if let Some(m) = tokens.next() {
+                    mode = match m {
+                        "context" | "handoff" => "context",
+                        _ => "memory",
+                    };
+                }
+            } else if selector.is_empty() {
+                selector = tok.to_owned();
+            }
+        }
+
+        let session_ref = match self.resolve_import_ref(source, &selector) {
+            Ok(r) => r,
+            Err(e) => return vec![ReplEvent::Output(e)],
+        };
+        let transcript = match crate::import::parse_file(&session_ref.path, source) {
+            Ok(t) => t,
+            Err(e) => return vec![ReplEvent::Output(format!("Cannot read session: {e}"))],
+        };
+
+        if mode == "context" {
+            self.import_as_context(transcript)
+        } else {
+            self.import_as_memory(transcript)
+        }
+    }
+
+    /// `/continue [tool]` — newest foreign session → live handoff. Convenience
+    /// over `/import <tool> --latest --as context`; defaults to Claude.
+    fn execute_continue_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let source_raw = args.split_whitespace().next().unwrap_or("claude");
+        let Some(source) = crate::import::SourceTool::parse(source_raw) else {
+            return vec![ReplEvent::Output(format!(
+                "Unknown source `{source_raw}`. Use claude, codex, or deeptide."
+            ))];
+        };
+        let session_ref = match self.resolve_import_ref(source, "--latest") {
+            Ok(r) => r,
+            Err(e) => return vec![ReplEvent::Output(e)],
+        };
+        match crate::import::parse_file(&session_ref.path, source) {
+            Ok(t) => self.import_as_context(t),
+            Err(e) => vec![ReplEvent::Output(format!("Cannot read session: {e}"))],
+        }
+    }
+
+    /// Distil an imported transcript into durable memory shards by running the
+    /// consolidation pass seeded with its flattened text. Reuses the same
+    /// agent-driven `MemoryWrite` path as `/dream`, so dedup + scope rules
+    /// apply unchanged.
+    fn import_as_memory(&mut self, transcript: crate::import::ImportedTranscript) -> Vec<ReplEvent> {
+        let flat = crate::import::flatten_for_extraction(&transcript);
+        if flat.trim().is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "Imported session has no conversational content to distil.",
+            ))];
+        }
+        let source = transcript.source.label();
+        let cwd = self.tool_context.cwd.display().to_string();
+        let prompt = format!(
+            "[session import — execute once, do NOT create cron jobs or loops]\n\n\
+            You are importing context from a previous {source} session into deeptide's \
+            long-term memory for workspace:\n{cwd}\n\n\
+            Below is the conversational transcript of that session. Extract durable, \
+            reusable project facts, decisions, conventions, constraints, and unresolved \
+            follow-ups worth remembering for future sessions.\n\n\
+            Rules:\n\
+            - Persist each kept fact with the `MemoryWrite` tool (scope `project` unless it \
+            is a cross-project user preference, then `global`).\n\
+            - Before writing, call `MemorySearch`; if a fact is already stored, skip it — \
+            do NOT write duplicates.\n\
+            - Do not import one-off task details, transient state, secrets, or anything not \
+            durable.\n\
+            - Execute exactly once; do not edit settings, cron, or provider config.\n\n\
+            Transcript:\n{flat}"
+        );
+        let mut events = vec![ReplEvent::Output(format!(
+            "[import] distilling {} conversational turns from {source} session {} into memory…",
+            transcript.message_turns(),
+            session_short(&transcript.session_id),
+        ))];
+        events.extend(
+            self.agent_loop
+                .run(&prompt)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        events
+    }
+
+    /// Splice a framed handoff block (older turns noted, recent tail verbatim)
+    /// to the FRONT of the live conversation so it's a stable, cache-friendly
+    /// prefix. Snapshots first so `/rewind` can undo it.
+    fn import_as_context(&mut self, transcript: crate::import::ImportedTranscript) -> Vec<ReplEvent> {
+        if transcript.message_turns() == 0 {
+            return vec![ReplEvent::Output(String::from(
+                "Imported session has no conversational content to hand off.",
+            ))];
+        }
+        const RECENT_TAIL: usize = 8;
+        let handoff = crate::import::handoff_message(&transcript, RECENT_TAIL);
+        let mut combined = vec![handoff];
+        combined.extend(self.agent_loop.messages().to_vec());
+        self.agent_loop.restore_messages(combined);
+
+        let source = transcript.source.label();
+        vec![ReplEvent::Output(format!(
+            "[import] handed off {} turns from {source} session {} into the live \
+             conversation (recent {} kept verbatim). Continue where it left off; \
+             use `/import {source} --as memory` for the full durable context.",
+            transcript.message_turns(),
+            session_short(&transcript.session_id),
+            RECENT_TAIL.min(transcript.message_turns()),
+        ))]
     }
 
     fn execute_open_command(&self, args: &str) -> CommandResult {
@@ -3274,6 +3489,17 @@ fn build_goal_continuation_prompt(goal: &str) -> String {
 /// (`/dream start 50`) and `--every`/`-n` flags (`/dream start --every 50`).
 /// Empty input means "use the default cadence". Invalid input produces a
 /// short, actionable error message.
+/// Shorten a (possibly UUID-long) session id for display: first dash-group,
+/// capped, so listings and import receipts stay tidy.
+fn session_short(id: &str) -> String {
+    let head = id.split('-').next().unwrap_or(id);
+    if head.chars().count() >= 8 {
+        head.chars().take(8).collect()
+    } else {
+        id.chars().take(16).collect()
+    }
+}
+
 fn parse_dream_cadence(rest: &str) -> Result<usize, String> {
     let rest = rest.trim();
     if rest.is_empty() {

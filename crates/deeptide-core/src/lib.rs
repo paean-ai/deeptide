@@ -11,6 +11,7 @@ pub mod cost;
 pub mod diff_preview;
 pub mod embedded_protocol;
 pub mod hooks;
+pub mod import;
 pub mod markdown;
 pub mod memory;
 pub mod memory_capture;
