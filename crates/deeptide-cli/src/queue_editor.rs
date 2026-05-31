@@ -615,8 +615,8 @@ pub fn enter_raw_mode() -> Option<RawModeGuard> {
 pub type EditorStop = Arc<AtomicBool>;
 
 /// Build the args every pump thread needs. Bundled in a struct so
-/// the spawning site reads cleanly and we don't pass six positional
-/// `Arc`s around.
+/// the spawning site reads cleanly and we don't pass eight
+/// positional `Arc`s around.
 pub struct EditorContext {
     pub queue: Arc<Mutex<MessageQueue>>,
     pub stop: EditorStop,
@@ -631,6 +631,23 @@ pub struct EditorContext {
     pub repaint: Box<dyn Fn(&str) + Send>,
     pub use_color: bool,
     pub line_width: usize,
+    /// When set, the pump releases raw mode, blanks its painted
+    /// input row, raises `suspended`, and parks itself until the
+    /// flag clears. Used by the permission prompt (and any other
+    /// caller that needs exclusive cooked-mode stdin) to take
+    /// over without racing the pump for bytes.
+    ///
+    /// Without this, the pump's raw-mode reader gobbles every
+    /// byte the user types in response to `[y]es / [n]o / [t] /
+    /// [a]ll-yolo`, so the agent's `read_line` never sees the
+    /// answer.
+    pub suspend: Arc<AtomicBool>,
+    /// Set by the pump to `true` once it has actually released
+    /// raw mode in response to `suspend`. Callers poll this flag
+    /// (with a short timeout) to know when it's safe to read
+    /// from stdin in cooked mode. Cleared by the pump once it
+    /// re-enters raw mode on resume.
+    pub suspended: Arc<AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -679,16 +696,77 @@ fn read_burst(buf: &mut [u8]) -> std::io::Result<usize> {
 /// final state of the editor (if the user was mid-line when the
 /// turn ended) is dropped — those bytes are lost the same way an
 /// uncommitted rustyline buffer is at Ctrl-C.
-pub fn run_pump(ctx: EditorContext) {
+///
+/// `guard` is the raw-mode guard the caller acquired via
+/// [`enter_raw_mode`]; ownership is transferred so the pump can
+/// release / re-acquire raw mode mid-turn in response to the
+/// `suspend` signal (e.g. while the agent's permission prompt is
+/// reading cooked-mode stdin). The guard is restored on every
+/// exit path including suspend transitions and panic via `Drop`.
+pub fn run_pump(ctx: EditorContext, mut guard: RawModeGuard) {
     let mut editor = QueueEditor::new();
     let mut buf = [0u8; 64];
     let debug_log = open_debug_log();
+    let mut have_raw = true;
 
     // Initial paint so the affordance shows up immediately, even
     // before the user types a single byte.
     paint(&ctx, &editor);
 
     while !ctx.stop.load(Ordering::Relaxed) {
+        // Handle the suspend handshake first so callers that need
+        // exclusive stdin (the agent's permission prompt is the
+        // canonical case) can take over within ~20ms of raising
+        // `suspend`. We:
+        //   1. Blank the input row so the cooked-mode prompt has
+        //      a clean line to print on.
+        //   2. Drop the raw-mode guard, restoring the terminal's
+        //      original termios (ICANON / ECHO / IEXTEN back on).
+        //   3. Raise `suspended` to acknowledge release.
+        //   4. Park in a 20ms-poll loop until `suspend` clears
+        //      (or `stop` fires, in which case we exit cleanly
+        //      with raw mode already restored — the explicit
+        //      drop path below skips re-restore for an already
+        //      inactive guard).
+        //   5. Re-acquire raw mode and repaint the editor.
+        if ctx.suspend.load(Ordering::Relaxed) {
+            // Step 1: blank our painted line so the cooked-mode
+            // prompt doesn't have to fight with a stale
+            // `▎ ✎ <buf>█` ghost. Best-effort under the paint lock.
+            if let Ok(_g) = ctx.paint_lock.lock() {
+                (ctx.repaint)("");
+            }
+            // Step 2: release raw mode.
+            if have_raw {
+                guard.restore();
+                have_raw = false;
+            }
+            // Step 3: ack release.
+            ctx.suspended.store(true, Ordering::Relaxed);
+
+            // Step 4: park until resume (or stop).
+            while ctx.suspend.load(Ordering::Relaxed) && !ctx.stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            ctx.suspended.store(false, Ordering::Relaxed);
+            if ctx.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            // Step 5: re-acquire raw mode. If the second attempt
+            // fails (rare — termios on the original fd hasn't gone
+            // anywhere), exit gracefully rather than spin-looping
+            // forever in cooked mode pretending to be raw.
+            match enter_raw_mode() {
+                Some(new_guard) => {
+                    guard = new_guard;
+                    have_raw = true;
+                    paint(&ctx, &editor);
+                }
+                None => break,
+            }
+            continue;
+        }
+
         match poll_stdin(50) {
             Ok(true) => {}
             Ok(false) => continue,
@@ -725,6 +803,15 @@ pub fn run_pump(ctx: EditorContext) {
             paint(&ctx, &editor);
         }
     }
+
+    // Belt + suspenders: if we exited the loop while suspended
+    // (stop fired during the park), make sure the ack flag is
+    // false so future callers don't see a phantom "already
+    // suspended" signal from a fresh editor instance.
+    ctx.suspended.store(false, Ordering::Relaxed);
+    // Restoration of the guard is handled by Drop; the
+    // `have_raw` bookkeeping above just prevents a double-restore.
+    let _ = have_raw;
 }
 
 /// Open the byte-stream debug log when the user has set
@@ -779,7 +866,7 @@ fn log_burst(mut file: &std::fs::File, bytes: &[u8]) {
 }
 
 #[cfg(not(unix))]
-pub fn run_pump(_ctx: EditorContext) {
+pub fn run_pump(_ctx: EditorContext, _guard: RawModeGuard) {
     // No-op on non-Unix. Callers should not invoke this when
     // `enter_raw_mode()` returns None.
 }
@@ -797,6 +884,39 @@ fn paint(ctx: &EditorContext, editor: &QueueEditor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    #[test]
+    fn editor_context_carries_suspend_handshake_fields() {
+        // Compile-time + structural check: the fields the
+        // permission-prompt path depends on are present and have
+        // the documented atomic-bool semantics. Constructing the
+        // context inline (rather than via a helper) keeps the
+        // tuple-arity small enough for clippy::type-complexity.
+        let queue = Arc::new(Mutex::new(MessageQueue::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let suspend = Arc::new(AtomicBool::new(false));
+        let suspended = Arc::new(AtomicBool::new(false));
+        let ctx = EditorContext {
+            queue,
+            stop,
+            paint_lock: Arc::new(Mutex::new(())),
+            repaint: Box::new(|_| {}),
+            use_color: false,
+            line_width: 80,
+            suspend: Arc::clone(&suspend),
+            suspended: Arc::clone(&suspended),
+        };
+        assert!(!suspend.load(Ordering::Relaxed));
+        assert!(!suspended.load(Ordering::Relaxed));
+        suspend.store(true, Ordering::Relaxed);
+        assert!(ctx.suspend.load(Ordering::Relaxed));
+        suspend.store(false, Ordering::Relaxed);
+        suspended.store(true, Ordering::Relaxed);
+        assert!(ctx.suspended.load(Ordering::Relaxed));
+        let _ = Duration::from_millis(0); // suppress unused-import warning
+    }
 
     #[test]
     fn ground_appends_visible_chars() {

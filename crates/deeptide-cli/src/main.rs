@@ -1129,6 +1129,16 @@ fn run_interactive(
     let raw_editor_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let raw_editor_active_for_handler = Arc::clone(&raw_editor_active);
 
+    // Suspend/ack pair for the raw-mode queue editor. Set from the
+    // permission-prompt path (and any other site that needs
+    // exclusive cooked-mode stdin) to make the pump release raw
+    // mode without joining the thread; the pump raises `suspended`
+    // once raw mode is actually back to cooked so the caller can
+    // read safely. Both flags reset when the editor thread exits
+    // for the turn.
+    let editor_suspend: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let editor_suspended: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
         match event {
             StreamingEvent::TextDelta { delta, .. } => {
@@ -1218,19 +1228,57 @@ fn run_interactive(
     // stdin and returns the user's choice. Built BEFORE the REPL so we can
     // pass it as a builder argument; uses the same spinner mutex so the
     // prompt isn't clobbered by an in-flight frame.
+    //
+    // Suspends the raw-mode queue editor (if active) for the duration of
+    // the prompt — otherwise the editor's pump thread reads stdin in raw
+    // mode and the user's `y` / `a` keystroke is captured as part of the
+    // queue buffer instead of reaching the prompt's `read_line`.
     let ask_spinner_stop = Arc::clone(&spinner_stop);
     let ask_spinner_lock = Arc::clone(&spinner_lock);
     let ask_output_started = Arc::clone(&output_started);
     let ask_use_color = use_color;
+    let ask_editor_suspend = Arc::clone(&editor_suspend);
+    let ask_editor_suspended = Arc::clone(&editor_suspended);
+    let ask_raw_editor_active = Arc::clone(&raw_editor_active);
     let ask_callback: deeptide_core::PermissionAskCallback =
         Arc::new(move |tool_call: &ToolCall| {
-            handle_permission_prompt(
+            // If the raw-mode editor is live, take exclusive stdin
+            // for the prompt. We:
+            //   1. Raise `editor_suspend` so the pump observes the
+            //      handshake on its next loop tick (≤ ~50ms).
+            //   2. Wait up to 250ms for the pump to ack via
+            //      `editor_suspended`. If the pump is slow / not
+            //      running we fall through after the timeout — the
+            //      prompt still works in that case, the only
+            //      risk is a transient race where the first
+            //      keystroke goes to the editor instead.
+            //   3. Run the prompt normally.
+            //   4. Lower `editor_suspend`; the pump will re-enter
+            //      raw mode and repaint within ~20ms.
+            let suspending = ask_raw_editor_active.load(Ordering::Relaxed);
+            if suspending {
+                ask_editor_suspend.store(true, Ordering::Relaxed);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+                while !ask_editor_suspended.load(Ordering::Relaxed)
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+
+            let outcome = handle_permission_prompt(
                 tool_call,
                 &ask_spinner_lock,
                 &ask_spinner_stop,
                 &ask_output_started,
                 ask_use_color,
-            )
+            );
+
+            if suspending {
+                ask_editor_suspend.store(false, Ordering::Relaxed);
+            }
+
+            outcome
         });
 
     // Shared state for "what tool is currently executing". The
@@ -1533,12 +1581,21 @@ fn run_interactive(
                 //   * color is off (likely a piped session where
                 //     cooked-mode stdin is fine).
                 let editor_stop = Arc::new(AtomicBool::new(false));
-                let (editor_handle, mut editor_raw_guard) = if use_color
+                let editor_handle = if use_color
                     && anchored.as_ref().map(|b| b.footer_rows()).unwrap_or(0) >= 2
                 {
                     match queue_editor::enter_raw_mode() {
                         Some(guard) => {
                             let input_row = anchored.as_ref().map(|b| b.input_row()).unwrap_or(0);
+                            // Per-turn fresh suspend/ack pair so a
+                            // suspend from a previous turn that wasn't
+                            // cleanly cleared can't bleed into this
+                            // one. `editor_suspend` / `editor_suspended`
+                            // outside this block are cloned into the
+                            // ask_callback's closure once at startup,
+                            // so we reset them rather than swap.
+                            editor_suspend.store(false, Ordering::Relaxed);
+                            editor_suspended.store(false, Ordering::Relaxed);
                             let ctx = queue_editor::EditorContext {
                                 queue: repl.message_queue_handle(),
                                 stop: Arc::clone(&editor_stop),
@@ -1548,6 +1605,8 @@ fn run_interactive(
                                 }),
                                 use_color,
                                 line_width: terminal_width().unwrap_or(80),
+                                suspend: Arc::clone(&editor_suspend),
+                                suspended: Arc::clone(&editor_suspended),
                             };
                             // Flip the suppression flag BEFORE spawning
                             // so the streaming handler's first tick sees
@@ -1556,15 +1615,12 @@ fn run_interactive(
                             // next turn (if raw mode happens to fail
                             // then).
                             raw_editor_active.store(true, Ordering::Relaxed);
-                            (
-                                Some(thread::spawn(move || queue_editor::run_pump(ctx))),
-                                Some(guard),
-                            )
+                            Some(thread::spawn(move || queue_editor::run_pump(ctx, guard)))
                         }
-                        None => (None, None),
+                        None => None,
                     }
                 } else {
-                    (None, None)
+                    None
                 };
 
                 // Animate an activity spinner on a background thread while the
@@ -1590,19 +1646,23 @@ fn run_interactive(
                     let _ = handle.join();
                 }
 
-                // Stop the queue editor thread BEFORE restoring
-                // termios so the pump's last `read()` returns
-                // before the terminal flips back to cooked mode —
-                // otherwise the next user keystroke at the
-                // rustyline prompt could get swallowed by an
-                // in-flight raw-mode read.
+                // Stop the queue editor thread; the pump owns its
+                // `RawModeGuard` now and drops it on the way out of
+                // `run_pump`, restoring termios to cooked mode
+                // before the join returns. We don't need a separate
+                // restore here.
+                //
+                // Also lower the suspend flag in case the pump
+                // exited while parked in a permission-prompt
+                // suspend — that would leave `editor_suspend=true`
+                // for the next turn, mis-triggering the ack
+                // handshake before the pump has even started.
                 editor_stop.store(true, Ordering::Relaxed);
                 if let Some(handle) = editor_handle {
                     let _ = handle.join();
                 }
-                if let Some(ref mut guard) = editor_raw_guard {
-                    guard.restore();
-                }
+                editor_suspend.store(false, Ordering::Relaxed);
+                editor_suspended.store(false, Ordering::Relaxed);
                 raw_editor_active.store(false, Ordering::Relaxed);
 
                 // Drain the streaming markdown buffer. The model often
