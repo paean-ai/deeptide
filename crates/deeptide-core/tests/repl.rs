@@ -1825,3 +1825,19 @@ fn exit_with_no_turns_just_exits() {
         "no turns → plain exit, no pass"
     );
 }
+
+#[test]
+fn version_command_reports_injected_build_string() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend))
+        .with_version("deeptide-rs 0.2.0 (abc1234 2026-05-31)");
+    let out = only_output(repl.submit("/version"));
+    assert!(out.contains("0.2.0"), "version command should show the version: {out}");
+    assert!(out.contains("abc1234"), "should include injected provenance: {out}");
+}
+
+#[test]
+fn version_command_falls_back_to_crate_version() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let out = only_output(repl.submit("/version"));
+    assert!(out.contains("deeptide-rs"), "fallback should name the binary: {out}");
+}

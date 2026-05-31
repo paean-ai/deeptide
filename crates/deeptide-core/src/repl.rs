@@ -168,6 +168,9 @@ pub struct ReplSession {
     /// via `/auto-compact on` because silently rewriting the
     /// transcript can surprise people the first time they hit it.
     auto_compact: AutoCompactConfig,
+    /// Build/version string for `/version`, injected by the CLI (which owns the
+    /// git-provenance build vars). `None` falls back to the crate version.
+    version_info: Option<String>,
 }
 
 /// Runtime configuration for the smart auto-compact feature.
@@ -297,7 +300,16 @@ impl ReplSession {
             checkpoints: crate::checkpoints::CheckpointStore::new(),
             last_context_warn_bucket: 0,
             auto_compact: AutoCompactConfig::default(),
+            version_info: None,
         }
+    }
+
+    /// Inject the build/version string shown by `/version`. The CLI passes its
+    /// full provenance line (version + git hash + date); core alone can't see
+    /// the CLI crate's build vars.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version_info = Some(version.into());
+        self
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
@@ -438,6 +450,16 @@ impl ReplSession {
         self.agent_loop.restore_messages(messages);
         self.session_id = session_id.to_owned();
         Ok(count)
+    }
+
+    /// `/version` — show the running build. Uses the CLI-injected provenance
+    /// string when present, else the core crate version.
+    fn execute_version_command(&self) -> CommandResult {
+        let body = self
+            .version_info
+            .clone()
+            .unwrap_or_else(|| format!("deeptide-rs {}", env!("CARGO_PKG_VERSION")));
+        CommandResult::Text(body)
     }
 
     /// CLI-facing entry for `/import` — same arg grammar as the slash command
@@ -1030,6 +1052,7 @@ impl ReplSession {
             "resume" | "load" | "restore" => self.execute_resume_command(args),
             "import" => return self.execute_import_command(args),
             "continue" | "handoff" => return self.execute_continue_command(args),
+            "version" | "ver" => self.execute_version_command(),
             "open" => self.execute_open_command(args),
             "paste" | "p" => self.execute_paste_command(args),
             "doctor" => self.execute_doctor_command(args),
@@ -4033,14 +4056,32 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
         CommandCompletionSource::new(
             "sessions",
             ["session"],
-            "List saved sessions",
-            "/sessions [filter]",
+            "List saved sessions (--all includes Claude Code / Codex)",
+            "/sessions [filter] [--all]",
         ),
         CommandCompletionSource::new(
             "resume",
             ["load", "restore"],
             "Resume a previous session",
             "/resume [session-id]",
+        ),
+        CommandCompletionSource::new(
+            "import",
+            Vec::<&str>::new(),
+            "Import a session from another agent (Claude Code / Codex)",
+            "/import <claude|codex|deeptide> [<id>|--latest] [--as memory|context]",
+        ),
+        CommandCompletionSource::new(
+            "continue",
+            ["handoff"],
+            "Hand off the newest foreign session into the live conversation",
+            "/continue [claude|codex|deeptide]",
+        ),
+        CommandCompletionSource::new(
+            "version",
+            ["ver"],
+            "Show the running deeptide build (version, commit, date)",
+            "/version",
         ),
         CommandCompletionSource::new(
             "open",

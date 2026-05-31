@@ -1825,6 +1825,7 @@ fn run_interactive(
 
     let mut repl = ReplSession::new(configured.backend)
         .with_model(configured.model)
+        .with_version(format!("deeptide-rs {VERSION_LONG}"))
         .with_permission_mode(permission_mode)
         .with_max_turns(cli.max_turns)
         .with_pricing_overrides(pricing_overrides)
