@@ -27,6 +27,7 @@ pub mod safety_guard;
 pub mod sensitive_file;
 pub mod session;
 pub mod streaming;
+pub mod suggestions;
 pub mod tool_batch_labeler;
 pub mod tool_result_summary;
 pub mod tool_usage;

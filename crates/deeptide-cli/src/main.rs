@@ -355,6 +355,14 @@ struct Cli {
     no_session_capture: bool,
 
     #[arg(
+        long = "no-suggestions",
+        env = "DEEPTIDE_NO_SUGGESTIONS",
+        action = ArgAction::SetTrue,
+        help = "Do not show follow-up prompt suggestions after a task finishes."
+    )]
+    no_suggestions: bool,
+
+    #[arg(
         long = "settings",
         value_name = "PATH",
         help = "Merge an explicit settings.json file on top of the global/project/local scopes."
@@ -1843,6 +1851,7 @@ fn run_interactive(
         .with_tool_restrictions(allowed_tools, disallowed_tools)
         .with_session_persistence(!cli.no_session_persistence)
         .with_session_end_capture(!cli.no_session_capture)
+        .with_suggestions(!cli.no_suggestions)
         .with_additional_dirs(&cli.add_dir)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config))

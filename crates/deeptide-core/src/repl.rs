@@ -171,6 +171,11 @@ pub struct ReplSession {
     /// Build/version string for `/version`, injected by the CLI (which owns the
     /// git-provenance build vars). `None` falls back to the crate version.
     version_info: Option<String>,
+    /// Whether to offer follow-up prompt suggestions after a task finishes.
+    suggestions_enabled: bool,
+    /// The suggestions shown after the last turn, so a bare numeric input
+    /// (`1`/`2`/`3`) on the next line expands to the chosen follow-up prompt.
+    last_suggestions: Vec<crate::suggestions::Suggestion>,
 }
 
 /// Runtime configuration for the smart auto-compact feature.
@@ -307,7 +312,16 @@ impl ReplSession {
             last_context_warn_bucket: 0,
             auto_compact: AutoCompactConfig::default(),
             version_info: None,
+            suggestions_enabled: true,
+            last_suggestions: Vec::new(),
         }
+    }
+
+    /// Enable or disable follow-up suggestions (`--no-suggestions` turns them
+    /// off). When off, no "Next steps" block is shown and numeric pick is inert.
+    pub fn with_suggestions(mut self, enabled: bool) -> Self {
+        self.suggestions_enabled = enabled;
+        self
     }
 
     /// Inject the build/version string shown by `/version`. The CLI passes its
@@ -458,6 +472,35 @@ impl ReplSession {
         Ok(count)
     }
 
+    /// `/suggest [on|off|show]` — toggle or re-display follow-up suggestions.
+    fn execute_suggest_command(&mut self, args: &str) -> CommandResult {
+        match args.trim().to_ascii_lowercase().as_str() {
+            "on" | "enable" => {
+                self.suggestions_enabled = true;
+                CommandResult::Text(String::from("Follow-up suggestions enabled."))
+            }
+            "off" | "disable" => {
+                self.suggestions_enabled = false;
+                self.last_suggestions.clear();
+                CommandResult::Text(String::from("Follow-up suggestions disabled."))
+            }
+            "" | "show" | "status" => {
+                if !self.suggestions_enabled {
+                    return CommandResult::Text(String::from(
+                        "Follow-up suggestions are OFF. Enable with /suggest on.",
+                    ));
+                }
+                match crate::suggestions::render_block(&self.last_suggestions) {
+                    Some(block) => CommandResult::Text(block),
+                    None => CommandResult::Text(String::from(
+                        "No suggestions yet — they appear after a task finishes.",
+                    )),
+                }
+            }
+            other => CommandResult::Text(format!("Usage: /suggest [on|off|show] (got `{other}`)")),
+        }
+    }
+
     /// `/version` — show the running build. Uses the CLI-injected provenance
     /// string when present, else the core crate version.
     fn execute_version_command(&self) -> CommandResult {
@@ -569,6 +612,19 @@ impl ReplSession {
             return Vec::new();
         }
 
+        // Numeric pick of a follow-up suggestion from the previous turn: a bare
+        // `1`/`2`/`3` in range expands to that suggestion's prompt and runs it
+        // as a normal turn. Cleared first so it can't re-trigger or recurse.
+        if !self.last_suggestions.is_empty()
+            && let Ok(choice) = trimmed.parse::<usize>()
+            && choice >= 1
+            && choice <= self.last_suggestions.len()
+        {
+            let prompt = self.last_suggestions[choice - 1].prompt.clone();
+            self.last_suggestions.clear();
+            return self.submit(&prompt);
+        }
+
         if let Some(command_line) = trimmed.strip_prefix('/') {
             return self.execute_command(command_line);
         }
@@ -594,6 +650,7 @@ impl ReplSession {
 
         self.user_turn_count += 1;
         let turns_before = self.agent_loop.cost_tracker().summary().turns.len();
+        let messages_before = self.agent_loop.messages().len();
         events.extend(
             self.agent_loop
                 .run(&prompt_to_agent)
@@ -646,8 +703,54 @@ impl ReplSession {
             events.extend(dream_events);
         }
 
+        // Offer follow-up suggestions for the task that just finished. Derived
+        // deterministically from this turn's signals (tools run, errors, active
+        // TODO, closing text) — no extra model call. Stored so a bare `1`/`2`
+        // next line expands to the chosen prompt.
+        if self.suggestions_enabled {
+            let signals = self.collect_turn_signals(messages_before);
+            let suggestions = crate::suggestions::suggest(&signals);
+            if let Some(block) = crate::suggestions::render_block(&suggestions) {
+                events.push(ReplEvent::Output(block));
+            }
+            self.last_suggestions = suggestions;
+        }
+
         self.autosave_session();
         events
+    }
+
+    /// Read the signals the suggestion engine needs from the messages this turn
+    /// appended (assistant tool calls, tool errors, shell commands, closing
+    /// text) plus the current TODO state.
+    fn collect_turn_signals(&self, messages_before: usize) -> crate::suggestions::TurnSignals {
+        let mut signals = crate::suggestions::TurnSignals {
+            next_todo: crate::tools::next_actionable_todo(),
+            ..Default::default()
+        };
+        let messages = self.agent_loop.messages();
+        for message in messages.iter().skip(messages_before) {
+            for call in &message.tool_calls {
+                match call.name.as_str() {
+                    "Edit" | "Write" | "NotebookEdit" | "MultiEdit" => signals.edited_files = true,
+                    "Bash" => {
+                        if let Some(cmd) = call.input.get("command").and_then(|v| v.as_str()) {
+                            signals.bash_commands.push(cmd.to_owned());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if message.tool_results.iter().any(|r| r.is_error) {
+                signals.had_tool_error = true;
+            }
+            if message.role == crate::agent_loop::MessageRole::Assistant
+                && !message.content.trim().is_empty()
+            {
+                signals.assistant_text = message.content.clone();
+            }
+        }
+        signals
     }
 
     /// Inspect the current transcript size against the model's window
@@ -1068,6 +1171,7 @@ impl ReplSession {
             "import" => return self.execute_import_command(args),
             "continue" | "handoff" => return self.execute_continue_command(args),
             "version" | "ver" => self.execute_version_command(),
+            "suggest" | "suggestions" => self.execute_suggest_command(args),
             "open" => self.execute_open_command(args),
             "paste" | "p" => self.execute_paste_command(args),
             "doctor" => self.execute_doctor_command(args),
@@ -4097,6 +4201,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             ["ver"],
             "Show the running deeptide build (version, commit, date)",
             "/version",
+        ),
+        CommandCompletionSource::new(
+            "suggest",
+            ["suggestions"],
+            "Toggle or re-show follow-up suggestions",
+            "/suggest [on|off|show]",
         ),
         CommandCompletionSource::new(
             "open",
