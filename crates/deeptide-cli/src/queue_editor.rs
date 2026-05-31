@@ -805,10 +805,35 @@ pub fn paint_editor_line(
     } else {
         "▎ ✎".to_owned()
     };
+    // Synthetic caret. Why so loud?
+    //
+    // The hardware terminal cursor lives wherever the agent's
+    // streaming output last advanced it (somewhere in the scroll
+    // region, far above us). The ghost paint that draws this
+    // input row deliberately *restores* the hardware cursor after
+    // writing so streaming continues uninterrupted — which means
+    // the actual blinking caret is **not** where the user is
+    // editing. They have to find the cursor by visual scanning.
+    //
+    // A plain inverse-video space (\x1b[7m \x1b[27m) reads as
+    // "background block" and is easy to lose against typed text
+    // — users reported "I can't tell where the cursor is" in the
+    // mid-turn editor.
+    //
+    // So we make the synthetic caret unmistakable:
+    //
+    //   * blink (SGR 5)    — mimics a real terminal caret
+    //   * bold (SGR 1)     — thicker, even on low-contrast themes
+    //   * yellow (SGR 33)  — stands out against default fg/bg
+    //   * inverse (SGR 7)  — fills the whole cell
+    //
+    // Clide / iTerm2 / Terminal.app / Alacritty / Kitty all
+    // honour SGR 5; terminals that don't blink at least show the
+    // bright yellow block, which is still unambiguous.
     let cursor_block = if color {
-        "\x1b[7m \x1b[27m".to_owned()
+        "\x1b[5;1;33;7m \x1b[0m".to_owned()
     } else {
-        "_".to_owned()
+        "[|]".to_owned()
     };
     let hint_styled = if color {
         format!("{DIM}({hint}){RESET}")
@@ -1472,9 +1497,46 @@ mod tests {
             "missing prompt color: {painted}"
         );
         assert!(painted.contains("\x1b[2m"), "missing dim hint: {painted}");
+        // Synthetic caret uses blink + bold + yellow + inverse
+        // (SGR 5;1;33;7). Verify the full combo because we rely on
+        // it being unmistakable even when the hardware cursor is
+        // elsewhere — a missing SGR here is a regression in the
+        // user-visible caret.
         assert!(
-            painted.contains("\x1b[7m"),
-            "missing reverse cursor block: {painted}"
+            painted.contains("\x1b[5;1;33;7m"),
+            "missing blinking yellow caret SGR: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn paint_editor_line_caret_uses_blink_inverse_yellow_in_color_mode() {
+        // Pin the synthetic-caret style explicitly so any
+        // accidental SGR tweak fails this test rather than
+        // silently degrading caret visibility.
+        let painted = paint_editor_line("abc", 1, 0, 100, true);
+        assert!(
+            painted.contains("\x1b[5;1;33;7m \x1b[0m"),
+            "caret must be blink+bold+yellow+inverse space: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn paint_editor_line_caret_no_color_uses_visible_marker() {
+        // Without color, fall back to a textual marker that still
+        // visually breaks up the typed text so the user can spot
+        // the caret position. A bare underscore reads ambiguously
+        // ("oh, did they type that?"); brackets make the intent
+        // obvious.
+        let painted = paint_editor_line("abc", 1, 0, 100, false);
+        assert!(
+            painted.contains("[|]"),
+            "no-color caret should use a [|] marker: {painted:?}"
+        );
+        // And it must NOT leak any SGR opening bytes when color
+        // is off.
+        assert!(
+            !painted.contains("\x1b["),
+            "no-color path must be SGR-free: {painted:?}"
         );
     }
 
@@ -1503,7 +1565,13 @@ mod tests {
         let painted = paint_editor_line("hello", 2, 0, 200, true);
         let prefix_idx = painted.find("he").expect("prefix present");
         let suffix_idx = painted.find("llo").expect("suffix present");
-        let block_idx = painted.find("\x1b[7m").expect("cursor block present");
+        // Find the blinking yellow caret. We assert on the FULL
+        // SGR open sequence so a future tweak to the caret style
+        // forces an explicit test update rather than silently
+        // breaking visibility.
+        let block_idx = painted
+            .find("\x1b[5;1;33;7m")
+            .expect("cursor block present");
         assert!(
             prefix_idx < block_idx && block_idx < suffix_idx,
             "expected he | █ | llo ordering: {painted:?}",
@@ -1514,8 +1582,8 @@ mod tests {
     fn paint_editor_line_cursor_at_zero_renders_block_before_buffer() {
         let painted = paint_editor_line("hello", 0, 0, 200, true);
         // No prefix chars before the cursor block; the buffer
-        // body should sit AFTER the reverse-video block.
-        let block_idx = painted.find("\x1b[7m").expect("block present");
+        // body should sit AFTER the blinking yellow caret.
+        let block_idx = painted.find("\x1b[5;1;33;7m").expect("block present");
         let body_idx = painted.find("hello").expect("body present");
         assert!(
             block_idx < body_idx,
@@ -1544,7 +1612,7 @@ mod tests {
         // The cursor block must be present somewhere in the
         // visible line (we never trim the block itself).
         assert!(
-            painted.contains("\x1b[7m"),
+            painted.contains("\x1b[5;1;33;7m"),
             "cursor block must remain visible after truncation: {painted:?}",
         );
         // A unique tail slice from the end of the buffer must
