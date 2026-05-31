@@ -3538,6 +3538,14 @@ fn render_diff_preview_block(preview: &deeptide_core::DiffPreview, use_color: bo
     for line in preview.body.lines() {
         let styled = if !use_color {
             format!("  │ {line}")
+        } else if let Some(rest) = line.strip_prefix("$ ") {
+            // Bash command body line — render like a code block:
+            // dim cyan prefix + plain command text.
+            format!("  │ \x1b[36m$\x1b[0m \x1b[1m{rest}\x1b[0m")
+        } else if let Some(rest) = line.strip_prefix("! ") {
+            // Bash risk warning emitted by detect_bash_risks. Bold
+            // red prefix makes it impossible to miss when scanning.
+            format!("  │ \x1b[1;31m⚠\x1b[0m  \x1b[31m{rest}\x1b[0m")
         } else if let Some(rest) = line.strip_prefix('+') {
             format!("  │ \x1b[32m+{rest}\x1b[0m")
         } else if let Some(rest) = line.strip_prefix('-') {
