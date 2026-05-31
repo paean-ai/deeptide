@@ -103,4 +103,35 @@ fn import_discovers_and_hands_off_a_claude_session() {
     // 3) Unknown source is reported, not panicked.
     let bad = outputs(repl.run_import("notarealtool --as context"));
     assert!(bad.contains("Unknown source"), "got: {bad}");
+
+    // 4) Bare `/import` shows an interactive numbered menu of sessions, and a
+    //    bare numeric reply picks one and runs the handoff.
+    let menu = outputs(repl.submit("/import"));
+    assert!(menu.contains("Select a session"), "expected a menu header: {menu}");
+    assert!(menu.contains("[claude]"), "menu should list the claude session: {menu}");
+    assert!(menu.contains("1. "), "menu rows should be numbered: {menu}");
+
+    let before_pick = repl.agent_loop().messages().len();
+    let picked = outputs(repl.submit("1"));
+    assert!(
+        picked.contains("handed off"),
+        "picking a menu row should run the import: {picked}"
+    );
+    assert_eq!(
+        repl.agent_loop().messages().len(),
+        before_pick + 1,
+        "the chosen session must be handed off (one prepended message)"
+    );
+
+    // A non-numeric input dismisses the menu: a later stray number is inert.
+    let _ = repl.submit("/import");
+    let _ = repl.submit("hello there"); // dismisses the menu
+    let before_stray = repl.agent_loop().messages().len();
+    let _ = repl.submit("1"); // now just an ordinary prompt
+    assert!(
+        repl.agent_loop().messages()[before_stray..]
+            .iter()
+            .any(|m| m.content.trim() == "1"),
+        "after dismissal a bare number must be a normal prompt, not a menu pick"
+    );
 }
