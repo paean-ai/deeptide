@@ -606,23 +606,126 @@ pub fn render_spinner_line_with_phase(
     elapsed_secs: u64,
     phase: Option<&str>,
 ) -> String {
+    render_spinner_line_rich(tick, elapsed_secs, phase, 0)
+}
+
+/// Richest spinner form. Adds estimated received-token throughput
+/// (`tokens_received`) to the existing phase + elapsed display, so
+/// long-running model calls don't look stalled — users see live
+/// "I'm receiving N tokens" feedback instead of just a verb that
+/// rotates every few seconds.
+///
+/// `tokens_received` is an **estimate**: the CLI accumulates the
+/// character count of `TextDelta` + `ToolUseInputDelta` over the
+/// turn and divides by 4 (the conventional English chars-per-token
+/// rule of thumb). CJK-heavy turns will under-count and code-only
+/// turns may over-count, but the value is for *progress feedback*,
+/// not billing — so the imprecision is fine.
+///
+/// Visual examples (the parenthesised block is the "stats panel",
+/// shown only when there's at least one stat to display):
+///
+/// ```text
+/// ⠹ Thinking…                                        ← <1s, 0 tokens
+/// ⠹ Thinking (3s)                                    ← only elapsed
+/// ⠹ Thinking (5m 49s · ↓ 28.6k tokens)               ← elapsed + tokens
+/// ⠹ Working · Bash(npm test) (3s · ↓ 1.2k tokens)    ← tool phase + both
+/// ```
+///
+/// Pass `0` for `tokens_received` to skip the token segment. The
+/// segment is also suppressed below 1 token to avoid flashing
+/// "↓ 0 tokens" during the first half-second of the call.
+pub fn render_spinner_line_rich(
+    tick: usize,
+    elapsed_secs: u64,
+    phase: Option<&str>,
+    tokens_received: usize,
+) -> String {
     let frame = spinner_frame(tick);
     let verb = spinner_verb(elapsed_secs);
     let trimmed_phase = phase.map(str::trim).filter(|s| !s.is_empty());
-    match (trimmed_phase, elapsed_secs) {
-        (None, 0) => format!("{frame} {verb}…"),
-        (None, n) => format!("{frame} {verb}… ({n}s)"),
-        (Some(phase), 0) => format!("{frame} {verb} · {phase}"),
-        (Some(phase), n) => format!("{frame} {verb} · {phase} ({n}s)"),
+
+    // Build the stats block content. We collect into a Vec because
+    // future additions (cache hit ratio, upload-side throughput,
+    // model temperature, etc.) plug in cleanly as more
+    // `parts.push(...)` calls.
+    let mut parts: Vec<String> = Vec::new();
+    if elapsed_secs > 0 {
+        parts.push(format_elapsed(elapsed_secs));
+    }
+    if tokens_received > 0 {
+        parts.push(format!("↓ {} tokens", format_token_count(tokens_received)));
+    }
+    let stats = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(" · "))
+    };
+
+    match (trimmed_phase, stats.as_str()) {
+        // No tool phase, no stats → keep the trailing ellipsis so
+        // a freshly-started call doesn't look "frozen".
+        (None, "") => format!("{frame} {verb}…"),
+        (None, _) => format!("{frame} {verb}{stats}"),
+        (Some(phase), _) => format!("{frame} {verb} · {phase}{stats}"),
+    }
+}
+
+/// Human-friendly elapsed-time formatter. Matches what users
+/// expect to see in the wild (Claude Code, Codex):
+///
+/// * `< 60s`     → `Ns`        (`3s`, `59s`)
+/// * `< 1h`      → `Nm Ms`     (`5m 49s`, `1m 0s`)
+/// * `>= 1h`     → `Nh Mm`     (`1h 5m`, `2h 0m`)
+///
+/// Always emits the smaller unit so a 5-minute call doesn't read
+/// as a bare `5m` (which is ambiguous with `5m 0s` vs `5m 59s`).
+pub fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        format!("{m}m {s}s")
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        format!("{h}h {m}m")
+    }
+}
+
+/// Compact token-count formatter, shaped for a 1-2 character
+/// width budget so the spinner line doesn't blow past the
+/// terminal column count on a long turn:
+///
+/// * `< 1_000`           → `N`
+/// * `< 1_000_000`       → `N.Nk`        (`1.2k`, `28.6k`)
+/// * `>= 1_000_000`      → `N.NM`        (`1.2M`)
+///
+/// Rounded to one decimal place; we deliberately avoid printing
+/// a `.0` because `1.0k` is uglier than `1k` for the common case.
+pub fn format_token_count(n: usize) -> String {
+    if n < 1_000 {
+        format!("{n}")
+    } else if n < 1_000_000 {
+        let value = n as f64 / 1_000.0;
+        let formatted = format!("{value:.1}");
+        let trimmed = formatted.trim_end_matches(".0");
+        format!("{trimmed}k")
+    } else {
+        let value = n as f64 / 1_000_000.0;
+        let formatted = format!("{value:.1}");
+        let trimmed = formatted.trim_end_matches(".0");
+        format!("{trimmed}M")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        InputBar, InputState, StatusLine, StatusSegment, TranscriptItem, TuiFrame,
-        render_output_panel, render_spinner_line, render_spinner_line_with_phase, spinner_frame,
-        spinner_verb,
+        InputBar, InputState, StatusLine, StatusSegment, TranscriptItem, TuiFrame, format_elapsed,
+        format_token_count, render_output_panel, render_spinner_line, render_spinner_line_rich,
+        render_spinner_line_with_phase, spinner_frame, spinner_verb,
     };
 
     #[test]
@@ -903,13 +1006,16 @@ mod tests {
     fn spinner_phase_empty_string_collapses_to_bare_verb() {
         // A transient "Some(\"\")" can happen if the CLI clears
         // the phase under a race; we never want a stray middle
-        // dot or trailing space showing up.
+        // dot or trailing space showing up. With the rich
+        // stats panel the trailing `…` is no longer present
+        // when an elapsed segment exists (the parens panel
+        // already conveys "this is alive"), so we assert on
+        // the structural invariants rather than the ellipsis:
+        //   1. Elapsed still rendered.
+        //   2. No `· phase` separator (since the phase was
+        //      whitespace-only).
         let line = render_spinner_line_with_phase(0, 3, Some(""));
         assert!(line.contains("(3s)"), "elapsed still present: {line}");
-        assert!(
-            line.contains("…"),
-            "should fall back to verb-with-ellipsis: {line}"
-        );
         assert!(
             !line.contains(" · "),
             "no separator with empty phase: {line}"
@@ -922,6 +1028,92 @@ mod tests {
         assert!(
             !line.contains(" · "),
             "whitespace phase should not render: {line}"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_buckets_match_user_expectations() {
+        assert_eq!(format_elapsed(0), "0s");
+        assert_eq!(format_elapsed(3), "3s");
+        assert_eq!(format_elapsed(59), "59s");
+        assert_eq!(format_elapsed(60), "1m 0s");
+        assert_eq!(format_elapsed(349), "5m 49s");
+        assert_eq!(format_elapsed(3599), "59m 59s");
+        assert_eq!(format_elapsed(3600), "1h 0m");
+        assert_eq!(format_elapsed(3900), "1h 5m");
+    }
+
+    #[test]
+    fn format_token_count_compacts_with_one_decimal() {
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(1), "1");
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(1_000), "1k");
+        assert_eq!(format_token_count(1_200), "1.2k");
+        assert_eq!(format_token_count(28_600), "28.6k");
+        assert_eq!(format_token_count(999_999), "1000k"); // boundary case
+        assert_eq!(format_token_count(1_000_000), "1M");
+        assert_eq!(format_token_count(1_200_000), "1.2M");
+    }
+
+    #[test]
+    fn render_spinner_line_rich_pure_thinking_no_stats() {
+        // < 1 second, no tokens received → keep the trailing
+        // ellipsis so the line doesn't look frozen.
+        let line = render_spinner_line_rich(0, 0, None, 0);
+        assert!(line.contains("…"), "expected trailing ellipsis: {line}");
+        assert!(
+            !line.contains("("),
+            "no stats panel at t=0 with no tokens: {line}"
+        );
+    }
+
+    #[test]
+    fn render_spinner_line_rich_shows_elapsed_only_when_zero_tokens() {
+        let line = render_spinner_line_rich(0, 349, None, 0);
+        assert!(line.contains("5m 49s"), "expected nice elapsed: {line}");
+        assert!(
+            !line.contains("tokens"),
+            "no token segment at 0 tokens: {line}"
+        );
+    }
+
+    #[test]
+    fn render_spinner_line_rich_shows_elapsed_and_tokens_side_by_side() {
+        let line = render_spinner_line_rich(0, 349, None, 28_600);
+        assert!(line.contains("5m 49s"), "expected elapsed: {line}");
+        assert!(
+            line.contains("↓ 28.6k tokens"),
+            "expected token segment: {line}"
+        );
+        assert!(
+            line.contains(" · "),
+            "expected middle-dot stats separator: {line}"
+        );
+    }
+
+    #[test]
+    fn render_spinner_line_rich_combines_tool_phase_with_stats() {
+        let line = render_spinner_line_rich(0, 3, Some("Bash(npm test)"), 1200);
+        assert!(line.contains("Bash(npm test)"), "tool phase: {line}");
+        assert!(line.contains("3s"), "elapsed: {line}");
+        assert!(line.contains("↓ 1.2k tokens"), "tokens: {line}");
+        // No ellipsis when we have an actual phase + stats — the
+        // line is already information-dense.
+        assert!(!line.contains("…"), "ellipsis should be suppressed: {line}");
+    }
+
+    #[test]
+    fn render_spinner_line_rich_omits_token_segment_under_one() {
+        // Edge case: a turn that's been alive 5s but we haven't
+        // received a single byte yet (model in deep think). Show
+        // elapsed, hide token segment so the line doesn't go
+        // `(5s · ↓ 0 tokens)` which reads as "broken".
+        let line = render_spinner_line_rich(0, 5, None, 0);
+        assert!(line.contains("5s"), "elapsed present: {line}");
+        assert!(
+            !line.contains("tokens"),
+            "0 tokens means no token segment: {line}"
         );
     }
 }
