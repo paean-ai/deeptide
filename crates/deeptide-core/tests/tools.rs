@@ -1090,6 +1090,103 @@ fn memory_search_tool_finds_project_and_global_memory() {
 }
 
 #[test]
+fn memory_search_shows_match_line_for_multi_word_query() {
+    let _guard = memory_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    install_memory_env(temp.path());
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    assert!(
+        !MemoryWriteTool
+            .call(
+                serde_json::json!({
+                    "title": "Cache Layout",
+                    "body": "The system prompt prefix must stay byte-stable so DeepSeek prefix caching keeps hitting across turns.",
+                    "reason": "Cost lever",
+                    "scope": "project"
+                }),
+                &ToolContext::new(&workspace),
+            )
+            .is_error
+    );
+
+    // The whole query is NOT a contiguous substring of the body, but several
+    // terms are — BM25 ranks it, and the snippet must still surface a match line
+    // (the old whole-query-substring behaviour showed none).
+    let result = MemorySearchTool.call(
+        serde_json::json!({"query": "byte-stable prefix caching turns", "scope": "project"}),
+        &ToolContext::new(&workspace),
+    );
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("Cache Layout"));
+    assert!(
+        result.content.contains("match:"),
+        "multi-word query should still surface a match snippet:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("byte-stable"),
+        "match snippet should be the body line sharing query terms:\n{}",
+        result.content
+    );
+}
+
+#[test]
+fn memory_search_dedups_canonical_and_legacy_copies() {
+    let _guard = memory_env_guard();
+    let temp = tempfile::tempdir().expect("tempdir");
+    install_memory_env(temp.path());
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    // Canonical copy via the tool.
+    assert!(
+        !MemoryWriteTool
+            .call(
+                serde_json::json!({
+                    "title": "Provider Policy",
+                    "body": "Use configured provider profiles instead of hard-coded endpoints.",
+                    "reason": "Repository convention",
+                    "scope": "project"
+                }),
+                &ToolContext::new(&workspace),
+            )
+            .is_error
+    );
+
+    // A legacy copy of the SAME shard filename (a half-finished migration):
+    // cwd/.deeptide/memory/<same-file>. Both dirs are searched, so without
+    // (scope, file name) de-dup the one memory would surface twice.
+    let canonical_dir = deeptide_core::memory::MemorySystem::project_memory_dir(&workspace);
+    let shard = std::fs::read_dir(&canonical_dir)
+        .expect("read canonical dir")
+        .flatten()
+        .map(|entry| entry.file_name())
+        .find(|name| {
+            let name = name.to_string_lossy();
+            name.ends_with(".md") && name != "MEMORY.md"
+        })
+        .expect("a shard file in the canonical dir");
+    let legacy_dir = workspace.join(".deeptide").join("memory");
+    std::fs::create_dir_all(&legacy_dir).expect("legacy dir");
+    std::fs::copy(canonical_dir.join(&shard), legacy_dir.join(&shard)).expect("copy to legacy");
+
+    let result = MemorySearchTool.call(
+        serde_json::json!({"query": "provider", "scope": "project", "max_results": 10}),
+        &ToolContext::new(&workspace),
+    );
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(
+        result.content.matches("scope: project").count(),
+        1,
+        "the same memory present in both canonical and legacy dirs must surface \
+         once, not twice:\n{}",
+        result.content
+    );
+}
+
+#[test]
 fn brief_tool_requests_context_compaction() {
     let result = BriefTool.call(serde_json::json!({}), &ToolContext::new("."));
 

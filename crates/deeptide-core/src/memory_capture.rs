@@ -95,10 +95,14 @@ pub fn parse_captured_facts(reply: &str, existing_titles: &[String]) -> Vec<Cand
             continue;
         }
         // Skip if it lexically duplicates an existing memory title or an
-        // already-accepted candidate.
+        // already-accepted candidate. Existing entries are short *titles*, so
+        // use the overlap coefficient (a title contained in the longer fact
+        // scores ~1.0); Jaccard's union denominator would understate that.
+        // Candidate-vs-candidate stays Jaccard — both are full facts of
+        // comparable length.
         let dup_existing = existing_titles
             .iter()
-            .any(|t| crate::memory_hygiene::jaccard(t, &text) >= 0.6);
+            .any(|t| crate::memory_hygiene::overlap_coefficient(t, &text) >= 0.6);
         let dup_self = out
             .iter()
             .any(|c| crate::memory_hygiene::jaccard(&c.text, &text) >= 0.6);
@@ -191,6 +195,20 @@ mod tests {
         assert!(
             facts.is_empty(),
             "should skip fact already in memory: {facts:?}"
+        );
+    }
+
+    #[test]
+    fn dedups_short_title_contained_in_long_fact() {
+        // The realistic case: existing memory is a short *title*, the candidate
+        // is a longer fact that restates it. Jaccard would score ~0.3 (union
+        // dominated by the long side) and let the duplicate through; the overlap
+        // coefficient scores ~1.0 and correctly drops it.
+        let reply = "[{\"text\":\"This project always uses the pnpm package manager; never npm or yarn.\",\"category\":\"project\",\"confidence\":0.95}]";
+        let facts = parse_captured_facts(reply, &["pnpm package manager".to_owned()]);
+        assert!(
+            facts.is_empty(),
+            "short title contained in the longer fact should dedup: {facts:?}"
         );
     }
 
