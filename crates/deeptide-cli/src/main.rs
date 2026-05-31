@@ -2040,6 +2040,22 @@ fn run_interactive(
                     let _ = stdout.write_all(echo.as_bytes());
                 }
 
+                // Classify the input: local-only slash commands (/exit,
+                // /clear, /new, /help, /status, …) get a strictly
+                // synchronous path with no spinner, no queue editor,
+                // no ghost paint. The previous flow always span up
+                // the full agent-turn apparatus before discovering
+                // submit had nothing to do, which the user perceived
+                // as `/exit` "first talking to the model".
+                //
+                // `slash_command_invokes_agent` is the source of
+                // truth for which slash commands actually trigger
+                // an `agent_loop.run` (and therefore deserve the
+                // spinner/editor). Non-slash input is always
+                // agent-invoking.
+                let invokes_agent = !content.starts_with('/')
+                    || deeptide_core::slash_command_invokes_agent(&content);
+
                 // Paint a dim ghost prompt at the input row so the
                 // bottom of the screen never reads "empty" while the
                 // agent is thinking. The next loop iteration's
@@ -2049,7 +2065,12 @@ fn run_interactive(
                 // to start (non-TTY stdin, termios failure, etc.);
                 // the editor thread's first paint will overwrite it
                 // a few milliseconds later when the editor is up.
-                if let Some(bar) = anchored.as_ref()
+                //
+                // Suppressed for local-only slash commands: there's
+                // no waiting period to fill, the result text comes
+                // back synchronously in microseconds.
+                if invokes_agent
+                    && let Some(bar) = anchored.as_ref()
                     && bar.footer_rows() >= 2
                 {
                     bar.paint_input_ghost(&chrome::render_thinking("", use_color), &spinner_lock);
@@ -2064,13 +2085,16 @@ fn run_interactive(
                 // user can type follow-ups straight into the pinned
                 // input row while the agent is streaming. Skips
                 // entirely when:
+                //   * the request doesn't invoke the agent (local-only
+                //     slash command → no streaming, no need to queue),
                 //   * we couldn't reserve a footer row (no
                 //     anchored bar or only the legacy 1-row variant),
                 //   * stdin isn't a TTY / termios refuses to flip,
                 //   * color is off (likely a piped session where
                 //     cooked-mode stdin is fine).
                 let editor_stop = Arc::new(AtomicBool::new(false));
-                let editor_handle = if use_color
+                let editor_handle = if invokes_agent
+                    && use_color
                     && anchored.as_ref().map(|b| b.footer_rows()).unwrap_or(0) >= 2
                 {
                     match queue_editor::enter_raw_mode() {
@@ -2121,7 +2145,12 @@ fn run_interactive(
 
                 // Animate an activity spinner on a background thread while the
                 // synchronous turn runs, so model thinking and tool execution
-                // aren't silent. Skipped when color is off (plain/log output).
+                // aren't silent. Skipped when:
+                //   * color is off (plain/log output), or
+                //   * the request is a local-only slash command (no
+                //     model round-trip, the spinner flash would be
+                //     pure noise — this is the fix for the "`/exit`
+                //     looks like it's talking to the model" bug).
                 //
                 // Reset the per-turn streamed-char counter just before
                 // we spawn so the spinner's `↓ N tokens` stat shows
@@ -2129,7 +2158,7 @@ fn run_interactive(
                 // start adding to it as soon as the first
                 // `TextDelta` / `ToolUseInputDelta` arrives.
                 stream_chars_received.store(0, Ordering::Relaxed);
-                let spinner_handle = if use_color {
+                let spinner_handle = if invokes_agent && use_color {
                     let stop = Arc::clone(&spinner_stop);
                     let started = Arc::clone(&output_started);
                     let lock = Arc::clone(&spinner_lock);
