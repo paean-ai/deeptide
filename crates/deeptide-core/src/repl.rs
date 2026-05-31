@@ -3522,6 +3522,71 @@ fn build_tool_system_message(
     }
 }
 
+/// Classify a slash-command line by whether its handler will invoke
+/// the agent (model round-trip + tool execution) or can run entirely
+/// locally. Used by the CLI to decide whether to spawn the
+/// turn-scoped spinner + raw-mode queue editor before calling
+/// [`ReplSession::submit`].
+///
+/// Why this lives in `deeptide-core`
+/// =================================
+///
+/// The dispatch table inside `execute_command` is the source of
+/// truth — every new agent-invoking slash command should be added to
+/// the constants below in the same patch that wires it up, otherwise
+/// the CLI will skip the spinner/editor and the user will see a
+/// silent terminal while the model runs. Keeping the list adjacent
+/// to the dispatch makes that coupling easy to audit.
+///
+/// Returns `true` only for commands whose handler calls
+/// `agent_loop.run(...)` (or kicks off an external editor that
+/// ultimately submits a prompt). Everything else — including
+/// `/exit`, `/clear`, `/new`, `/help`, `/status`, `/cost`, `/copy`,
+/// `/diff`, `/branch`, `/tps`, `/queue`, … — is local and should
+/// execute instantly without the spinner flash that previously made
+/// the user wonder if `/exit` was "talking to the model".
+///
+/// Empty / non-slash input returns `false` (the caller is expected
+/// to short-circuit on non-slash input before consulting this).
+pub fn slash_command_invokes_agent(line: &str) -> bool {
+    /// Commands whose handler runs the model. Every entry maps to a
+    /// branch of `execute_command` that calls `self.agent_loop.run`.
+    const AGENT_INVOKING: &[&str] = &[
+        // /retry resubmits the last user prompt
+        "retry",
+        "r",
+        "again",
+        // Skill-shortcut commands all run the model after staging a
+        // skill payload — see `execute_commit_command` etc.
+        "commit",
+        "review",
+        "simplify",
+        "dream",
+        "goal",
+        "objective",
+        "reminder",
+        "anchor",
+        "reorient",
+        // /vim opens an external editor and (when the user saves
+        // non-empty content) submits the buffer to the model.
+        "vim",
+        "edit",
+        "e",
+        "compose",
+    ];
+
+    let trimmed = line.trim();
+    let Some(command_line) = trimmed.strip_prefix('/') else {
+        return false;
+    };
+    let name = command_line
+        .split(char::is_whitespace)
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    AGENT_INVOKING.contains(&name.as_str())
+}
+
 /// Pull a short, human-readable "subject" out of a tool call's input
 /// JSON — the file path for Read / Write / Edit / AppendFile /
 /// NotebookEdit, the command for Bash / Monitor, the URL for
@@ -5429,5 +5494,164 @@ mod extract_tool_subject_tests {
     fn whitespace_only_subject_returns_none() {
         let subj = extract_tool_subject("Read", &json!({"file_path": "   "}));
         assert!(subj.is_none(), "expected None for whitespace-only path");
+    }
+}
+
+#[cfg(test)]
+mod slash_command_classifier_tests {
+    use super::slash_command_invokes_agent;
+
+    #[test]
+    fn local_only_commands_do_not_invoke_agent() {
+        // These all run synchronously inside execute_command without
+        // ever touching agent_loop.run — they must NOT trigger the
+        // spinner+queue-editor spawn in the CLI.
+        for cmd in [
+            "/exit",
+            "/quit",
+            "/q",
+            "/clear",
+            "/cls",
+            "/new",
+            "/help",
+            "/h",
+            "/?",
+            "/status",
+            "/cost",
+            "/copy",
+            "/yank",
+            "/diff",
+            "/branch",
+            "/tps",
+            "/queue",
+            "/queue add hello",
+            "/context",
+            "/ctx",
+            "/model gpt-5",
+            "/m flash",
+            "/provider",
+            "/provider use deepseek",
+            "/permission",
+            "/perm",
+            "/permissions",
+            "/auto-compact",
+            "/auto-compact on",
+            "/auto-compact 90",
+            "/compact",
+            "/compress",
+            "/export",
+            "/export /tmp/log.jsonl",
+            "/fast",
+            "/faster",
+            "/add-dir",
+            "/add-dir src/",
+            "/debug",
+            "/dbg",
+            "/keys",
+            "/keybindings",
+            "/sessions",
+            "/session",
+            "/resume",
+            "/load",
+            "/restore",
+            "/open",
+            "/paste",
+            "/p",
+            "/doctor",
+            "/config",
+            "/hooks",
+            "/init",
+            "/update",
+            "/upgrade",
+            "/read foo.rs",
+            "/write foo.rs hi",
+            "/memory",
+            "/mem",
+            "/remember",
+            "/skills",
+            "/skill",
+            "/cron",
+            "/cache",
+            "/kvcache",
+            "/manifest",
+        ] {
+            assert!(
+                !slash_command_invokes_agent(cmd),
+                "expected `{cmd}` to be local-only, but classifier said agent-invoking"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_invoking_commands_are_recognised() {
+        // These branches all call agent_loop.run internally — the
+        // CLI MUST spin up the spinner + queue editor when the user
+        // submits one of these.
+        for cmd in [
+            "/retry",
+            "/r",
+            "/again",
+            "/commit",
+            "/commit -m feat",
+            "/review 42",
+            "/simplify src/",
+            "/dream",
+            "/dream now",
+            "/goal",
+            "/goal ship the cli",
+            "/objective ship the cli",
+            "/reminder",
+            "/anchor",
+            "/reorient",
+            "/vim",
+            "/edit",
+            "/e",
+            "/compose",
+        ] {
+            assert!(
+                slash_command_invokes_agent(cmd),
+                "expected `{cmd}` to invoke the agent, but classifier returned false"
+            );
+        }
+    }
+
+    #[test]
+    fn case_insensitive_name_match() {
+        // The dispatch in execute_command lowercases the command
+        // name; the classifier must do the same so the CLI matches
+        // the actual handler behaviour.
+        assert!(slash_command_invokes_agent("/RETRY"));
+        assert!(slash_command_invokes_agent("/Retry"));
+        assert!(slash_command_invokes_agent("/CoMMit args here"));
+        assert!(!slash_command_invokes_agent("/EXIT"));
+        assert!(!slash_command_invokes_agent("/Clear"));
+    }
+
+    #[test]
+    fn non_slash_input_returns_false() {
+        // Non-slash chat input is always agent-invoking, but callers
+        // are expected to handle that BEFORE consulting this
+        // classifier. We return false to keep the contract simple:
+        // "the slash command this string starts with is agent-invoking?"
+        assert!(!slash_command_invokes_agent("hello world"));
+        assert!(!slash_command_invokes_agent("look at @foo.rs"));
+        assert!(!slash_command_invokes_agent(""));
+        assert!(!slash_command_invokes_agent("   "));
+    }
+
+    #[test]
+    fn unknown_slash_command_returns_false() {
+        // An unknown slash command falls through to "render unknown
+        // command" — strictly local. Don't trip the spinner.
+        assert!(!slash_command_invokes_agent("/totally-fake-command"));
+        assert!(!slash_command_invokes_agent("/foo bar baz"));
+    }
+
+    #[test]
+    fn leading_whitespace_is_tolerated() {
+        // The CLI trims input before submission, but the classifier
+        // should be robust to a user typing a space before `/`.
+        assert!(slash_command_invokes_agent("  /retry"));
+        assert!(!slash_command_invokes_agent("  /exit"));
     }
 }
