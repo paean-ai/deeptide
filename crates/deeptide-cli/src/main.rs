@@ -18,7 +18,7 @@ use deeptide_core::{
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::highlight::Highlighter;
+use rustyline::highlight::{CmdKind, Highlighter};
 use rustyline::hint::Hinter;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{
@@ -962,6 +962,44 @@ impl Highlighter for ReplHelper {
         } else {
             std::borrow::Cow::Borrowed(hint)
         }
+    }
+
+    /// Force rustyline to do a *full* line refresh on every cursor move
+    /// (←, →, Home, End, …) instead of writing a delta-only
+    /// `\x1b[D` / `\x1b[C` CUB/CUF sequence.
+    ///
+    /// Why this is a workaround, not a hack
+    /// ====================================
+    ///
+    /// In some terminal emulators — Clide / SwiftTerm on macOS is the
+    /// reported case — a bare `\x1b[D` written via `write(2)` *after*
+    /// the model has been streaming for a while doesn't visibly move
+    /// the caret. The terminal's internal cursor advances logically,
+    /// but the next render frame doesn't draw it at the new column
+    /// (only after the user types a fresh character, which triggers
+    /// a redraw that catches the cursor up).
+    ///
+    /// The exact root cause is outside `deeptide-rs` (a bare
+    /// `rustyline` probe reproduces the bug; Codex / Cursor / Claude
+    /// Code don't because they ship their own raw-mode line editor).
+    /// But rustyline's `Highlighter::highlight_char` provides a
+    /// surgical escape valve: returning `true` for `CmdKind::MoveCursor`
+    /// flips the editor from "emit delta cursor-move ANSI" to "emit
+    /// full prompt + line + cursor-position refresh", which forces a
+    /// redraw the terminal always honours.
+    ///
+    /// Tradeoff: writing the whole line on every arrow keystroke
+    /// costs O(line_length) bytes per move vs O(1). For typical chat
+    /// prompts (a few dozen chars) this is invisible; long pasted
+    /// blocks may see a flicker but that's still strictly better
+    /// than an invisible caret.
+    ///
+    /// Other kinds (`Other`, `ForcedRefresh`) deliberately fall
+    /// through to the default `false` so we don't accidentally cause
+    /// double-refreshes on, e.g., a backspace which already triggers
+    /// a full redraw via the normal edit pipeline.
+    fn highlight_char(&self, _line: &str, _pos: usize, kind: CmdKind) -> bool {
+        matches!(kind, CmdKind::MoveCursor)
     }
 }
 
@@ -5747,5 +5785,39 @@ mod tests {
         }
         drain_live_tool_args(&slot);
         assert!(slot.lock().unwrap().is_none());
+    }
+
+    // ─── Cursor-move full-refresh guard ─────────────────────────────
+    //
+    // Pinning the Highlighter::highlight_char policy so a future
+    // ReplHelper refactor can't silently drop the workaround.
+    // Returning `true` here is what flips rustyline from "write a
+    // delta `\x1b[D`" to "refresh the whole line", which is what
+    // restores visible cursor movement in terminals that don't
+    // honour bare CUB/CUF after the model has been streaming
+    // (Clide / SwiftTerm-based terminals were the reported case).
+
+    #[test]
+    fn repl_helper_forces_full_refresh_on_cursor_move() {
+        use rustyline::highlight::{CmdKind, Highlighter};
+        let helper = ReplHelper::new(vec![], false);
+        assert!(
+            helper.highlight_char("hello", 3, CmdKind::MoveCursor),
+            "MoveCursor must request a full refresh so terminals \
+             that ignore delta CUB/CUF sequences still redraw the \
+             caret",
+        );
+    }
+
+    #[test]
+    fn repl_helper_does_not_force_full_refresh_on_other_kinds() {
+        // We deliberately *don't* force a refresh on `Other` /
+        // `ForcedRefresh` so we don't double-refresh keystrokes
+        // that already trigger a full redraw via the normal edit
+        // pipeline (e.g. backspace, paste, validate).
+        use rustyline::highlight::{CmdKind, Highlighter};
+        let helper = ReplHelper::new(vec![], false);
+        assert!(!helper.highlight_char("hello", 3, CmdKind::Other));
+        assert!(!helper.highlight_char("hello", 3, CmdKind::ForcedRefresh));
     }
 }
