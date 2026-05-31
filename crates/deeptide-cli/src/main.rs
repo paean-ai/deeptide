@@ -12,9 +12,10 @@ use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
-    AskOutcome, CommandCompletionSource, CompletionEngine, LocalEchoBackend, MarkdownRenderOptions,
-    ModelPricing, ReplEvent, ReplSession, StatusSegment, StreamingEvent, StreamingHandler,
-    StreamingMarkdownRenderer, SystemMessage, ThinkingConfig, ToolCall, tui,
+    AskOutcome, CommandCompletionCandidate, CommandCompletionSource, CompletionEngine,
+    LocalEchoBackend, MarkdownRenderOptions, ModelPricing, ReplEvent, ReplSession, StatusSegment,
+    StreamingEvent, StreamingHandler, StreamingMarkdownRenderer, SystemMessage, ThinkingConfig,
+    ToolCall, tui,
 };
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -935,19 +936,79 @@ fn compute_hint(line: &str, pos: usize, commands: &[CommandCompletionSource]) ->
     // (score == 0) or an alias (score == 1). Substring/contains hits (scores
     // 2 / 3) would jump the hint to a non-adjacent character range which is
     // visually misleading.
-    let prefix_hits: Vec<_> = result.candidates.iter().filter(|c| c.score <= 1).collect();
-    if prefix_hits.len() != 1 {
-        return None;
+    let prefix_hits: Vec<&CommandCompletionCandidate> =
+        result.candidates.iter().filter(|c| c.score <= 1).collect();
+
+    // ── Single match path ────────────────────────────────────────────
+    // Exactly one prefix match → return the *tail* of the completion
+    // so rustyline renders it as ghost text after the cursor
+    // (e.g. typing `/exi` shows a dim `t`).
+    if prefix_hits.len() == 1 {
+        let candidate = prefix_hits[0];
+        let target = &candidate.matched_text;
+        let typed_len = result.typed.chars().count();
+        let target_len = target.chars().count();
+        if target_len <= typed_len {
+            return None;
+        }
+        let tail: String = target.chars().skip(typed_len).collect();
+        return Some(tail);
     }
-    let candidate = prefix_hits[0];
-    let target = &candidate.matched_text;
-    let typed_len = result.typed.chars().count();
-    let target_len = target.chars().count();
-    if target_len <= typed_len {
-        return None;
+
+    // ── Multi-match discovery path (T1.2 slash-command palette) ─────
+    // Two or more prefix matches → render a compact in-line palette
+    // so the user can SEE what's available without pressing Tab. The
+    // palette is appended after the cursor as dim ghost text, the
+    // same surface rustyline already uses for completion hints — no
+    // overlay / scroll-region acrobatics needed for the inline tier.
+    //
+    // We deliberately keep this single-line: rustyline's hint surface
+    // is positioned inline and a multi-line value would break layout
+    // mid-prompt. A future iteration will pair this with a proper
+    // pop-up panel above the input row once we have the native
+    // raw-mode line editor in T2.2.
+    if prefix_hits.len() >= 2 {
+        return Some(multi_command_palette_hint(&prefix_hits));
     }
-    let tail: String = target.chars().skip(typed_len).collect();
-    Some(tail)
+
+    None
+}
+
+/// Build an inline "discovery palette" hint summarising N matching
+/// slash commands. Format (rendered dim by [`Highlighter::highlight_hint`]):
+///
+/// ```text
+///   /model · /mode · /mcp · /mac-diagnose  +N more (Tab)
+/// ```
+///
+/// The cursor sits at the END of the user's typed input; this hint
+/// is appended after a two-space buffer so the typed prefix and the
+/// suggestion list don't visually mash together. The first space is
+/// intentionally part of the returned string so callers don't need
+/// to know about the spacing convention.
+fn multi_command_palette_hint(prefix_hits: &[&CommandCompletionCandidate]) -> String {
+    // Show at most this many command names in the inline palette.
+    // Above this it'd wrap on standard 80-column terminals and the
+    // last entries would scroll off the right edge.
+    const MAX_INLINE: usize = 4;
+    let total = prefix_hits.len();
+    let take = total.min(MAX_INLINE);
+
+    let names: Vec<String> = prefix_hits
+        .iter()
+        .take(take)
+        .map(|c| format!("/{}", c.name))
+        .collect();
+    let head = names.join(" · ");
+
+    if total > MAX_INLINE {
+        format!(
+            "  {head}  +{remaining} more (Tab)",
+            remaining = total - take
+        )
+    } else {
+        format!("  {head}  (Tab)")
+    }
 }
 
 impl Helper for ReplHelper {}
@@ -5316,12 +5377,24 @@ mod tests {
     }
 
     #[test]
-    fn hint_is_empty_for_ambiguous_prefix() {
-        // `/ex` matches both /exit and /export → no hint, user must Tab.
+    fn hint_shows_palette_for_ambiguous_prefix() {
+        // `/ex` matches both /exit and /export → the inline palette
+        // surfaces both names so the user can discover what's
+        // available without first pressing Tab. T1.2 behaviour.
         let line = "/ex";
+        let hint = compute_hint(line, line.len(), &sample_commands())
+            .expect("/ex with multiple prefix matches should yield a palette hint");
         assert!(
-            compute_hint(line, line.len(), &sample_commands()).is_none(),
-            "ambiguous /ex must not ghost-text — let Tab show the candidate list"
+            hint.contains("/exit"),
+            "palette should mention /exit: {hint}"
+        );
+        assert!(
+            hint.contains("/export"),
+            "palette should mention /export: {hint}"
+        );
+        assert!(
+            hint.contains("(Tab)"),
+            "palette should teach the Tab action: {hint}"
         );
     }
 
@@ -5342,10 +5415,58 @@ mod tests {
     }
 
     #[test]
-    fn hint_is_empty_for_bare_slash() {
-        // Just `/` → every command matches as score 0 → no hint.
+    fn hint_shows_palette_for_bare_slash() {
+        // Just `/` → every command prefix-matches with score 0. The
+        // palette surfaces the first MAX_INLINE names so the user
+        // can SEE what commands exist without having to press Tab.
+        // T1.2 behaviour.
         let line = "/";
-        assert!(compute_hint(line, line.len(), &sample_commands()).is_none());
+        let hint = compute_hint(line, line.len(), &sample_commands())
+            .expect("bare slash should yield a palette hint");
+        // sample_commands() has more than MAX_INLINE (=4) entries, so
+        // the palette must include a "+N more" suffix.
+        assert!(
+            hint.contains("+") && hint.contains("more"),
+            "palette should truncate with `+N more` when there are extra commands: {hint}"
+        );
+        assert!(hint.contains("(Tab)"));
+    }
+
+    #[test]
+    fn palette_caps_inline_entries_at_four_and_summarises_rest() {
+        // With many matches, the palette must (a) include at most
+        // four names inline so it doesn't wrap on an 80-column
+        // terminal and (b) suffix with "+N more (Tab)" pointing at
+        // the remaining count.
+        let line = "/";
+        let hint =
+            compute_hint(line, line.len(), &sample_commands()).expect("bare slash yields palette");
+        let dot_separator_count = hint.matches(" · ").count();
+        // four names → three separators between them.
+        assert_eq!(
+            dot_separator_count, 3,
+            "expected exactly 3 inline separators (= 4 names), got: {hint}"
+        );
+        // sample_commands() has 8 commands; palette shows 4 inline so
+        // "+4 more" should appear in the suffix.
+        assert!(
+            hint.contains("+4 more"),
+            "expected `+4 more` suffix for 8 commands - 4 inline: {hint}"
+        );
+    }
+
+    #[test]
+    fn palette_omits_more_suffix_when_all_fit() {
+        // Only 2 matches (`/exit`, `/export`) → both fit inline, no
+        // "+N more" needed.
+        let line = "/ex";
+        let hint = compute_hint(line, line.len(), &sample_commands()).expect("/ex yields palette");
+        assert!(
+            !hint.contains("+"),
+            "no extra-count suffix expected: {hint}"
+        );
+        assert!(!hint.contains("more"), "no `more` suffix expected: {hint}");
+        assert!(hint.contains("(Tab)"));
     }
 
     #[test]
