@@ -5,7 +5,9 @@
 //! throwaway `~/.claude`), so they live in ONE test to stay deterministic under
 //! the default parallel runner.
 
-use deeptide_core::{AgentBackend, AgentRequest, AgentResponse, AgentUsage, ReplEvent, ReplSession};
+use deeptide_core::{
+    AgentBackend, AgentRequest, AgentResponse, AgentUsage, ReplEvent, ReplSession,
+};
 
 struct EchoBackend;
 
@@ -68,8 +70,14 @@ fn import_discovers_and_hands_off_a_claude_session() {
     let hint = repl_for_hint
         .first_run_import_hint()
         .expect("first run with sessions should produce an import hint");
-    assert!(hint.contains("/import all"), "hint should emphasize import all: {hint}");
-    assert!(hint.contains("prior session"), "hint should mention prior sessions: {hint}");
+    assert!(
+        hint.contains("/import all"),
+        "hint should emphasize import all: {hint}"
+    );
+    assert!(
+        hint.contains("prior session"),
+        "hint should mention prior sessions: {hint}"
+    );
     deeptide_core::mark_onboarded();
     assert!(
         repl_for_hint.first_run_import_hint().is_none(),
@@ -131,9 +139,18 @@ fn import_discovers_and_hands_off_a_claude_session() {
     // 4) Bare `/import` shows an interactive numbered menu. With >1 session it
     //    leads with "Import ALL"; a bare numeric reply picks a row.
     let menu = outputs(repl.submit("/import"));
-    assert!(menu.contains("Select a session"), "expected a menu header: {menu}");
-    assert!(menu.contains("Import ALL"), "menu should lead with the bulk option: {menu}");
-    assert!(menu.contains("[claude]"), "menu should list the claude sessions: {menu}");
+    assert!(
+        menu.contains("Select a session"),
+        "expected a menu header: {menu}"
+    );
+    assert!(
+        menu.contains("Import ALL"),
+        "menu should lead with the bulk option: {menu}"
+    );
+    assert!(
+        menu.contains("[claude]"),
+        "menu should list the claude sessions: {menu}"
+    );
 
     // Row 1 = Import ALL, row 2 = newest session → pick 2 for a handoff.
     let before_pick = repl.agent_loop().messages().len();

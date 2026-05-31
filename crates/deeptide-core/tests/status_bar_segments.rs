@@ -147,9 +147,15 @@ fn status_line_keeps_ctx_when_narrow_and_drops_cwd_first() {
 
     // Wide: everything fits, so we can read the intended priority order.
     let wide = render_status(&repl, 200);
-    let ctx_at = wide.find("ctx").expect("ctx segment present in wide render");
-    let cwd_at = wide.find("cwd").expect("cwd segment present in wide render");
-    let git_at = wide.find("git").expect("git segment present in wide render");
+    let ctx_at = wide
+        .find("ctx")
+        .expect("ctx segment present in wide render");
+    let cwd_at = wide
+        .find("cwd")
+        .expect("cwd segment present in wide render");
+    let git_at = wide
+        .find("git")
+        .expect("git segment present in wide render");
     assert!(
         ctx_at < cwd_at && ctx_at < git_at,
         "ctx must precede cwd/git so it survives truncation; got order: {wide}"

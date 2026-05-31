@@ -58,7 +58,13 @@ fn is_test_cmd(cmd: &str) -> bool {
     lc_any(
         cmd,
         &[
-            "test", "pytest", "jest", "vitest", "go test", "cargo test", "make test",
+            "test",
+            "pytest",
+            "jest",
+            "vitest",
+            "go test",
+            "cargo test",
+            "make test",
         ],
     )
 }
@@ -66,7 +72,14 @@ fn is_test_cmd(cmd: &str) -> bool {
 fn is_build_cmd(cmd: &str) -> bool {
     lc_any(
         cmd,
-        &["build", "cargo build", "make ", "tsc", "compile", "cargo check"],
+        &[
+            "build",
+            "cargo build",
+            "make ",
+            "tsc",
+            "compile",
+            "cargo check",
+        ],
     )
 }
 
@@ -206,7 +219,8 @@ mod tests {
         };
         let out = suggest(&s);
         assert!(
-            !out.iter().any(|x| x.label.to_lowercase().contains("run the tests")),
+            !out.iter()
+                .any(|x| x.label.to_lowercase().contains("run the tests")),
             "should not re-suggest tests that just ran: {out:?}"
         );
     }
@@ -230,7 +244,10 @@ mod tests {
             ..signals()
         };
         let out = suggest(&s);
-        assert_eq!(out[0].prompt, "Continue with the next task: migrate the queue worker");
+        assert_eq!(
+            out[0].prompt,
+            "Continue with the next task: migrate the queue worker"
+        );
     }
 
     #[test]
@@ -240,7 +257,10 @@ mod tests {
             ..signals()
         };
         let out = suggest(&s);
-        assert!(out.iter().any(|x| x.label.contains("Fix the error")), "{out:?}");
+        assert!(
+            out.iter().any(|x| x.label.contains("Fix the error")),
+            "{out:?}"
+        );
     }
 
     #[test]

@@ -2097,9 +2097,7 @@ fn run_interactive(
                 // with the chosen row's action. Cancel skips the turn; an
                 // unsupported terminal falls through to the numbered-text menu
                 // that `submit` prints.
-                let content = if use_color
-                    && let Some(menu) = repl.menu_for(&content)
-                {
+                let content = if use_color && let Some(menu) = repl.menu_for(&content) {
                     match picker::run(&menu, use_color) {
                         picker::PickResult::Selected(action) => action,
                         picker::PickResult::Cancelled => continue,
@@ -2862,7 +2860,9 @@ fn run_prompt(
                 eprintln!("[import] unknown source `{tool}`; use claude, codex, or deeptide.");
             }
         } else {
-            eprintln!("[import] --import-as memory is interactive-only; run deeptide without --print.");
+            eprintln!(
+                "[import] --import-as memory is interactive-only; run deeptide without --print."
+            );
         }
     }
 

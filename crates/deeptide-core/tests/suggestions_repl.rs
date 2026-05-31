@@ -52,7 +52,10 @@ fn finished_edit_task_suggests_followups_and_numeric_pick_runs_one() {
 
     // A turn that edits a file should surface follow-up suggestions.
     let out = outputs(repl.submit("create notes.txt"));
-    assert!(out.contains("Next steps:"), "expected a suggestion block:\n{out}");
+    assert!(
+        out.contains("Next steps:"),
+        "expected a suggestion block:\n{out}"
+    );
     assert!(
         out.contains("Review the diff") || out.contains("test"),
         "expected verify/review follow-ups for an edit:\n{out}"
@@ -92,5 +95,8 @@ fn suggest_off_hides_followups_and_disables_numeric_pick() {
     let sent_literal_one = repl.agent_loop().messages()[before..]
         .iter()
         .any(|m| m.content.trim() == "1");
-    assert!(sent_literal_one, "a bare number should be a normal prompt when suggestions are off");
+    assert!(
+        sent_literal_one,
+        "a bare number should be a normal prompt when suggestions are off"
+    );
 }

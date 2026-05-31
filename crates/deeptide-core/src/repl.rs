@@ -1761,7 +1761,10 @@ impl ReplSession {
         // more than one session to fold in.
         if sessions.len() > 1 {
             choices.push(ReplMenuChoice {
-                label: format!("✨ Import ALL {} sessions into long-term memory", sessions.len()),
+                label: format!(
+                    "✨ Import ALL {} sessions into long-term memory",
+                    sessions.len()
+                ),
                 action: String::from("/import all"),
             });
         }
@@ -1769,7 +1772,10 @@ impl ReplSession {
             let id = session_short(&r.session_id);
             let newest = if i == 0 { " · newest" } else { "" };
             ReplMenuChoice {
-                label: format!("[{}] {id}{newest} — continue here (handoff)", r.source.label()),
+                label: format!(
+                    "[{}] {id}{newest} — continue here (handoff)",
+                    r.source.label()
+                ),
                 action: format!("/import {} {} --as context", r.source.label(), r.session_id),
             }
         }));
@@ -2015,7 +2021,10 @@ impl ReplSession {
     /// consolidation pass seeded with its flattened text. Reuses the same
     /// agent-driven `MemoryWrite` path as `/dream`, so dedup + scope rules
     /// apply unchanged.
-    fn import_as_memory(&mut self, transcript: crate::import::ImportedTranscript) -> Vec<ReplEvent> {
+    fn import_as_memory(
+        &mut self,
+        transcript: crate::import::ImportedTranscript,
+    ) -> Vec<ReplEvent> {
         let flat = crate::import::flatten_for_extraction(&transcript);
         if flat.trim().is_empty() {
             return vec![ReplEvent::Output(String::from(
@@ -2058,7 +2067,10 @@ impl ReplSession {
     /// Splice a framed handoff block (older turns noted, recent tail verbatim)
     /// to the FRONT of the live conversation so it's a stable, cache-friendly
     /// prefix. Snapshots first so `/rewind` can undo it.
-    fn import_as_context(&mut self, transcript: crate::import::ImportedTranscript) -> Vec<ReplEvent> {
+    fn import_as_context(
+        &mut self,
+        transcript: crate::import::ImportedTranscript,
+    ) -> Vec<ReplEvent> {
         if transcript.message_turns() == 0 {
             return vec![ReplEvent::Output(String::from(
                 "Imported session has no conversational content to hand off.",

@@ -148,20 +148,20 @@ pub fn slug_variants(cwd: &Path) -> Vec<String> {
 /// Resolve `selector` (a session-id prefix, or empty/`--latest`/`latest`) to a
 /// concrete session of `source` for `cwd`. Shared by the REPL command and the
 /// CLI one-shot path so both pick sessions identically.
-pub fn resolve_ref(
-    cwd: &Path,
-    source: SourceTool,
-    selector: &str,
-) -> Result<SessionRef, String> {
+pub fn resolve_ref(cwd: &Path, source: SourceTool, selector: &str) -> Result<SessionRef, String> {
     let mut refs: Vec<_> = discover(cwd)
         .into_iter()
         .filter(|r| r.source == source)
         .collect();
     if refs.is_empty() {
-        return Err(format!("No {} sessions found for this project.", source.label()));
+        return Err(format!(
+            "No {} sessions found for this project.",
+            source.label()
+        ));
     }
     let sel = selector.trim();
-    if sel.is_empty() || sel.eq_ignore_ascii_case("--latest") || sel.eq_ignore_ascii_case("latest") {
+    if sel.is_empty() || sel.eq_ignore_ascii_case("--latest") || sel.eq_ignore_ascii_case("latest")
+    {
         return Ok(refs.remove(0)); // discover() is newest-first
     }
     refs.into_iter()
@@ -381,7 +381,10 @@ fn strip_envelopes(text: &str) -> String {
         }
         // Find the matching close of the first tag's region: if there's a
         // closing `</…>`, cut past it; otherwise cut past the first `>`.
-        if let Some(close) = s.find("</").and_then(|i| s[i..].find('>').map(|j| i + j + 1)) {
+        if let Some(close) = s
+            .find("</")
+            .and_then(|i| s[i..].find('>').map(|j| i + j + 1))
+        {
             s = s[close..].trim_start();
         } else if let Some(gt) = s.find('>') {
             s = s[gt + 1..].trim_start();
@@ -415,7 +418,10 @@ pub fn parse_claude(raw: &str, fallback_id: &str) -> ImportedTranscript {
                 .map(ToOwned::to_owned);
         }
         if cwd.is_none() {
-            cwd = obj.get("cwd").and_then(|v| v.as_str()).map(ToOwned::to_owned);
+            cwd = obj
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned);
         }
         if git_branch.is_none() {
             git_branch = obj
@@ -441,7 +447,9 @@ pub fn parse_claude(raw: &str, fallback_id: &str) -> ImportedTranscript {
         let content = message.get("content").unwrap_or(&serde_json::Value::Null);
 
         // String content on a user line = a real human prompt.
-        if ty == "user" && let Some(s) = content.as_str() {
+        if ty == "user"
+            && let Some(s) = content.as_str()
+        {
             let cleaned = strip_envelopes(s);
             if !cleaned.is_empty() {
                 turns.push(ImportedTurn::message(ImportedRole::User, cleaned));
@@ -556,9 +564,8 @@ pub fn parse_codex(raw: &str, fallback_id: &str) -> ImportedTranscript {
         match pt {
             "message" => {
                 let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                let text = text_from_content(
-                    payload.get("content").unwrap_or(&serde_json::Value::Null),
-                );
+                let text =
+                    text_from_content(payload.get("content").unwrap_or(&serde_json::Value::Null));
                 let (role, cleaned) = match role {
                     "user" => (ImportedRole::User, strip_envelopes(&text)),
                     "assistant" => (ImportedRole::Assistant, text.trim().to_owned()),
@@ -630,7 +637,10 @@ pub fn parse_deeptide(raw: &str, fallback_id: &str) -> ImportedTranscript {
                 .get("session_id")
                 .and_then(|v| v.as_str())
                 .map(ToOwned::to_owned);
-            cwd = obj.get("cwd").and_then(|v| v.as_str()).map(ToOwned::to_owned);
+            cwd = obj
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned);
             continue;
         }
         if ty != "message" {
@@ -799,8 +809,16 @@ mod tests {
         assert_eq!(user.text, "Use pnpm, never npm.");
         assert!(!user.text.contains("ignore me"));
         // Assistant text + a tool_use + a tool_result all captured.
-        assert!(t.turns.iter().any(|t| t.kind == TurnKind::ToolUse && t.text.starts_with("Bash(")));
-        assert!(t.turns.iter().any(|t| t.kind == TurnKind::ToolResult && t.text == "done"));
+        assert!(
+            t.turns
+                .iter()
+                .any(|t| t.kind == TurnKind::ToolUse && t.text.starts_with("Bash("))
+        );
+        assert!(
+            t.turns
+                .iter()
+                .any(|t| t.kind == TurnKind::ToolResult && t.text == "done")
+        );
         assert!(t.turns.iter().any(|t| t.kind == TurnKind::Thinking));
     }
 
@@ -816,7 +834,11 @@ mod tests {
             .find(|t| t.role == ImportedRole::User && t.kind == TurnKind::Message)
             .unwrap();
         assert_eq!(user.text, "Deploy to cn-shanghai.");
-        assert!(t.turns.iter().any(|t| t.role == ImportedRole::Assistant && t.text == "Deploying now."));
+        assert!(
+            t.turns
+                .iter()
+                .any(|t| t.role == ImportedRole::Assistant && t.text == "Deploying now.")
+        );
         // The developer/system envelope produced no user/assistant message.
         assert_eq!(t.message_turns(), 2);
     }
@@ -835,7 +857,10 @@ mod tests {
         let flat = flatten_for_extraction(&t);
         assert!(flat.contains("USER: Use pnpm, never npm."));
         assert!(flat.contains("ASSISTANT: Got it, pnpm it is."));
-        assert!(!flat.contains("Bash("), "tool calls must not leak into the seed text: {flat}");
+        assert!(
+            !flat.contains("Bash("),
+            "tool calls must not leak into the seed text: {flat}"
+        );
         assert!(!flat.contains("done"), "tool results must not leak: {flat}");
     }
 

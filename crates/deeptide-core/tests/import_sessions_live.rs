@@ -93,9 +93,7 @@ fn import_as_memory_distills_a_claude_session_to_canonical_store() {
     );
     let loaded = MemorySystem::load_memory_prompt(project.path()).to_lowercase();
     assert!(
-        loaded.contains("cn-shanghai")
-            || loaded.contains("aliyun")
-            || loaded.contains("pnpm"),
+        loaded.contains("cn-shanghai") || loaded.contains("aliyun") || loaded.contains("pnpm"),
         "imported facts did not round-trip into the system-prompt memory block:\n{loaded}"
     );
 }

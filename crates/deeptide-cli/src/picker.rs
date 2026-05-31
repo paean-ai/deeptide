@@ -138,10 +138,13 @@ fn render(
     };
 
     let mut lines = 0usize;
-    let _ = write!(out, "{bold}{}{reset}  {dim}{} match{}{reset}\r\n",
+    let _ = write!(
+        out,
+        "{bold}{}{reset}  {dim}{} match{}{reset}\r\n",
         menu.title,
         filtered.len(),
-        if filtered.len() == 1 { "" } else { "es" });
+        if filtered.len() == 1 { "" } else { "es" }
+    );
     lines += 1;
     let _ = write!(out, "{dim}search:{reset} {query}\r\n");
     lines += 1;
@@ -165,7 +168,10 @@ fn render(
         let _ = write!(out, "{dim}{}{reset}\r\n", menu.footer);
         lines += 1;
     }
-    let _ = write!(out, "{dim}↑/↓ move · type to filter · Enter select · Esc cancel{reset}");
+    let _ = write!(
+        out,
+        "{dim}↑/↓ move · type to filter · Enter select · Esc cancel{reset}"
+    );
     lines += 1; // the hint line (no trailing newline)
     let _ = out.flush();
     lines
