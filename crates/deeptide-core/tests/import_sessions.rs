@@ -90,6 +90,17 @@ fn import_discovers_and_hands_off_a_claude_session() {
         .with_cwd(project.path())
         .with_session_persistence(false);
 
+    // 0) A context handoff AUGMENTS history, so it must preserve cumulative
+    //    cost/turn telemetry (replace_messages, not restore_messages).
+    let _ = repl.submit("hello"); // records one turn in the cost tracker
+    let turns_before = repl.agent_loop().cost_tracker().summary().turns.len();
+    assert!(turns_before >= 1, "submit should record a turn");
+    let _ = repl.run_continue("claude");
+    assert!(
+        repl.agent_loop().cost_tracker().summary().turns.len() >= turns_before,
+        "handoff must not wipe accumulated turn/cost telemetry"
+    );
+
     // 1) /sessions --all surfaces the Claude session for this project.
     let listing = outputs(repl.run_continue("")); // warm path below; first check discovery
     let _ = listing;

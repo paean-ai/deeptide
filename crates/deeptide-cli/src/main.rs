@@ -1934,10 +1934,15 @@ fn run_interactive(
 
     // First-run onboarding: on a fresh install with prior Claude Code / Codex
     // sessions in this project, nudge the user to import them (especially
-    // `/import all`). Shown once, then a marker suppresses it forever.
-    if let Some(hint) = repl.first_run_import_hint() {
-        writeln!(stdout, "{}", status_bar::dim(&hint, use_color))
-            .map_err(|error| error.to_string())?;
+    // `/import all`). Mark onboarded UNCONDITIONALLY on the first run so the
+    // discovery walk (which scans ~/.claude and the whole ~/.codex tree) runs
+    // at most once, not on every startup until a session-bearing project is
+    // opened.
+    if deeptide_core::is_first_run() {
+        if let Some(hint) = repl.first_run_import_hint() {
+            writeln!(stdout, "{}", status_bar::dim(&hint, use_color))
+                .map_err(|error| error.to_string())?;
+        }
         deeptide_core::mark_onboarded();
     }
 

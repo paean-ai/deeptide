@@ -451,6 +451,24 @@ impl AgentLoop {
         self
     }
 
+    /// Mutable counterpart to [`with_tool_restrictions`], for scoping a one-off
+    /// pass (e.g. a memory-only consolidation over untrusted imported text)
+    /// without rebuilding the loop. Returns the previous restrictions so the
+    /// caller can restore them afterwards.
+    pub fn set_tool_restrictions(
+        &mut self,
+        allowed: Option<Vec<String>>,
+        disallowed: Vec<String>,
+    ) -> (Option<Vec<String>>, Vec<String>) {
+        let prev = (
+            self.allowed_tools.take(),
+            std::mem::take(&mut self.disallowed_tools),
+        );
+        self.allowed_tools = allowed;
+        self.disallowed_tools = disallowed;
+        prev
+    }
+
     /// The set of tools to advertise to the model. `None` when unrestricted
     /// (advertise everything); otherwise only the permitted tools, so a
     /// restricted sub-agent is never offered a tool it cannot call.

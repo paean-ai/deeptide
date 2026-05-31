@@ -1782,7 +1782,7 @@ impl ReplSession {
         Some(ReplMenu {
             title: String::from("Select a session to continue"),
             footer: String::from(
-                "Distil one into memory instead: /import <tool> <id> --as memory  ·  /sessions --all to list",
+                "Distil one into memory: /import <tool> <id> --as memory  ·  /sessions --all  ·  import sends session content to your model",
             ),
             choices,
         })
@@ -1816,10 +1816,11 @@ impl ReplSession {
             return None;
         }
         Some(format!(
-            "First run — found {count} prior session(s) from Claude Code / Codex in this project.\n\
+            "Found {count} prior session(s) from Claude Code / Codex in this project.\n\
              Start with their context instead of from scratch:\n\
              \x20 /import all   distil every past session into long-term memory (recommended)\n\
-             \x20 /import       pick one session to continue here"
+             \x20 /import       pick one session to continue here\n\
+             \x20 (import sends those sessions' content to your configured model.)"
         ))
     }
 
@@ -2002,17 +2003,40 @@ impl ReplSession {
             String::new()
         };
         let mut events = vec![ReplEvent::Output(format!(
-            "[import] distilling {included} session(s) into long-term memory{tail}…"
+            "[import] distilling {included} session(s) into long-term memory{tail} \
+             (sends their content to your configured model)…"
         ))];
         // Bulk distillation may touch more facts than a single session; give it
         // a slightly higher ceiling than the end-of-session pass, still bounded.
-        let prev_turns = self.agent_loop.set_max_turns(CONSOLIDATION_MAX_TURNS * 3);
-        events.extend(
-            self.agent_loop
-                .run(&prompt)
-                .into_iter()
-                .filter_map(agent_event_to_repl_event),
+        events.extend(self.run_memory_consolidation(&prompt, CONSOLIDATION_MAX_TURNS * 3));
+        events
+    }
+
+    /// Run a one-off memory-consolidation pass over `prompt`, restricted to the
+    /// memory tools only and bounded to `max_turns`, restoring both afterwards.
+    ///
+    /// The tool allowlist matters because `prompt` embeds imported, potentially
+    /// untrusted transcript text (a past session may have pasted web/file
+    /// content). Even if that text tries to prompt-inject, the pass can only
+    /// `MemorySearch` / `MemoryWrite` — never run a shell, edit files, or touch
+    /// settings/cron/provider config — instead of relying on prose guardrails.
+    fn run_memory_consolidation(&mut self, prompt: &str, max_turns: usize) -> Vec<ReplEvent> {
+        let prev_turns = self.agent_loop.set_max_turns(max_turns);
+        let (prev_allowed, prev_disallowed) = self.agent_loop.set_tool_restrictions(
+            Some(vec![
+                String::from("MemorySearch"),
+                String::from("MemoryWrite"),
+            ]),
+            Vec::new(),
         );
+        let events = self
+            .agent_loop
+            .run(prompt)
+            .into_iter()
+            .filter_map(agent_event_to_repl_event)
+            .collect::<Vec<_>>();
+        self.agent_loop
+            .set_tool_restrictions(prev_allowed, prev_disallowed);
         self.agent_loop.set_max_turns(prev_turns);
         events
     }
@@ -2051,22 +2075,18 @@ impl ReplSession {
             Transcript:\n{flat}"
         );
         let mut events = vec![ReplEvent::Output(format!(
-            "[import] distilling {} conversational turns from {source} session {} into memory…",
+            "[import] distilling {} conversational turns from {source} session {} into memory \
+             (sends the transcript to your configured model)…",
             transcript.message_turns(),
             session_short(&transcript.session_id),
         ))];
-        events.extend(
-            self.agent_loop
-                .run(&prompt)
-                .into_iter()
-                .filter_map(agent_event_to_repl_event),
-        );
+        events.extend(self.run_memory_consolidation(&prompt, CONSOLIDATION_MAX_TURNS));
         events
     }
 
     /// Splice a framed handoff block (older turns noted, recent tail verbatim)
     /// to the FRONT of the live conversation so it's a stable, cache-friendly
-    /// prefix. Snapshots first so `/rewind` can undo it.
+    /// prefix. Snapshots the pre-splice transcript first so `/rewind` undoes it.
     fn import_as_context(
         &mut self,
         transcript: crate::import::ImportedTranscript,
@@ -2076,11 +2096,18 @@ impl ReplSession {
                 "Imported session has no conversational content to hand off.",
             ))];
         }
+        // Snapshot the current transcript so the splice is undoable via /rewind.
+        // (No-op when the conversation is still empty.)
+        self.snapshot_checkpoint("before import handoff");
+
         const RECENT_TAIL: usize = 8;
         let handoff = crate::import::handoff_message(&transcript, RECENT_TAIL);
         let mut combined = vec![handoff];
         combined.extend(self.agent_loop.messages().to_vec());
-        self.agent_loop.restore_messages(combined);
+        // `replace_messages` (not `restore_messages`): this AUGMENTS history, so
+        // the cumulative cost/turn telemetry in the status bar must be preserved,
+        // not reset as it would be for resuming a saved session.
+        self.agent_loop.replace_messages(combined);
 
         let source = transcript.source.label();
         vec![ReplEvent::Output(format!(
@@ -3404,6 +3431,28 @@ impl ReplSession {
         // `/rewind` is a thin alias for `/checkpoint restore` with the
         // empty-selector default (newest snapshot).
         self.checkpoint_restore(args.trim())
+    }
+
+    /// Push an in-memory checkpoint of the current transcript (for programmatic
+    /// callers that mutate history, e.g. an import handoff). No-op when the
+    /// transcript is empty. Mirrors `checkpoint_save` without the user-facing
+    /// validation / messaging.
+    fn snapshot_checkpoint(&mut self, label: &str) {
+        let messages = self.agent_loop.messages().to_vec();
+        if messages.is_empty() {
+            return;
+        }
+        let created_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        self.checkpoints.push(crate::checkpoints::Checkpoint {
+            id: crate::checkpoints::fresh_checkpoint_id(),
+            label: label.to_owned(),
+            created_at,
+            message_count: messages.len(),
+            model: self.agent_loop.model().to_owned(),
+            messages,
+        });
     }
 
     fn checkpoint_save(&mut self, label_args: &str) -> CommandResult {
