@@ -213,6 +213,7 @@ fn repl_shows_tool_batch_summary_before_tool_output() {
                 summary,
                 is_error: false,
                 body: Some(body),
+                ..
             }) if name == "Read"
                 && call_id == "toolu_read"
                 && summary.contains("1 lines")
@@ -242,6 +243,7 @@ fn repl_summarizes_long_tool_output() {
                 summary,
                 is_error: false,
                 body: None,
+                ..
             }) if name == "Read"
                 && call_id == "toolu_read"
                 && summary == "20 lines (201 B)"
@@ -273,6 +275,7 @@ fn repl_compacts_recoverable_tool_failures() {
                 summary,
                 is_error: true,
                 body: None,
+                ..
             }) if name == "Read"
                 && call_id == "toolu_missing"
                 && summary == "file not found — use Glob or find to locate it"

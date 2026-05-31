@@ -3506,12 +3506,14 @@ fn render_system_message(message: &SystemMessage, use_color: bool, debug: bool) 
             summary,
             is_error,
             body,
+            subject,
         } => render_tool_event(
             name,
             call_id,
             summary,
             *is_error,
             body.as_deref(),
+            subject.as_deref(),
             use_color,
             debug,
         ),
@@ -3537,12 +3539,27 @@ fn render_system_message(message: &SystemMessage, use_color: bool, debug: bool) 
 /// Format a single tool event line. Call IDs are hidden by default
 /// (they're long and noisy) and only re-surfaced under `--debug` for
 /// correlation with backend logs.
+///
+/// Layout (T2.1):
+///
+/// ```text
+///   ✓ Read  src/main.rs  · 966 lines (29.8 KB)
+///   │  └─ tool name  └─ subject (input)        └─ summary (output)
+///   ✗ Bash  cargo build  · exit 1, 12 lines (1.4 KB)
+/// ```
+///
+/// The `subject` slot pulls the most useful field of the call's
+/// INPUT (file path, command, URL, …) so the row is self-describing
+/// without expanding the body. Falls back gracefully to the old
+/// `name · summary` shape when `subject` is `None`.
+#[allow(clippy::too_many_arguments)]
 fn render_tool_event(
     name: &str,
     call_id: &str,
     summary: &str,
     is_error: bool,
     body: Option<&str>,
+    subject: Option<&str>,
     use_color: bool,
     debug: bool,
 ) -> String {
@@ -3552,10 +3569,25 @@ fn render_tool_event(
         String::new()
     };
 
+    // The subject is the most informative thing on the row, so it's
+    // rendered in *plain* (un-dimmed) text on success and bright red
+    // on failure — both stand out next to the dim summary.
+    let subject_segment = match subject {
+        Some(s) if !s.is_empty() && use_color => {
+            if is_error {
+                format!("  \x1b[31m{s}\x1b[0m")
+            } else {
+                format!("  {s}")
+            }
+        }
+        Some(s) if !s.is_empty() => format!("  {s}"),
+        _ => String::new(),
+    };
+
     let header = if is_error {
         if use_color {
             format!(
-                "\x1b[31m✗\x1b[0m \x1b[1m{name}\x1b[0m{id_dim}  \x1b[31m{summary}\x1b[0m",
+                "\x1b[31m✗\x1b[0m \x1b[1m{name}\x1b[0m{id_dim}{subject_segment}  \x1b[31m{summary}\x1b[0m",
                 id_dim = if debug {
                     format!("\x1b[2m{id_suffix}\x1b[0m")
                 } else {
@@ -3563,11 +3595,11 @@ fn render_tool_event(
                 }
             )
         } else {
-            format!("✗ {name}{id_suffix}  {summary}")
+            format!("✗ {name}{id_suffix}{subject_segment}  {summary}")
         }
     } else if use_color {
         format!(
-            "\x1b[32m✓\x1b[0m \x1b[1m{name}\x1b[0m{id_dim}  \x1b[2m{summary}\x1b[0m",
+            "\x1b[32m✓\x1b[0m \x1b[1m{name}\x1b[0m{id_dim}{subject_segment}  \x1b[2m{summary}\x1b[0m",
             id_dim = if debug {
                 format!("\x1b[2m{id_suffix}\x1b[0m")
             } else {
@@ -3575,7 +3607,7 @@ fn render_tool_event(
             }
         )
     } else {
-        format!("✓ {name}{id_suffix}  {summary}")
+        format!("✓ {name}{id_suffix}{subject_segment}  {summary}")
     };
 
     match body {
@@ -5305,6 +5337,7 @@ mod tests {
                 summary: "1 lines".into(),
                 is_error: false,
                 body: None,
+                subject: None,
             },
             true,
             false,
@@ -5324,6 +5357,7 @@ mod tests {
                 summary: "1 lines".into(),
                 is_error: false,
                 body: None,
+                subject: None,
             },
             false,
             true,
@@ -5340,6 +5374,7 @@ mod tests {
                 summary: "Permission required for Write.".into(),
                 is_error: true,
                 body: None,
+                subject: None,
             },
             true,
             false,
@@ -5352,6 +5387,57 @@ mod tests {
     }
 
     #[test]
+    fn tool_subject_appears_between_name_and_summary() {
+        // T2.1: the per-tool row should now self-describe what was
+        // acted on — the subject (file path / command / URL) is
+        // spliced between the tool name and the result summary.
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::Tool {
+                name: "Read".into(),
+                call_id: "toolu_read".into(),
+                summary: "966 lines (29.8 KB)".into(),
+                is_error: false,
+                body: None,
+                subject: Some("src/main.rs".into()),
+            },
+            true,
+            false,
+        ));
+        // Expect: ✓ Read  src/main.rs  966 lines (29.8 KB)
+        assert!(plain.starts_with("✓ Read"), "got: {plain:?}");
+        let read_pos = plain.find("Read").unwrap();
+        let subject_pos = plain
+            .find("src/main.rs")
+            .unwrap_or_else(|| panic!("subject missing: {plain:?}"));
+        let summary_pos = plain
+            .find("966 lines")
+            .unwrap_or_else(|| panic!("summary missing: {plain:?}"));
+        assert!(
+            read_pos < subject_pos && subject_pos < summary_pos,
+            "ordering must be name → subject → summary: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn tool_no_subject_keeps_old_two_space_separator_layout() {
+        // When subject is None, the row should look identical to the
+        // pre-T2.1 layout (name then summary, two spaces).
+        let plain = strip_ansi(&render_system_message(
+            &SystemMessage::Tool {
+                name: "Bash".into(),
+                call_id: "toolu_x".into(),
+                summary: "ok".into(),
+                is_error: false,
+                body: None,
+                subject: None,
+            },
+            true,
+            false,
+        ));
+        assert_eq!(plain, "✓ Bash  ok");
+    }
+
+    #[test]
     fn tool_body_renders_with_dim_left_bar() {
         let plain = strip_ansi(&render_system_message(
             &SystemMessage::Tool {
@@ -5360,6 +5446,7 @@ mod tests {
                 summary: "2 lines".into(),
                 is_error: false,
                 body: Some("1\talpha\n2\tbeta".into()),
+                subject: None,
             },
             true,
             false,
