@@ -120,9 +120,13 @@ fn render(
     prev_lines: usize,
 ) -> usize {
     let mut out = io::stdout();
-    // Rewind over the previous frame and clear downward.
-    if prev_lines > 0 {
-        let _ = write!(out, "\r\x1b[{prev_lines}A\x1b[J");
+    // Rewind over the previous frame and clear downward. The cursor sits on the
+    // LAST line of the previous frame (the hint line has no trailing newline),
+    // so there are `prev_lines - 1` rows above it — move up exactly that many to
+    // land on the first row, never one too far (which made the block creep up).
+    let up = prev_lines.saturating_sub(1);
+    if up > 0 {
+        let _ = write!(out, "\r\x1b[{up}A\x1b[J");
     } else {
         let _ = write!(out, "\r\x1b[J");
     }
