@@ -95,6 +95,13 @@ pub enum KeyOutcome {
     /// User pressed Ctrl-C; treat as a "cancel my draft" gesture.
     /// The buffer has been cleared but nothing should be submitted.
     Cancelled,
+    /// User pressed Shift+Tab. The editor doesn't itself know how to
+    /// cycle the permission mode (it has no access to the agent
+    /// loop), so it forwards the intent up to the pump, which sets
+    /// the shared `mode_cycle` flag. The CLI then applies the
+    /// cycle either inside the next permission prompt (as a
+    /// quick-yolo shortcut) or at turn boundary.
+    ModeCycle,
     /// Byte was consumed but had no visible effect (escape sequence
     /// progress, unrecognised key, etc.). No repaint needed.
     Nothing,
@@ -326,19 +333,24 @@ impl QueueEditor {
 
     fn consume_csi(&mut self, byte: u8) -> KeyOutcome {
         // CSI terminator: any byte in the `@…~` range closes the
-        // sequence. We check for the bracketed-paste start marker
-        // ("200~") and end marker ("201~") at the moment of close
-        // by looking at the param fragment we accumulated — but
-        // since we don't actually accumulate the params (we'd need
-        // a separate buffer for that), we approximate with a
-        // direct match on the closing byte plus the last few
-        // bytes seen. For the v1 implementation we settle for
-        // *consuming* the sequence cleanly and treat any future
-        // bracketed-paste bytes as ground-mode input — the
-        // start/end markers will hit `consume_paste` via a future
-        // refinement once we wire param accumulation.
+        // sequence. We special-case `Z` (0x5A) because that's the
+        // CSI final byte for Shift+Tab on every terminal we've
+        // tested (xterm, iTerm2, macOS Terminal, GNOME Terminal,
+        // Windows Terminal, Alacritty). The CSI-u extended form
+        // `ESC [ 27 ; 2 ; 9 ~` is rare and intentionally not
+        // recognised — users can still cycle modes via the
+        // rustyline path between turns.
+        //
+        // Other CSI terminators (arrow keys, function keys,
+        // bracketed-paste markers) are still consumed cleanly.
+        // The bracketed-paste mode-switch noted in the original
+        // comment lives in `consume_paste`; entering that state
+        // requires param accumulation which we don't do here yet.
         if (0x40..=0x7e).contains(&byte) {
             self.state = PumpState::Ground;
+            if byte == b'Z' {
+                return KeyOutcome::ModeCycle;
+            }
         }
         KeyOutcome::Nothing
     }
@@ -648,6 +660,16 @@ pub struct EditorContext {
     /// from stdin in cooked mode. Cleared by the pump once it
     /// re-enters raw mode on resume.
     pub suspended: Arc<AtomicBool>,
+    /// Raised by the pump when the user presses Shift+Tab
+    /// mid-turn. The CLI consumes this signal either inside the
+    /// next permission prompt (as a quick-yolo shortcut) or at
+    /// the next turn boundary (cycling to the next mode like
+    /// the rustyline binding does between turns).
+    ///
+    /// Stays raised until consumed — pressing Shift+Tab twice in
+    /// a row before consumption is a no-op (the second press
+    /// just re-sets a flag that's already true).
+    pub mode_cycle: Arc<AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -796,6 +818,19 @@ pub fn run_pump(ctx: EditorContext, mut guard: RawModeGuard) {
                     dirty = true;
                 }
                 KeyOutcome::Cancelled => dirty = true,
+                KeyOutcome::ModeCycle => {
+                    // Surface the Shift+Tab intent to the CLI via
+                    // the shared atomic. The user-visible mode
+                    // change happens on the main thread — either
+                    // when the next permission prompt fires, or
+                    // after `repl.submit()` returns at turn
+                    // boundary. We mark the line dirty so the
+                    // hint can update if the painter cares about
+                    // pending cycles (currently it doesn't, but
+                    // the flag is free).
+                    ctx.mode_cycle.store(true, Ordering::Relaxed);
+                    dirty = true;
+                }
                 KeyOutcome::Nothing => {}
             }
         }
@@ -898,6 +933,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let suspend = Arc::new(AtomicBool::new(false));
         let suspended = Arc::new(AtomicBool::new(false));
+        let mode_cycle = Arc::new(AtomicBool::new(false));
         let ctx = EditorContext {
             queue,
             stop,
@@ -907,6 +943,7 @@ mod tests {
             line_width: 80,
             suspend: Arc::clone(&suspend),
             suspended: Arc::clone(&suspended),
+            mode_cycle: Arc::clone(&mode_cycle),
         };
         assert!(!suspend.load(Ordering::Relaxed));
         assert!(!suspended.load(Ordering::Relaxed));
@@ -915,7 +952,52 @@ mod tests {
         suspend.store(false, Ordering::Relaxed);
         suspended.store(true, Ordering::Relaxed);
         assert!(ctx.suspended.load(Ordering::Relaxed));
+        mode_cycle.store(true, Ordering::Relaxed);
+        assert!(ctx.mode_cycle.load(Ordering::Relaxed));
         let _ = Duration::from_millis(0); // suppress unused-import warning
+    }
+
+    #[test]
+    fn shift_tab_csi_z_returns_mode_cycle_outcome() {
+        // xterm/iTerm/macOS Terminal/etc. send `ESC [ Z` for
+        // Shift+Tab. The first two bytes drive the state
+        // machine into Csi; the terminator `Z` should yield
+        // KeyOutcome::ModeCycle, not silently swallow.
+        let mut ed = QueueEditor::new();
+        assert_eq!(ed.consume(0x1b), KeyOutcome::Nothing); // ESC
+        assert_eq!(ed.consume(b'['), KeyOutcome::Nothing); // CSI introducer
+        assert_eq!(ed.consume(b'Z'), KeyOutcome::ModeCycle);
+        // Buffer must remain pristine — Shift+Tab is a control
+        // gesture, not text input.
+        assert!(ed.buffer().is_empty());
+    }
+
+    #[test]
+    fn shift_tab_does_not_disturb_existing_buffer_or_state() {
+        // Pressing Shift+Tab while typing a draft must not
+        // corrupt the in-progress buffer. After the gesture,
+        // subsequent ASCII bytes resume appending normally.
+        let mut ed = QueueEditor::new();
+        ed.seed("hello");
+        assert_eq!(ed.consume(0x1b), KeyOutcome::Nothing);
+        assert_eq!(ed.consume(b'['), KeyOutcome::Nothing);
+        assert_eq!(ed.consume(b'Z'), KeyOutcome::ModeCycle);
+        assert_eq!(ed.buffer(), "hello");
+        assert_eq!(ed.consume(b'!'), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "hello!");
+    }
+
+    #[test]
+    fn csi_with_other_terminators_still_swallows_without_mode_cycle() {
+        // Sanity check: non-Z CSI sequences (arrow keys,
+        // function keys, mouse tracking) must NOT spuriously
+        // trigger mode cycle.
+        let mut ed = QueueEditor::new();
+        // Up arrow: ESC [ A
+        assert_eq!(ed.consume(0x1b), KeyOutcome::Nothing);
+        assert_eq!(ed.consume(b'['), KeyOutcome::Nothing);
+        assert_eq!(ed.consume(b'A'), KeyOutcome::Nothing);
+        assert!(ed.buffer().is_empty());
     }
 
     #[test]
