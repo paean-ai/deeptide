@@ -82,7 +82,7 @@ pub use prompt::build_system_prompt;
 pub use repl::{
     AUTO_COMPACT_DEFAULT_THRESHOLD, AUTO_COMPACT_MAX_THRESHOLD, AUTO_COMPACT_MIN_THRESHOLD,
     AutoCompactConfig, ReplEvent, ReplMenu, ReplMenuChoice, ReplSession, SystemMessage,
-    slash_command_invokes_agent,
+    is_first_run, mark_onboarded, slash_command_invokes_agent,
 };
 pub use routing::{EscalationPolicy, Route, RoutingBackend};
 pub use safety_guard::{

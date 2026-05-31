@@ -1932,6 +1932,15 @@ fn run_interactive(
         .map_err(|error| error.to_string())?;
     }
 
+    // First-run onboarding: on a fresh install with prior Claude Code / Codex
+    // sessions in this project, nudge the user to import them (especially
+    // `/import all`). Shown once, then a marker suppresses it forever.
+    if let Some(hint) = repl.first_run_import_hint() {
+        writeln!(stdout, "{}", status_bar::dim(&hint, use_color))
+            .map_err(|error| error.to_string())?;
+        deeptide_core::mark_onboarded();
+    }
+
     // --resume / --continue: restore a prior conversation before the first prompt.
     let resume_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if let Some(session_id) = resolve_resume_id(cli, &resume_cwd) {

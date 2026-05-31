@@ -1748,23 +1748,31 @@ impl ReplSession {
     /// (optionally filtered to `only`), newest first. Choosing a row hands that
     /// session off into the live conversation. `None` when there are none.
     fn import_menu(&self, only: Option<crate::import::SourceTool>) -> Option<ReplMenu> {
-        let choices: Vec<ReplMenuChoice> = crate::import::discover(&self.tool_context.cwd)
+        let sessions: Vec<_> = crate::import::discover(&self.tool_context.cwd)
             .into_iter()
             .filter(|r| only.is_none_or(|s| r.source == s))
             .take(20)
-            .enumerate()
-            .map(|(i, r)| {
-                let id = session_short(&r.session_id);
-                let newest = if i == 0 { " · newest" } else { "" };
-                ReplMenuChoice {
-                    label: format!("[{}] {id}{newest} — continue here (handoff)", r.source.label()),
-                    action: format!("/import {} {} --as context", r.source.label(), r.session_id),
-                }
-            })
             .collect();
-        if choices.is_empty() {
+        if sessions.is_empty() {
             return None;
         }
+        let mut choices: Vec<ReplMenuChoice> = Vec::with_capacity(sessions.len() + 1);
+        // Lead with the bulk action — "stand on all prior work" — when there's
+        // more than one session to fold in.
+        if sessions.len() > 1 {
+            choices.push(ReplMenuChoice {
+                label: format!("✨ Import ALL {} sessions into long-term memory", sessions.len()),
+                action: String::from("/import all"),
+            });
+        }
+        choices.extend(sessions.iter().enumerate().map(|(i, r)| {
+            let id = session_short(&r.session_id);
+            let newest = if i == 0 { " · newest" } else { "" };
+            ReplMenuChoice {
+                label: format!("[{}] {id}{newest} — continue here (handoff)", r.source.label()),
+                action: format!("/import {} {} --as context", r.source.label(), r.session_id),
+            }
+        }));
         Some(ReplMenu {
             title: String::from("Select a session to continue"),
             footer: String::from(
@@ -1787,6 +1795,26 @@ impl ReplSession {
         self.pending_menu = menu.choices;
         self.last_suggestions.clear();
         vec![ReplEvent::Output(lines.join("\n"))]
+    }
+
+    /// First-run onboarding: if deeptide hasn't been used here before AND there
+    /// are importable sessions from other agents for this project, return a hint
+    /// nudging the user to import them (especially `/import all`). The host
+    /// prints it once after the welcome banner and then calls [`mark_onboarded`].
+    pub fn first_run_import_hint(&self) -> Option<String> {
+        if !is_first_run() {
+            return None;
+        }
+        let count = crate::import::discover(&self.tool_context.cwd).len();
+        if count == 0 {
+            return None;
+        }
+        Some(format!(
+            "First run — found {count} prior session(s) from Claude Code / Codex in this project.\n\
+             Start with their context instead of from scratch:\n\
+             \x20 /import all   distil every past session into long-term memory (recommended)\n\
+             \x20 /import       pick one session to continue here"
+        ))
     }
 
     /// Numbered-text fallback for `/import`'s menu (used by non-TTY hosts).
@@ -1825,6 +1853,11 @@ impl ReplSession {
         let Some(source_raw) = tokens.next() else {
             return self.present_import_menu(None);
         };
+        // `/import all` — distil EVERY discovered session into long-term memory
+        // (the first-install "stand on prior work" bootstrap).
+        if source_raw.eq_ignore_ascii_case("all") {
+            return self.import_all_to_memory();
+        }
         let Some(source) = crate::import::SourceTool::parse(source_raw) else {
             return vec![ReplEvent::Output(format!(
                 "Unknown source `{source_raw}`. Use claude, codex, or deeptide."
@@ -1887,6 +1920,95 @@ impl ReplSession {
             Ok(t) => self.import_as_context(t),
             Err(e) => vec![ReplEvent::Output(format!("Cannot read session: {e}"))],
         }
+    }
+
+    /// `/import all` — distil EVERY discovered session (Claude Code, Codex,
+    /// deeptide) for this project into long-term memory in ONE consolidation
+    /// pass. Flattened transcripts are concatenated newest-first up to a byte
+    /// budget so a deep history doesn't blow the window; the model dedups via
+    /// MemorySearch as usual.
+    fn import_all_to_memory(&mut self) -> Vec<ReplEvent> {
+        const MAX_SESSIONS: usize = 15;
+        const CHAR_BUDGET: usize = 60_000;
+
+        let refs: Vec<_> = crate::import::discover(&self.tool_context.cwd)
+            .into_iter()
+            .take(MAX_SESSIONS)
+            .collect();
+        if refs.is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "No importable sessions found for this project (Claude Code, Codex, or deeptide).",
+            ))];
+        }
+
+        let mut combined = String::new();
+        let mut included = 0usize;
+        let mut skipped = 0usize;
+        for r in &refs {
+            let Ok(transcript) = crate::import::parse_file(&r.path, r.source) else {
+                continue;
+            };
+            let flat = crate::import::flatten_for_extraction(&transcript);
+            if flat.trim().is_empty() {
+                continue;
+            }
+            if combined.len() + flat.len() > CHAR_BUDGET && included > 0 {
+                skipped += 1;
+                continue;
+            }
+            combined.push_str(&format!(
+                "\n\n===== {} session {} =====\n",
+                r.source.label(),
+                session_short(&r.session_id)
+            ));
+            combined.push_str(&flat);
+            included += 1;
+        }
+        if included == 0 {
+            return vec![ReplEvent::Output(String::from(
+                "Found sessions, but none had distillable conversational content.",
+            ))];
+        }
+
+        let cwd = self.tool_context.cwd.display().to_string();
+        let prompt = format!(
+            "[bulk session import — execute once, do NOT create cron jobs or loops]\n\n\
+            You are importing context from {included} previous coding sessions (Claude Code, \
+            Codex, deeptide) into deeptide's long-term memory for workspace:\n{cwd}\n\n\
+            Below are the flattened transcripts, separated by `===== … =====` headers. Extract \
+            the DURABLE, reusable project facts, decisions, conventions, environment \
+            constraints, and unresolved follow-ups that recur across them — favour facts that \
+            show up in more than one session.\n\n\
+            Rules:\n\
+            - Persist each kept fact with the `MemoryWrite` tool (scope `project` unless it is a \
+            cross-project user preference, then `global`).\n\
+            - Before each write, call `MemorySearch`; if a fact is already stored, skip it — do \
+            NOT write duplicates (there will be overlap across sessions).\n\
+            - Do not import one-off task details, transient state, secrets, or anything not \
+            durable.\n\
+            - Execute exactly once; do not edit settings, cron, or provider config.\n\n\
+            Transcripts:\n{combined}"
+        );
+
+        let tail = if skipped > 0 {
+            format!(" ({skipped} older session(s) skipped for length)")
+        } else {
+            String::new()
+        };
+        let mut events = vec![ReplEvent::Output(format!(
+            "[import] distilling {included} session(s) into long-term memory{tail}…"
+        ))];
+        // Bulk distillation may touch more facts than a single session; give it
+        // a slightly higher ceiling than the end-of-session pass, still bounded.
+        let prev_turns = self.agent_loop.set_max_turns(CONSOLIDATION_MAX_TURNS * 3);
+        events.extend(
+            self.agent_loop
+                .run(&prompt)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event),
+        );
+        self.agent_loop.set_max_turns(prev_turns);
+        events
     }
 
     /// Distil an imported transcript into durable memory shards by running the
@@ -3781,6 +3903,25 @@ fn build_goal_continuation_prompt(goal: &str) -> String {
 /// (`/dream start 50`) and `--every`/`-n` flags (`/dream start --every 50`).
 /// Empty input means "use the default cadence". Invalid input produces a
 /// short, actionable error message.
+/// Path of the marker written after the first interactive launch.
+fn onboarded_marker() -> std::path::PathBuf {
+    crate::memory::MemorySystem::tide_config_dir().join("onboarded")
+}
+
+/// True until [`mark_onboarded`] has run (i.e. this looks like a first install).
+pub fn is_first_run() -> bool {
+    !onboarded_marker().exists()
+}
+
+/// Record that the first-run onboarding has been shown, so it never fires again.
+pub fn mark_onboarded() {
+    let path = onboarded_marker();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, "1\n");
+}
+
 /// Shorten a (possibly UUID-long) session id for display: first dash-group,
 /// capped, so listings and import receipts stay tidy.
 fn session_short(id: &str) -> String {

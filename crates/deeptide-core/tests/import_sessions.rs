@@ -38,16 +38,23 @@ fn outputs(events: Vec<ReplEvent>) -> String {
 #[test]
 fn import_discovers_and_hands_off_a_claude_session() {
     let home = tempfile::tempdir().expect("home");
+    let config = tempfile::tempdir().expect("config");
     let project = tempfile::tempdir().expect("project");
-    // SAFETY: single-test file; no other thread reads HOME concurrently.
+    // SAFETY: single-test file; no other thread reads these concurrently.
     unsafe {
         std::env::set_var("HOME", home.path());
+        std::env::set_var("TIDE_CONFIG_DIR", config.path());
     }
 
-    // Plant a Claude session under ~/.claude/projects/<cwd-slug>/.
     let slug = claude_slug(project.path());
     let claude_dir = home.path().join(".claude").join("projects").join(&slug);
     std::fs::create_dir_all(&claude_dir).expect("claude dir");
+    // An older session first, so the richer one below ends up newest.
+    std::fs::write(
+        claude_dir.join("def67890.jsonl"),
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"earlier work here\"}}\n",
+    )
+    .expect("write older session");
     let session = r#"{"type":"ai-title","aiTitle":"Wire the queue worker","sessionId":"abc12345"}
 {"type":"user","sessionId":"abc12345","cwd":"/x","gitBranch":"main","message":{"role":"user","content":"Always use pnpm in this repo, never npm."}}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Understood — pnpm it is."},{"type":"tool_use","name":"Bash","input":{"command":"pnpm install"}}]}}
@@ -56,7 +63,24 @@ fn import_discovers_and_hands_off_a_claude_session() {
 "#;
     std::fs::write(claude_dir.join("abc12345.jsonl"), session).expect("write session");
 
-    let mut repl = ReplSession::new(Box::new(EchoBackend)).with_cwd(project.path());
+    let repl_for_hint = ReplSession::new(Box::new(EchoBackend)).with_cwd(project.path());
+    // First-run onboarding nudges import (especially `/import all`), once.
+    let hint = repl_for_hint
+        .first_run_import_hint()
+        .expect("first run with sessions should produce an import hint");
+    assert!(hint.contains("/import all"), "hint should emphasize import all: {hint}");
+    assert!(hint.contains("prior session"), "hint should mention prior sessions: {hint}");
+    deeptide_core::mark_onboarded();
+    assert!(
+        repl_for_hint.first_run_import_hint().is_none(),
+        "onboarding must not fire again after mark_onboarded"
+    );
+
+    // Persistence off so autosaved deeptide sessions don't pollute discovery
+    // (which would reorder the menu non-deterministically).
+    let mut repl = ReplSession::new(Box::new(EchoBackend))
+        .with_cwd(project.path())
+        .with_session_persistence(false);
 
     // 1) /sessions --all surfaces the Claude session for this project.
     let listing = outputs(repl.run_continue("")); // warm path below; first check discovery
@@ -104,23 +128,32 @@ fn import_discovers_and_hands_off_a_claude_session() {
     let bad = outputs(repl.run_import("notarealtool --as context"));
     assert!(bad.contains("Unknown source"), "got: {bad}");
 
-    // 4) Bare `/import` shows an interactive numbered menu of sessions, and a
-    //    bare numeric reply picks one and runs the handoff.
+    // 4) Bare `/import` shows an interactive numbered menu. With >1 session it
+    //    leads with "Import ALL"; a bare numeric reply picks a row.
     let menu = outputs(repl.submit("/import"));
     assert!(menu.contains("Select a session"), "expected a menu header: {menu}");
-    assert!(menu.contains("[claude]"), "menu should list the claude session: {menu}");
-    assert!(menu.contains("1. "), "menu rows should be numbered: {menu}");
+    assert!(menu.contains("Import ALL"), "menu should lead with the bulk option: {menu}");
+    assert!(menu.contains("[claude]"), "menu should list the claude sessions: {menu}");
 
+    // Row 1 = Import ALL, row 2 = newest session → pick 2 for a handoff.
     let before_pick = repl.agent_loop().messages().len();
-    let picked = outputs(repl.submit("1"));
+    let picked = outputs(repl.submit("2"));
     assert!(
         picked.contains("handed off"),
-        "picking a menu row should run the import: {picked}"
+        "picking a session row should run the handoff: {picked}"
     );
     assert_eq!(
         repl.agent_loop().messages().len(),
         before_pick + 1,
         "the chosen session must be handed off (one prepended message)"
+    );
+
+    // 4b) `/import all` distils every discovered session into memory in one
+    //     pass. (Exact count varies — autosaved deeptide sessions also count.)
+    let all = outputs(repl.submit("/import all"));
+    assert!(
+        all.contains("distilling") && all.contains("session"),
+        "/import all should fold the discovered sessions into memory: {all}"
     );
 
     // A non-numeric input dismisses the menu: a later stray number is inert.
