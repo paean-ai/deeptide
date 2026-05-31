@@ -32,12 +32,18 @@
 //! Out of scope (by design, for the first iteration)
 //! -------------------------------------------------
 //!
-//! - Mid-line cursor editing (left/right, word jumps). The buffer
-//!   only supports append + delete-from-end. Most queued prompts
-//!   are short follow-ups; cursor editing can come later if real
-//!   usage demands it.
-//! - History recall during the turn. rustyline owns history and is
-//!   idle; resurrecting it would require shared state.
+//! - Up/Down history recall during the turn. rustyline owns
+//!   history and is idle; resurrecting it would require shared
+//!   state.
+//!
+//! Supported in-line editing (added after first iteration):
+//! - Left/Right arrow keys move the cursor one grapheme cluster at
+//!   a time within the current draft.
+//! - Home (Ctrl-A) / End (Ctrl-E) jump to the buffer ends.
+//! - Delete (`CSI 3 ~`) removes the grapheme cluster at the cursor.
+//! - Insert + Backspace both operate at the cursor position rather
+//!   than at the buffer's end, so the editor behaves like every
+//!   other modern shell line-editor.
 //! - Multi-line / soft-newline. Pressing Enter always submits.
 //! - Windows. The raw-mode termios machinery is Unix-only; on other
 //!   platforms `take_old_termios` returns `None` and the caller
@@ -116,6 +122,12 @@ pub enum KeyOutcome {
 #[derive(Debug, Default)]
 pub struct QueueEditor {
     buf: String,
+    /// Byte offset of the caret within `buf`. Always sits on a
+    /// UTF-8 codepoint boundary; navigation moves it by grapheme
+    /// clusters so a single arrow keypress steps over one
+    /// user-perceived character (base + any combining marks /
+    /// variation selectors / ZWJ chains).
+    cursor: usize,
     /// Active multi-byte sequence parser. Most bytes hit the
     /// "ground" state and are dispatched as ordinary input; the
     /// state machine just handles the escape-sequence detours.
@@ -129,6 +141,17 @@ pub struct QueueEditor {
     /// the visible buffer in one atomic step.
     utf8_pending: Vec<u8>,
     utf8_expected: usize,
+    /// Accumulator for the leading numeric parameter of a CSI
+    /// sequence (e.g. the `3` in `ESC [ 3 ~` for the Delete key).
+    /// Reset every time we enter `PumpState::Csi`. We only track
+    /// the first parameter — every key we currently recognise
+    /// either has zero parameters (arrows, Home, End, Shift+Tab)
+    /// or one trailing parameter (the `~` family). Multi-param
+    /// sequences (modifier keys, mouse reporting) are still
+    /// swallowed cleanly because we ignore everything after the
+    /// first `;`.
+    csi_param: Option<u32>,
+    csi_saw_semi: bool,
 }
 
 /// Tracks where we are inside a multi-byte input sequence. Kept
@@ -166,13 +189,35 @@ impl QueueEditor {
         &self.buf
     }
 
+    /// Byte offset of the caret within `buffer()`. Always on a
+    /// codepoint boundary; the painter uses this to split the
+    /// buffer into prefix / suffix slices around the cursor block.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     /// Test helper: insert raw text as if it had come from the
-    /// terminal in ground state. Useful for unit tests that want
-    /// to set up a non-empty buffer without driving every byte
-    /// through `consume`.
+    /// terminal in ground state and place the cursor at the end.
+    /// Useful for unit tests that want to set up a non-empty
+    /// buffer without driving every byte through `consume`.
     #[cfg(test)]
     fn seed(&mut self, text: &str) {
         self.buf.push_str(text);
+        self.cursor = self.buf.len();
+    }
+
+    /// Test helper: same as [`seed`] but lets the test position
+    /// the caret somewhere inside the buffer (in byte offset).
+    /// Panics if `cursor` is not on a UTF-8 boundary — that's a
+    /// test bug.
+    #[cfg(test)]
+    fn seed_with_cursor(&mut self, text: &str, cursor: usize) {
+        self.buf.push_str(text);
+        assert!(
+            self.buf.is_char_boundary(cursor),
+            "seed cursor {cursor} not on char boundary of {text:?}"
+        );
+        self.cursor = cursor;
     }
 
     /// Feed one byte into the editor. Returns a [`KeyOutcome`]
@@ -191,6 +236,24 @@ impl QueueEditor {
     }
 
     fn consume_ground(&mut self, byte: u8) -> KeyOutcome {
+        // Mnemonic control codes that don't have shared
+        // constants. Defined inline (instead of at module top)
+        // because they're only meaningful inside the ground-state
+        // match and naming them would imply a wider contract.
+        //   SOH (Ctrl-A): jump to start of line (Home).
+        //   ENQ (Ctrl-E): jump to end of line   (End).
+        //   ACK (Ctrl-F): cursor right one grapheme.
+        //   STX (Ctrl-B): cursor left  one grapheme.
+        //   EOT (Ctrl-D): forward delete (only when buffer non-empty;
+        //                  empty-buffer Ctrl-D would conventionally
+        //                  exit, but the queue editor delegates exit
+        //                  to the rustyline path, so we no-op
+        //                  rather than risk losing a streaming turn).
+        const SOH: u8 = 0x01;
+        const STX: u8 = 0x02;
+        const EOT: u8 = 0x04;
+        const ENQ: u8 = 0x05;
+        const ACK: u8 = 0x06;
         match byte {
             ESC => {
                 self.state = PumpState::Escape;
@@ -199,6 +262,7 @@ impl QueueEditor {
             CR | LF => {
                 let trimmed = self.buf.trim().to_owned();
                 self.buf.clear();
+                self.cursor = 0;
                 if trimmed.is_empty() {
                     // Empty Enter is a no-op visually but still
                     // needs a repaint in case the buffer had
@@ -214,6 +278,7 @@ impl QueueEditor {
                 // handling and the user can still Ctrl-C at the
                 // rustyline prompt to actually exit.
                 self.buf.clear();
+                self.cursor = 0;
                 KeyOutcome::Cancelled
             }
             NAK => {
@@ -221,11 +286,23 @@ impl QueueEditor {
                     KeyOutcome::Nothing
                 } else {
                     self.buf.clear();
+                    self.cursor = 0;
                     KeyOutcome::Repaint
                 }
             }
             DEL | BS_LEGACY => {
-                if pop_grapheme(&mut self.buf) {
+                if backspace_grapheme(&mut self.buf, &mut self.cursor) {
+                    KeyOutcome::Repaint
+                } else {
+                    KeyOutcome::Nothing
+                }
+            }
+            SOH => self.cursor_home(),
+            ENQ => self.cursor_end(),
+            STX => self.cursor_left(),
+            ACK => self.cursor_right(),
+            EOT => {
+                if delete_grapheme_at_cursor(&mut self.buf, self.cursor) {
                     KeyOutcome::Repaint
                 } else {
                     KeyOutcome::Nothing
@@ -237,6 +314,47 @@ impl QueueEditor {
             // don't intentionally type them.
             byte if byte < 0x20 => KeyOutcome::Nothing,
             byte => self.consume_byte_for_codepoint(byte),
+        }
+    }
+
+    /// Move the caret one grapheme cluster to the left, returning
+    /// `Repaint` if anything changed (so the painter re-renders
+    /// with the cursor block in its new position) or `Nothing`
+    /// when we're already at the start.
+    fn cursor_left(&mut self) -> KeyOutcome {
+        if self.cursor == 0 {
+            return KeyOutcome::Nothing;
+        }
+        self.cursor = prev_grapheme_boundary(&self.buf, self.cursor);
+        KeyOutcome::Repaint
+    }
+
+    /// Move the caret one grapheme cluster to the right.
+    fn cursor_right(&mut self) -> KeyOutcome {
+        if self.cursor >= self.buf.len() {
+            return KeyOutcome::Nothing;
+        }
+        self.cursor = next_grapheme_boundary(&self.buf, self.cursor);
+        KeyOutcome::Repaint
+    }
+
+    /// Jump to the start of the buffer.
+    fn cursor_home(&mut self) -> KeyOutcome {
+        if self.cursor == 0 {
+            KeyOutcome::Nothing
+        } else {
+            self.cursor = 0;
+            KeyOutcome::Repaint
+        }
+    }
+
+    /// Jump to the end of the buffer.
+    fn cursor_end(&mut self) -> KeyOutcome {
+        if self.cursor >= self.buf.len() {
+            KeyOutcome::Nothing
+        } else {
+            self.cursor = self.buf.len();
+            KeyOutcome::Repaint
         }
     }
 
@@ -260,7 +378,7 @@ impl QueueEditor {
                 self.utf8_expected = 0;
                 return KeyOutcome::Nothing;
             }
-            self.buf.push(byte as char);
+            self.insert_str(&(byte as char).to_string());
             return KeyOutcome::Repaint;
         }
 
@@ -296,10 +414,14 @@ impl QueueEditor {
             return KeyOutcome::Nothing;
         }
 
-        // Codepoint assembled. Decode and append.
+        // Codepoint assembled. Decode and insert at the caret.
+        // Copy the decoded bytes into an owned `String` first so
+        // we can drop the immutable borrow of `utf8_pending`
+        // before calling `insert_str`, which needs `&mut self`.
         let outcome = match std::str::from_utf8(&self.utf8_pending) {
             Ok(decoded) => {
-                self.buf.push_str(decoded);
+                let owned = decoded.to_owned();
+                self.insert_str(&owned);
                 KeyOutcome::Repaint
             }
             Err(_) => KeyOutcome::Nothing,
@@ -309,10 +431,27 @@ impl QueueEditor {
         outcome
     }
 
+    /// Insert `s` at the caret and advance the caret past it.
+    /// Centralised so the ASCII path and the UTF-8 codepoint path
+    /// share a single mutation site — otherwise it's easy to bump
+    /// the buffer in one and forget the cursor in the other.
+    fn insert_str(&mut self, s: &str) {
+        debug_assert!(
+            self.buf.is_char_boundary(self.cursor),
+            "cursor must always sit on a codepoint boundary",
+        );
+        self.buf.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
     fn consume_escape(&mut self, byte: u8) -> KeyOutcome {
         match byte {
             b'[' => {
                 self.state = PumpState::Csi;
+                // Fresh CSI: reset the param accumulator so we
+                // don't carry state from a previous sequence.
+                self.csi_param = None;
+                self.csi_saw_semi = false;
                 KeyOutcome::Nothing
             }
             // ESC ESC: drop back to ground but ignore the buffered
@@ -332,25 +471,77 @@ impl QueueEditor {
     }
 
     fn consume_csi(&mut self, byte: u8) -> KeyOutcome {
-        // CSI terminator: any byte in the `@…~` range closes the
-        // sequence. We special-case `Z` (0x5A) because that's the
-        // CSI final byte for Shift+Tab on every terminal we've
-        // tested (xterm, iTerm2, macOS Terminal, GNOME Terminal,
-        // Windows Terminal, Alacritty). The CSI-u extended form
-        // `ESC [ 27 ; 2 ; 9 ~` is rare and intentionally not
-        // recognised — users can still cycle modes via the
-        // rustyline path between turns.
-        //
-        // Other CSI terminators (arrow keys, function keys,
-        // bracketed-paste markers) are still consumed cleanly.
-        // The bracketed-paste mode-switch noted in the original
-        // comment lives in `consume_paste`; entering that state
-        // requires param accumulation which we don't do here yet.
-        if (0x40..=0x7e).contains(&byte) {
-            self.state = PumpState::Ground;
-            if byte == b'Z' {
-                return KeyOutcome::ModeCycle;
+        // CSI parameter accumulation phase. Parameters are ASCII
+        // digits separated by `;`. We only track the FIRST param
+        // (everything after `;` is ignored) because the keys we
+        // care about — Delete (`3~`), Home (`1~`), End (`4~`),
+        // PgUp/PgDn (`5~` / `6~`) — all live in single-param
+        // sequences. Multi-param sequences (modifier keys like
+        // Shift+Arrow `1;2D`, mouse reports) are still swallowed
+        // cleanly because we never look at later params.
+        if byte.is_ascii_digit() {
+            if !self.csi_saw_semi {
+                // Lossy clamp: terminals don't send more than 3
+                // digits in practice. `saturating_*` keeps malformed
+                // input from triggering an integer overflow.
+                let digit = (byte - b'0') as u32;
+                self.csi_param = Some(
+                    self.csi_param
+                        .unwrap_or(0)
+                        .saturating_mul(10)
+                        .saturating_add(digit),
+                );
             }
+            return KeyOutcome::Nothing;
+        }
+        if byte == b';' {
+            self.csi_saw_semi = true;
+            return KeyOutcome::Nothing;
+        }
+        // Intermediate bytes (`0x20..=0x2F`, e.g. ` ` / `!`) are
+        // legal in CSI sequences but never appear in the keys we
+        // handle. Pass through silently so they don't trip the
+        // final-byte branch.
+        if (0x20..=0x2F).contains(&byte) {
+            return KeyOutcome::Nothing;
+        }
+        // CSI terminator: any byte in the `@…~` range closes the
+        // sequence. Dispatch based on the final byte (and the
+        // accumulated leading param when the final byte is `~`).
+        if (0x40..=0x7e).contains(&byte) {
+            let param = self.csi_param.unwrap_or(0);
+            self.state = PumpState::Ground;
+            self.csi_param = None;
+            self.csi_saw_semi = false;
+            return match byte {
+                b'A' | b'B' => {
+                    // Up / Down: no semantics in a single-line
+                    // editor with no history. Swallow cleanly so
+                    // the bytes don't pollute the buffer.
+                    KeyOutcome::Nothing
+                }
+                b'C' => self.cursor_right(),
+                b'D' => self.cursor_left(),
+                b'H' => self.cursor_home(),
+                b'F' => self.cursor_end(),
+                b'Z' => KeyOutcome::ModeCycle,
+                b'~' => match param {
+                    1 | 7 => self.cursor_home(),
+                    3 => {
+                        if delete_grapheme_at_cursor(&mut self.buf, self.cursor) {
+                            KeyOutcome::Repaint
+                        } else {
+                            KeyOutcome::Nothing
+                        }
+                    }
+                    4 | 8 => self.cursor_end(),
+                    // 2~ = Insert (we don't switch overwrite mode),
+                    // 5~/6~ = PgUp/PgDn (no scrollback in this
+                    // editor), 11..15~ = F1..F4 (no bindings).
+                    _ => KeyOutcome::Nothing,
+                },
+                _ => KeyOutcome::Nothing,
+            };
         }
         KeyOutcome::Nothing
     }
@@ -373,52 +564,161 @@ impl QueueEditor {
     }
 }
 
-/// Pop the trailing "grapheme cluster" off `buf`. A grapheme is what
+/// Backspace at the caret: remove the grapheme cluster that ends
+/// at `*cursor` and shift the caret backwards. A grapheme is what
 /// the user perceives as a single visible character — for ASCII /
-/// most CJK that's exactly one Rust `char` (Unicode codepoint), but
-/// IMEs commonly commit a base codepoint followed by one or more
-/// **invisible modifiers** (variation selectors, zero-width joiners,
-/// combining marks). Treating each codepoint as a separate
-/// Backspace target makes those sequences require 2+ keypresses for
-/// one visible character disappearance, which the user perceives as
-/// a bug — `pop_grapheme` fixes that by:
+/// most CJK that's exactly one Rust `char` (Unicode codepoint),
+/// but IMEs commonly commit a base codepoint followed by one or
+/// more **invisible modifiers** (variation selectors, zero-width
+/// joiners, combining marks). Treating each codepoint as a
+/// separate Backspace target makes those sequences require 2+
+/// keypresses for one visible character disappearance, which the
+/// user perceives as a bug — this function avoids that by:
 ///
-/// 1. Popping the last codepoint unconditionally.
-/// 2. If that codepoint was itself a base (non-modifier), stop.
-/// 3. Otherwise, keep popping modifiers until a base or the buffer
-///    is empty. Also pop ONE more base after the modifier run so
-///    the visible char actually disappears.
+/// 1. Finding the codepoint immediately before the caret.
+/// 2. If it's a base, removing just that codepoint.
+/// 3. If it's a modifier, walking further back to peel off any
+///    chain of modifiers AND the base they decorate, so a single
+///    press clears the whole visible cluster.
 ///
-/// We intentionally avoid pulling in `unicode-segmentation` for
-/// this — it's a heavy crate for a one-key path. The simple
-/// modifier-class predicate below covers the IME failure modes
-/// users hit in practice (CJK + tone marks, emoji ZWJ sequences,
-/// variation selectors).
-///
-/// Returns `true` if anything was removed (caller should repaint).
-fn pop_grapheme(buf: &mut String) -> bool {
-    // Step 1: at least one codepoint must be popped for Backspace
-    // to "do something" from the user's POV.
-    let first = match buf.pop() {
-        Some(c) => c,
-        None => return false,
-    };
-    // If the first pop already removed a base codepoint, we're done.
-    if !is_grapheme_modifier(first) {
-        return true;
+/// Returns `true` if anything was removed (caller should
+/// repaint). When the caret is at offset 0 there's nothing to
+/// remove → returns `false`.
+fn backspace_grapheme(buf: &mut String, cursor: &mut usize) -> bool {
+    if *cursor == 0 {
+        return false;
     }
-    // Step 2: peel off any further trailing modifiers.
-    while buf.chars().next_back().is_some_and(is_grapheme_modifier) {
-        // SAFETY: `next_back` returned `Some`, so `pop` returns Some.
-        buf.pop();
+    // Step 1: codepoint immediately before the caret.
+    let start = prev_codepoint_boundary(buf, *cursor);
+    let first: char = buf[start..*cursor]
+        .chars()
+        .next()
+        .expect("non-empty slice between two valid boundaries");
+    let mut new_cursor = start;
+    // If the first removal was already a base, we're done.
+    if is_grapheme_modifier(first) {
+        // Step 2: peel further trailing modifiers from before
+        // `new_cursor` until we hit a base or the start of buf.
+        while new_cursor > 0 {
+            let p = prev_codepoint_boundary(buf, new_cursor);
+            let c = buf[p..new_cursor]
+                .chars()
+                .next()
+                .expect("non-empty slice between two valid boundaries");
+            if !is_grapheme_modifier(c) {
+                // Found the base: include it in the removal.
+                new_cursor = p;
+                break;
+            }
+            new_cursor = p;
+        }
     }
-    // Step 3: one more pop to remove the base codepoint that owned
-    // the modifier run — otherwise a single Backspace would leave
-    // the visible base char on screen and the user would have to
-    // press Backspace again, which is exactly the bug we're
-    // fixing.
-    buf.pop();
+    buf.drain(new_cursor..*cursor);
+    *cursor = new_cursor;
     true
+}
+
+/// Forward delete at the caret: remove the grapheme cluster that
+/// starts at `cursor`. Mirror of [`backspace_grapheme`] without
+/// caret movement. Returns `false` when the caret is already at
+/// the end (nothing to delete).
+fn delete_grapheme_at_cursor(buf: &mut String, cursor: usize) -> bool {
+    if cursor >= buf.len() {
+        return false;
+    }
+    let mut end = next_codepoint_boundary(buf, cursor);
+    // Eat any trailing modifiers attached to the base we just
+    // marked for removal, so one Delete press clears the whole
+    // visible cluster.
+    while end < buf.len() {
+        let next = next_codepoint_boundary(buf, end);
+        let c = buf[end..next]
+            .chars()
+            .next()
+            .expect("non-empty slice between valid boundaries");
+        if !is_grapheme_modifier(c) {
+            break;
+        }
+        end = next;
+    }
+    buf.drain(cursor..end);
+    true
+}
+
+/// Step the caret one grapheme cluster forward — i.e. past one
+/// base codepoint plus any modifier chain that decorates it.
+/// Used by the Right-arrow handler. `boundary` must already sit
+/// on a codepoint boundary; the function clamps to `buf.len()`.
+fn next_grapheme_boundary(buf: &str, boundary: usize) -> usize {
+    if boundary >= buf.len() {
+        return buf.len();
+    }
+    let mut next = next_codepoint_boundary(buf, boundary);
+    while next < buf.len() {
+        let after = next_codepoint_boundary(buf, next);
+        let c = buf[next..after]
+            .chars()
+            .next()
+            .expect("non-empty slice between valid boundaries");
+        if !is_grapheme_modifier(c) {
+            break;
+        }
+        next = after;
+    }
+    next
+}
+
+/// Step the caret one grapheme cluster backward. Symmetric with
+/// [`next_grapheme_boundary`]. Returns `0` when `boundary` is
+/// already at the start.
+fn prev_grapheme_boundary(buf: &str, boundary: usize) -> usize {
+    if boundary == 0 {
+        return 0;
+    }
+    // Walk backwards over any modifier chain first.
+    let mut cur = boundary;
+    loop {
+        let prev = prev_codepoint_boundary(buf, cur);
+        let c = buf[prev..cur]
+            .chars()
+            .next()
+            .expect("non-empty slice between valid boundaries");
+        let is_mod = is_grapheme_modifier(c);
+        cur = prev;
+        if !is_mod {
+            // We've stepped over the base; stop here so the caret
+            // lands at the start of the cluster.
+            break;
+        }
+        if cur == 0 {
+            break;
+        }
+    }
+    cur
+}
+
+/// Byte offset of the codepoint boundary immediately before
+/// `boundary`. Required because `String` doesn't expose this
+/// directly without `floor_char_boundary` (unstable in our MSRV).
+fn prev_codepoint_boundary(buf: &str, boundary: usize) -> usize {
+    debug_assert!(buf.is_char_boundary(boundary));
+    let mut i = boundary.saturating_sub(1);
+    while i > 0 && !buf.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Byte offset of the codepoint boundary immediately after
+/// `boundary`. Symmetric with [`prev_codepoint_boundary`].
+fn next_codepoint_boundary(buf: &str, boundary: usize) -> usize {
+    debug_assert!(buf.is_char_boundary(boundary));
+    let len = buf.len();
+    let mut i = (boundary + 1).min(len);
+    while i < len && !buf.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// `true` for codepoints that the IME / Unicode treats as
@@ -458,24 +758,35 @@ fn is_grapheme_modifier(c: char) -> bool {
 }
 
 /// Render the input-row content for the current editor state.
-/// Layout (color on, with non-empty buffer + 2 pending):
+/// Layout (color on, with non-empty buffer + 2 pending, caret at end):
 ///
 /// ```text
 /// ▎ ✎ hello world█  (Enter to queue · queue 2)
 /// ```
 ///
-/// The trailing space after the buffer represents the simulated
-/// cursor — we paint it with a reverse-video block (`\x1b[7m \x1b[27m`)
-/// so the user has a clear "you are here" indicator without
-/// actually moving the real terminal cursor. The text after the
-/// hint is right-padded conceptually but we just append, letting
-/// the terminal truncate if the line exceeds the width.
+/// `cursor` is the byte offset of the caret within `buf`. The
+/// painter splits the buffer into prefix / suffix slices around
+/// it and renders the reverse-video block in between, so moving
+/// the caret with Left / Right / Home / End shows up visibly on
+/// the pinned row without us having to move the real terminal
+/// cursor.
+///
+/// When `cursor == buf.len()` the suffix is empty and the layout
+/// degrades to the original "block at end" rendering. When the
+/// buffer is empty both prefix and suffix are empty and we fall
+/// back to the empty-state layout.
 ///
 /// `width` is used purely for safety-truncation so we don't paint
 /// an absurdly long line that wraps and breaks the pinned input
 /// row. Callers usually pass the terminal width minus a small
 /// margin. Pass `usize::MAX` to disable truncation.
-pub fn paint_editor_line(buf: &str, queue_depth: usize, width: usize, color: bool) -> String {
+pub fn paint_editor_line(
+    buf: &str,
+    cursor: usize,
+    queue_depth: usize,
+    width: usize,
+    color: bool,
+) -> String {
     // Hint text. Tone differs whether the buffer is empty (we want
     // to *teach* the user that typing queues messages) or non-empty
     // (we want to *confirm* the Enter binding only).
@@ -494,10 +805,35 @@ pub fn paint_editor_line(buf: &str, queue_depth: usize, width: usize, color: boo
     } else {
         "▎ ✎".to_owned()
     };
+    // Synthetic caret. Why so loud?
+    //
+    // The hardware terminal cursor lives wherever the agent's
+    // streaming output last advanced it (somewhere in the scroll
+    // region, far above us). The ghost paint that draws this
+    // input row deliberately *restores* the hardware cursor after
+    // writing so streaming continues uninterrupted — which means
+    // the actual blinking caret is **not** where the user is
+    // editing. They have to find the cursor by visual scanning.
+    //
+    // A plain inverse-video space (\x1b[7m \x1b[27m) reads as
+    // "background block" and is easy to lose against typed text
+    // — users reported "I can't tell where the cursor is" in the
+    // mid-turn editor.
+    //
+    // So we make the synthetic caret unmistakable:
+    //
+    //   * blink (SGR 5)    — mimics a real terminal caret
+    //   * bold (SGR 1)     — thicker, even on low-contrast themes
+    //   * yellow (SGR 33)  — stands out against default fg/bg
+    //   * inverse (SGR 7)  — fills the whole cell
+    //
+    // Clide / iTerm2 / Terminal.app / Alacritty / Kitty all
+    // honour SGR 5; terminals that don't blink at least show the
+    // bright yellow block, which is still unambiguous.
     let cursor_block = if color {
-        "\x1b[7m \x1b[27m".to_owned()
+        "\x1b[5;1;33;7m \x1b[0m".to_owned()
     } else {
-        "_".to_owned()
+        "[|]".to_owned()
     };
     let hint_styled = if color {
         format!("{DIM}({hint}){RESET}")
@@ -506,26 +842,52 @@ pub fn paint_editor_line(buf: &str, queue_depth: usize, width: usize, color: boo
     };
 
     if buf.is_empty() {
-        format!("{prompt} {cursor_block}  {hint_styled}")
-    } else {
-        // Truncate the buffer (only) when the visible-character
-        // count would exceed the width budget. We approximate
-        // visible width with `.chars().count()` — correct for ASCII
-        // and CJK in fixed-width fonts (which is what terminals
-        // assume), wrong for double-width emoji, but a reasonable
-        // first pass.
-        let max_buf_chars = width.saturating_sub(prompt.chars().count() + hint.chars().count() + 8);
-        let trimmed = if buf.chars().count() > max_buf_chars {
-            // Take last `max_buf_chars` characters: while typing a
-            // long line the *tail* (where the cursor is) is what
-            // matters to the user, not the head.
-            let drop = buf.chars().count() - max_buf_chars;
-            buf.chars().skip(drop).collect::<String>()
-        } else {
-            buf.to_owned()
-        };
-        format!("{prompt} {trimmed}{cursor_block}  {hint_styled}")
+        return format!("{prompt} {cursor_block}  {hint_styled}");
     }
+
+    // Truncate the buffer (only) when the visible-character count
+    // would exceed the width budget. We approximate visible width
+    // with `.chars().count()` — correct for ASCII and CJK in
+    // fixed-width fonts (which is what terminals assume), wrong
+    // for double-width emoji, but a reasonable first pass.
+    //
+    // Truncation keeps the *tail* by default — that's where the
+    // caret usually sits while the user is composing. But when
+    // the caret has been moved earlier (Home, Left, …), keeping
+    // the tail would hide the caret entirely, so we shift the
+    // visible window backwards to include it.
+    let max_buf_chars = width.saturating_sub(prompt.chars().count() + hint.chars().count() + 8);
+    let total_chars = buf.chars().count();
+    let cursor_char_idx = buf[..cursor.min(buf.len())].chars().count();
+
+    let (prefix_chars, suffix_chars) = if total_chars > max_buf_chars {
+        // Number of chars to drop from the head. Anchor on the
+        // caret: prefer to keep the caret roughly two-thirds of
+        // the way through the visible window so the user can see
+        // a bit of context on both sides while editing.
+        let visible = max_buf_chars.max(1);
+        let target_caret_col = visible.saturating_sub(visible / 3);
+        let mut drop = cursor_char_idx.saturating_sub(target_caret_col);
+        let max_drop = total_chars.saturating_sub(visible);
+        if drop > max_drop {
+            drop = max_drop;
+        }
+        let visible_prefix_chars = cursor_char_idx.saturating_sub(drop);
+        let visible_suffix_chars = visible.saturating_sub(visible_prefix_chars);
+        let prefix: String = buf.chars().skip(drop).take(visible_prefix_chars).collect();
+        let suffix: String = buf
+            .chars()
+            .skip(drop + visible_prefix_chars)
+            .take(visible_suffix_chars)
+            .collect();
+        (prefix, suffix)
+    } else {
+        let prefix: String = buf.chars().take(cursor_char_idx).collect();
+        let suffix: String = buf.chars().skip(cursor_char_idx).collect();
+        (prefix, suffix)
+    };
+
+    format!("{prompt} {prefix_chars}{cursor_block}{suffix_chars}  {hint_styled}")
 }
 
 // ─── Termios (Unix) ────────────────────────────────────────────────
@@ -908,7 +1270,13 @@ pub fn run_pump(_ctx: EditorContext, _guard: RawModeGuard) {
 
 fn paint(ctx: &EditorContext, editor: &QueueEditor) {
     let depth = ctx.queue.lock().map(|q| q.len()).unwrap_or(0);
-    let line = paint_editor_line(editor.buffer(), depth, ctx.line_width, ctx.use_color);
+    let line = paint_editor_line(
+        editor.buffer(),
+        editor.cursor(),
+        depth,
+        ctx.line_width,
+        ctx.use_color,
+    );
     if let Ok(_guard) = ctx.paint_lock.lock() {
         (ctx.repaint)(&line);
     }
@@ -1101,21 +1469,21 @@ mod tests {
 
     #[test]
     fn paint_editor_line_empty_buffer_shows_teach_hint() {
-        let painted = paint_editor_line("", 0, 100, false);
+        let painted = paint_editor_line("", 0, 0, 100, false);
         assert!(painted.contains("type a message"), "got: {painted}");
         assert!(painted.contains("queues for the next turn"));
     }
 
     #[test]
     fn paint_editor_line_empty_buffer_with_pending_swaps_hint() {
-        let painted = paint_editor_line("", 3, 100, false);
+        let painted = paint_editor_line("", 0, 3, 100, false);
         assert!(painted.contains("queue 3"), "got: {painted}");
         assert!(painted.contains("type to queue more"));
     }
 
     #[test]
     fn paint_editor_line_with_buffer_shows_enter_hint_and_depth() {
-        let painted = paint_editor_line("hello", 2, 100, false);
+        let painted = paint_editor_line("hello", 5, 2, 100, false);
         assert!(painted.contains("hello"));
         assert!(painted.contains("Enter queues"));
         assert!(painted.contains("queue 2"));
@@ -1123,15 +1491,52 @@ mod tests {
 
     #[test]
     fn paint_editor_line_color_emits_sgr() {
-        let painted = paint_editor_line("hi", 0, 100, true);
+        let painted = paint_editor_line("hi", 2, 0, 100, true);
         assert!(
             painted.contains("\x1b[1;36m"),
             "missing prompt color: {painted}"
         );
         assert!(painted.contains("\x1b[2m"), "missing dim hint: {painted}");
+        // Synthetic caret uses blink + bold + yellow + inverse
+        // (SGR 5;1;33;7). Verify the full combo because we rely on
+        // it being unmistakable even when the hardware cursor is
+        // elsewhere — a missing SGR here is a regression in the
+        // user-visible caret.
         assert!(
-            painted.contains("\x1b[7m"),
-            "missing reverse cursor block: {painted}"
+            painted.contains("\x1b[5;1;33;7m"),
+            "missing blinking yellow caret SGR: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn paint_editor_line_caret_uses_blink_inverse_yellow_in_color_mode() {
+        // Pin the synthetic-caret style explicitly so any
+        // accidental SGR tweak fails this test rather than
+        // silently degrading caret visibility.
+        let painted = paint_editor_line("abc", 1, 0, 100, true);
+        assert!(
+            painted.contains("\x1b[5;1;33;7m \x1b[0m"),
+            "caret must be blink+bold+yellow+inverse space: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn paint_editor_line_caret_no_color_uses_visible_marker() {
+        // Without color, fall back to a textual marker that still
+        // visually breaks up the typed text so the user can spot
+        // the caret position. A bare underscore reads ambiguously
+        // ("oh, did they type that?"); brackets make the intent
+        // obvious.
+        let painted = paint_editor_line("abc", 1, 0, 100, false);
+        assert!(
+            painted.contains("[|]"),
+            "no-color caret should use a [|] marker: {painted:?}"
+        );
+        // And it must NOT leak any SGR opening bytes when color
+        // is off.
+        assert!(
+            !painted.contains("\x1b["),
+            "no-color path must be SGR-free: {painted:?}"
         );
     }
 
@@ -1140,7 +1545,7 @@ mod tests {
         // 80-char-wide budget. The buffer is ~200 chars; we should
         // keep the tail so the user's caret context is preserved.
         let long_buf: String = "abcde".repeat(40);
-        let painted = paint_editor_line(&long_buf, 0, 80, false);
+        let painted = paint_editor_line(&long_buf, long_buf.len(), 0, 80, false);
         // The very first chars of `long_buf` should be gone.
         assert!(
             !painted.contains(&long_buf[..50]),
@@ -1149,6 +1554,82 @@ mod tests {
         // Last few chars (the simulated caret context) must remain.
         let tail = &long_buf[long_buf.len() - 10..];
         assert!(painted.contains(tail), "tail must be visible: {painted}");
+    }
+
+    #[test]
+    fn paint_editor_line_mid_buffer_cursor_renders_prefix_block_suffix() {
+        // Caret in the middle of "hello": the painter must split
+        // around it so the user *sees* their navigation. Without
+        // this, Left arrow looks like a no-op to the user even
+        // though the internal cursor advanced.
+        let painted = paint_editor_line("hello", 2, 0, 200, true);
+        let prefix_idx = painted.find("he").expect("prefix present");
+        let suffix_idx = painted.find("llo").expect("suffix present");
+        // Find the blinking yellow caret. We assert on the FULL
+        // SGR open sequence so a future tweak to the caret style
+        // forces an explicit test update rather than silently
+        // breaking visibility.
+        let block_idx = painted
+            .find("\x1b[5;1;33;7m")
+            .expect("cursor block present");
+        assert!(
+            prefix_idx < block_idx && block_idx < suffix_idx,
+            "expected he | █ | llo ordering: {painted:?}",
+        );
+    }
+
+    #[test]
+    fn paint_editor_line_cursor_at_zero_renders_block_before_buffer() {
+        let painted = paint_editor_line("hello", 0, 0, 200, true);
+        // No prefix chars before the cursor block; the buffer
+        // body should sit AFTER the blinking yellow caret.
+        let block_idx = painted.find("\x1b[5;1;33;7m").expect("block present");
+        let body_idx = painted.find("hello").expect("body present");
+        assert!(
+            block_idx < body_idx,
+            "Home cursor should render block before body: {painted:?}",
+        );
+    }
+
+    #[test]
+    fn paint_editor_line_long_buffer_with_caret_in_head_keeps_caret_visible() {
+        // 80-col budget, ~200-char buffer of unique chars
+        // (alphabet repeated), caret near the start. The previous
+        // "drop from head" truncation would hide the caret
+        // completely; the new anchor-on-caret logic must keep it
+        // inside the visible window.
+        //
+        // Using A..Z and a..z gives 52 distinct chars; we cycle
+        // them so substring assertions against a "tail" slice
+        // pick out a region that DOESN'T re-appear in the head.
+        let long_buf: String = (0..200)
+            .map(|i| {
+                let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+                table[i % table.len()] as char
+            })
+            .collect();
+        let painted = paint_editor_line(&long_buf, 10, 0, 80, true);
+        // The cursor block must be present somewhere in the
+        // visible line (we never trim the block itself).
+        assert!(
+            painted.contains("\x1b[5;1;33;7m"),
+            "cursor block must remain visible after truncation: {painted:?}",
+        );
+        // A unique tail slice from the end of the buffer must
+        // NOT appear in the rendered line — caret is near the
+        // start, so the painter is anchored there.
+        let tail = &long_buf[long_buf.len() - 20..];
+        assert!(
+            !painted.contains(tail),
+            "with caret near start, tail should be trimmed: {painted:?}",
+        );
+        // Conversely, the head context AROUND the caret should
+        // be visible (chars [0..10] for caret at offset 10).
+        let head_context = &long_buf[..10];
+        assert!(
+            painted.contains(head_context),
+            "head context near caret must remain visible: {painted:?}",
+        );
     }
 
     #[test]
@@ -1180,8 +1661,9 @@ mod tests {
     fn backspace_removes_variation_selector_with_base_in_one_press() {
         // macOS IMEs often commit `<base><VS16>` for CJK / emoji
         // input; a naive Backspace pops only the invisible VS16
-        // and the user sees no visible change. `pop_grapheme`
-        // should treat the pair as one cluster and clear both.
+        // and the user sees no visible change. The grapheme-aware
+        // Backspace must treat the pair as one cluster and clear
+        // both.
         let mut ed = QueueEditor::new();
         ed.seed("\u{2764}\u{FE0F}"); // ❤️ = U+2764 + VS16
         assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
@@ -1222,7 +1704,7 @@ mod tests {
     fn backspace_after_simple_cjk_clears_in_one_press_no_regression() {
         // The plain case (no invisible modifier) must still work
         // with a single Backspace — we don't want the smart
-        // pop_grapheme to over-eat past the visible char.
+        // grapheme logic to over-eat past the visible char.
         let mut ed = QueueEditor::new();
         ed.seed("你");
         assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
@@ -1246,8 +1728,8 @@ mod tests {
     #[test]
     fn backspace_on_lone_modifier_strips_just_the_modifier() {
         // Degenerate sequence: a modifier with no preceding base.
-        // pop_grapheme should still remove it (the first pop),
-        // and then have nothing to fall back on.
+        // `backspace_grapheme` should still remove it (the first
+        // pop), and then have nothing to fall back on.
         let mut ed = QueueEditor::new();
         ed.seed("\u{FE0F}");
         assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
@@ -1266,5 +1748,289 @@ mod tests {
         // Buffer must still be "ok" — neither half-byte nor stray
         // 'a' got pushed.
         assert_eq!(ed.buffer(), "ok");
+    }
+
+    // ─── Cursor navigation ──────────────────────────────────────
+
+    /// Drive a CSI sequence (`ESC [ <bytes…>`) into the editor and
+    /// assert that the FINAL byte produces `expected`. Helper for
+    /// the navigation tests — without it every test repeats three
+    /// `consume(...)` calls and the actual assertion gets lost in
+    /// the noise.
+    fn csi(ed: &mut QueueEditor, bytes: &[u8]) -> KeyOutcome {
+        let (final_byte, lead) = bytes.split_last().expect("non-empty CSI");
+        assert_eq!(ed.consume(ESC), KeyOutcome::Nothing);
+        assert_eq!(ed.consume(b'['), KeyOutcome::Nothing);
+        for b in lead {
+            assert_eq!(ed.consume(*b), KeyOutcome::Nothing, "param byte {b:?}");
+        }
+        ed.consume(*final_byte)
+    }
+
+    #[test]
+    fn fresh_editor_has_cursor_at_zero() {
+        let ed = QueueEditor::new();
+        assert_eq!(ed.cursor(), 0);
+    }
+
+    #[test]
+    fn typing_advances_cursor_to_end() {
+        let mut ed = QueueEditor::new();
+        for byte in b"hi" {
+            assert_eq!(ed.consume(*byte), KeyOutcome::Repaint);
+        }
+        assert_eq!(ed.buffer(), "hi");
+        assert_eq!(ed.cursor(), 2);
+    }
+
+    #[test]
+    fn left_arrow_moves_cursor_back_one_grapheme() {
+        let mut ed = QueueEditor::new();
+        ed.seed("abc");
+        assert_eq!(ed.cursor(), 3);
+        assert_eq!(csi(&mut ed, b"D"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 2);
+        assert_eq!(csi(&mut ed, b"D"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 1);
+    }
+
+    #[test]
+    fn right_arrow_moves_cursor_forward_one_grapheme() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("abc", 1);
+        assert_eq!(csi(&mut ed, b"C"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 2);
+        assert_eq!(csi(&mut ed, b"C"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 3);
+        // Past the end is a no-op rather than overshoot.
+        assert_eq!(csi(&mut ed, b"C"), KeyOutcome::Nothing);
+        assert_eq!(ed.cursor(), 3);
+    }
+
+    #[test]
+    fn left_arrow_at_start_is_noop() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("hi", 0);
+        assert_eq!(csi(&mut ed, b"D"), KeyOutcome::Nothing);
+        assert_eq!(ed.cursor(), 0);
+    }
+
+    #[test]
+    fn left_right_step_over_cjk_codepoint_in_one_press() {
+        // A 3-byte CJK codepoint must look like ONE cursor step
+        // — the user pressed Left once, the visible caret should
+        // jump one glyph, not one byte.
+        let mut ed = QueueEditor::new();
+        ed.seed("a你b");
+        // Buffer layout: a (1) | 你 (3) | b (1) = 5 bytes total.
+        assert_eq!(ed.buffer().len(), 5);
+        assert_eq!(ed.cursor(), 5);
+        assert_eq!(csi(&mut ed, b"D"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 4, "step over 'b'");
+        assert_eq!(csi(&mut ed, b"D"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 1, "step over '你' (3 bytes) in one press");
+        assert_eq!(csi(&mut ed, b"D"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 0, "step over 'a'");
+    }
+
+    #[test]
+    fn left_arrow_steps_over_zwj_emoji_cluster_in_one_press() {
+        // 👨‍👩‍👧 (family) — caret should land before the whole
+        // cluster after one Left press, not in the middle of a
+        // ZWJ run.
+        let mut ed = QueueEditor::new();
+        ed.seed("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
+        let total = ed.buffer().len();
+        assert_eq!(ed.cursor(), total);
+        assert_eq!(csi(&mut ed, b"D"), KeyOutcome::Repaint);
+        // After one Left: skipped the final base (👧) and its
+        // attached ZWJ — matching the symmetric Backspace
+        // behaviour the older test pins down.
+        let expected = "\u{1F468}\u{200D}\u{1F469}\u{200D}".len();
+        assert_eq!(ed.cursor(), expected);
+    }
+
+    #[test]
+    fn home_jumps_to_start_and_end_jumps_to_end() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("hello world", 5);
+        // CSI H = Home
+        assert_eq!(csi(&mut ed, b"H"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 0);
+        // No-op when already at start.
+        assert_eq!(csi(&mut ed, b"H"), KeyOutcome::Nothing);
+        // CSI F = End
+        assert_eq!(csi(&mut ed, b"F"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), ed.buffer().len());
+        assert_eq!(csi(&mut ed, b"F"), KeyOutcome::Nothing);
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_e_mirror_home_and_end() {
+        // Emacs-style shortcuts. Some terminal users press these
+        // by reflex; supporting them is free and matches
+        // rustyline's idle-prompt behaviour.
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("abc", 2);
+        assert_eq!(ed.consume(0x01), KeyOutcome::Repaint); // Ctrl-A
+        assert_eq!(ed.cursor(), 0);
+        assert_eq!(ed.consume(0x05), KeyOutcome::Repaint); // Ctrl-E
+        assert_eq!(ed.cursor(), 3);
+    }
+
+    #[test]
+    fn ctrl_b_and_ctrl_f_mirror_left_and_right() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("abc", 1);
+        assert_eq!(ed.consume(0x06), KeyOutcome::Repaint); // Ctrl-F (right)
+        assert_eq!(ed.cursor(), 2);
+        assert_eq!(ed.consume(0x02), KeyOutcome::Repaint); // Ctrl-B (left)
+        assert_eq!(ed.cursor(), 1);
+    }
+
+    #[test]
+    fn home_via_csi_one_tilde_works() {
+        // Some terminals (xterm-style "VT220") encode Home as
+        // `ESC [ 1 ~` instead of `ESC [ H`. We must accept both.
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("xyz", 3);
+        assert_eq!(csi(&mut ed, b"1~"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 0);
+    }
+
+    #[test]
+    fn end_via_csi_four_tilde_works() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("xyz", 0);
+        assert_eq!(csi(&mut ed, b"4~"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 3);
+    }
+
+    #[test]
+    fn delete_via_csi_three_tilde_removes_grapheme_at_cursor() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("abcd", 1);
+        assert_eq!(csi(&mut ed, b"3~"), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "acd", "Delete removed 'b'");
+        assert_eq!(ed.cursor(), 1, "caret stayed in place");
+    }
+
+    #[test]
+    fn delete_at_end_is_noop() {
+        let mut ed = QueueEditor::new();
+        ed.seed("abc");
+        assert_eq!(csi(&mut ed, b"3~"), KeyOutcome::Nothing);
+        assert_eq!(ed.buffer(), "abc");
+    }
+
+    #[test]
+    fn delete_removes_cjk_codepoint_in_one_press() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("a你b", 1);
+        assert_eq!(csi(&mut ed, b"3~"), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "ab", "Delete removed '你'");
+        assert_eq!(ed.cursor(), 1);
+    }
+
+    #[test]
+    fn delete_removes_base_plus_variation_selector_in_one_press() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("X\u{2764}\u{FE0F}Y", 1); // X|❤️Y
+        assert_eq!(csi(&mut ed, b"3~"), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "XY");
+    }
+
+    #[test]
+    fn insert_in_middle_splits_existing_buffer() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("ad", 1);
+        assert_eq!(ed.consume(b'b'), KeyOutcome::Repaint);
+        assert_eq!(ed.consume(b'c'), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "abcd");
+        assert_eq!(ed.cursor(), 3);
+    }
+
+    #[test]
+    fn insert_in_middle_with_cjk_keeps_codepoint_boundaries() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("a好c", 1);
+        // Type 你 (3 bytes) into the middle.
+        for byte in "你".as_bytes() {
+            ed.consume(*byte);
+        }
+        assert_eq!(ed.buffer(), "a你好c");
+        // Cursor is between 你 and 好, i.e. 1 ('a') + 3 ('你') = 4.
+        assert_eq!(ed.cursor(), 4);
+    }
+
+    #[test]
+    fn backspace_in_middle_removes_char_before_cursor() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("abcd", 2);
+        assert_eq!(ed.consume(DEL), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "acd", "removed 'b' (char before cursor)");
+        assert_eq!(ed.cursor(), 1);
+    }
+
+    #[test]
+    fn backspace_at_cursor_zero_is_noop() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("abc", 0);
+        assert_eq!(ed.consume(DEL), KeyOutcome::Nothing);
+        assert_eq!(ed.buffer(), "abc");
+        assert_eq!(ed.cursor(), 0);
+    }
+
+    #[test]
+    fn enter_resets_cursor_to_zero() {
+        // Submit clears the buffer; the next draft must start with
+        // the caret at the start, not at the stale tail position.
+        let mut ed = QueueEditor::new();
+        ed.seed("ok");
+        match ed.consume(b'\n') {
+            KeyOutcome::Submit { pending } => assert_eq!(pending, "ok"),
+            other => panic!("expected Submit, got {other:?}"),
+        }
+        assert_eq!(ed.cursor(), 0);
+    }
+
+    #[test]
+    fn ctrl_u_resets_cursor_to_zero() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("hello", 3);
+        assert_eq!(ed.consume(NAK), KeyOutcome::Repaint);
+        assert_eq!(ed.buffer(), "");
+        assert_eq!(ed.cursor(), 0);
+    }
+
+    #[test]
+    fn ctrl_c_resets_cursor_to_zero() {
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("oops", 2);
+        assert_eq!(ed.consume(ETX), KeyOutcome::Cancelled);
+        assert_eq!(ed.cursor(), 0);
+    }
+
+    #[test]
+    fn csi_with_modifier_param_left_arrow_still_moves_cursor() {
+        // Some terminals send `ESC [ 1 ; 2 D` for Shift+Left.
+        // Our parser only inspects the first param so this should
+        // still dispatch to Left (we don't differentiate Shift).
+        let mut ed = QueueEditor::new();
+        ed.seed("abc");
+        assert_eq!(csi(&mut ed, b"1;2D"), KeyOutcome::Repaint);
+        assert_eq!(ed.cursor(), 2);
+    }
+
+    #[test]
+    fn up_and_down_arrows_are_quiet_noops_for_now() {
+        // No history in the queue editor — Up/Down must not
+        // pollute the buffer or move the caret.
+        let mut ed = QueueEditor::new();
+        ed.seed_with_cursor("abc", 1);
+        assert_eq!(csi(&mut ed, b"A"), KeyOutcome::Nothing); // Up
+        assert_eq!(csi(&mut ed, b"B"), KeyOutcome::Nothing); // Down
+        assert_eq!(ed.buffer(), "abc");
+        assert_eq!(ed.cursor(), 1);
     }
 }
