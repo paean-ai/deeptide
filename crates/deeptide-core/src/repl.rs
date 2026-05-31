@@ -179,17 +179,27 @@ pub struct ReplSession {
     /// An interactive menu awaiting a numeric pick (e.g. the session list shown
     /// by a bare `/import`). Each entry's `action` is a line re-submitted when
     /// chosen. Takes precedence over `last_suggestions` for a bare number.
-    pending_menu: Vec<MenuChoice>,
+    pending_menu: Vec<ReplMenuChoice>,
 }
 
 /// One row of an interactive `/command` selection menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct MenuChoice {
-    /// Display text shown next to the number.
-    label: String,
+pub struct ReplMenuChoice {
+    /// Display text shown next to the number / in the picker.
+    pub label: String,
     /// Line re-submitted verbatim when this row is chosen (a slash command or
     /// a prompt).
-    action: String,
+    pub action: String,
+}
+
+/// A selectable menu a `/command` wants to present. A rich CLI renders this as
+/// an interactive picker (type-to-filter, arrows, Enter); a plain/non-TTY host
+/// falls back to the numbered text form and a numeric reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplMenu {
+    pub title: String,
+    pub footer: String,
+    pub choices: Vec<ReplMenuChoice>,
 }
 
 /// Runtime configuration for the smart auto-compact feature.
@@ -1693,59 +1703,104 @@ impl ReplSession {
         }
     }
 
-    /// Store an interactive numbered menu and render it. A bare numeric reply
-    /// on the next line re-submits the chosen row's `action`. Clears any pending
-    /// follow-up suggestions so the number is unambiguous.
-    fn present_menu(&mut self, header: &str, choices: Vec<MenuChoice>, footer: &str) -> Vec<ReplEvent> {
-        let mut lines = vec![header.to_owned()];
-        for (i, choice) in choices.iter().enumerate() {
-            lines.push(format!("  {}. {}", i + 1, choice.label));
+    /// Whether `line` (a full input line) would open an interactive selection
+    /// menu, and the menu's data if so. Pure / side-effect-free: a rich CLI
+    /// calls this BEFORE `submit` to render a picker; returning `None` means
+    /// "just submit it normally".
+    pub fn menu_for(&self, line: &str) -> Option<ReplMenu> {
+        let command = line.trim().strip_prefix('/')?;
+        let (name, args) = command
+            .split_once(char::is_whitespace)
+            .unwrap_or((command, ""));
+        match name.to_ascii_lowercase().as_str() {
+            "import" => self.import_menu_for_args(args),
+            _ => None,
         }
-        if !footer.is_empty() {
-            lines.push(footer.to_owned());
-        }
-        self.pending_menu = choices;
-        self.last_suggestions.clear();
-        vec![ReplEvent::Output(lines.join("\n"))]
     }
 
-    /// Build and show the `/import` selection menu: one row per discovered
-    /// session (optionally filtered to `only`), newest first. Choosing a row
-    /// hands that session off into the live conversation; the footer documents
-    /// the memory-distillation variant.
-    fn present_import_menu(
-        &mut self,
-        only: Option<crate::import::SourceTool>,
-    ) -> Vec<ReplEvent> {
-        let refs: Vec<_> = crate::import::discover(&self.tool_context.cwd)
+    /// The `/import` menu for the given args, or `None` when the args name a
+    /// concrete session (so it should import directly, not open a menu) or no
+    /// sessions exist.
+    fn import_menu_for_args(&self, args: &str) -> Option<ReplMenu> {
+        let mut tokens = args.split_whitespace().peekable();
+        let only = match tokens.next() {
+            None => None, // bare `/import` → all sources
+            Some(raw) => Some(crate::import::SourceTool::parse(raw)?),
+        };
+        // A concrete selector or an explicit --as means "not a menu".
+        let mut has_selector = false;
+        let mut mode_given = false;
+        while let Some(tok) = tokens.next() {
+            if tok == "--as" || tok == "-a" {
+                mode_given = true;
+                let _ = tokens.next();
+            } else {
+                has_selector = true;
+            }
+        }
+        if has_selector || mode_given {
+            return None;
+        }
+        self.import_menu(only)
+    }
+
+    /// Build the `/import` selection menu: one row per discovered session
+    /// (optionally filtered to `only`), newest first. Choosing a row hands that
+    /// session off into the live conversation. `None` when there are none.
+    fn import_menu(&self, only: Option<crate::import::SourceTool>) -> Option<ReplMenu> {
+        let choices: Vec<ReplMenuChoice> = crate::import::discover(&self.tool_context.cwd)
             .into_iter()
             .filter(|r| only.is_none_or(|s| r.source == s))
-            .take(9)
-            .collect();
-        if refs.is_empty() {
-            let scope = only.map(|s| s.label()).unwrap_or("any agent");
-            return vec![ReplEvent::Output(format!(
-                "No importable sessions found for this project ({scope}). Sessions \
-                 come from Claude Code, Codex, or deeptide for this directory."
-            ))];
-        }
-        let choices: Vec<MenuChoice> = refs
-            .iter()
+            .take(20)
             .enumerate()
             .map(|(i, r)| {
                 let id = session_short(&r.session_id);
                 let newest = if i == 0 { " · newest" } else { "" };
-                MenuChoice {
+                ReplMenuChoice {
                     label: format!("[{}] {id}{newest} — continue here (handoff)", r.source.label()),
                     action: format!("/import {} {} --as context", r.source.label(), r.session_id),
                 }
             })
             .collect();
-        self.present_menu(
-            "Select a session to continue (type a number):",
+        if choices.is_empty() {
+            return None;
+        }
+        Some(ReplMenu {
+            title: String::from("Select a session to continue"),
+            footer: String::from(
+                "Distil one into memory instead: /import <tool> <id> --as memory  ·  /sessions --all to list",
+            ),
             choices,
-            "  Distil one into memory instead: /import <tool> <id> --as memory  ·  /sessions --all to list",
-        )
+        })
+    }
+
+    /// Store a menu for numeric-pick and render its numbered text form (the
+    /// fallback path when the host can't run an interactive picker).
+    fn present_menu(&mut self, menu: ReplMenu) -> Vec<ReplEvent> {
+        let mut lines = vec![format!("{} (type a number):", menu.title)];
+        for (i, choice) in menu.choices.iter().enumerate() {
+            lines.push(format!("  {}. {}", i + 1, choice.label));
+        }
+        if !menu.footer.is_empty() {
+            lines.push(format!("  {}", menu.footer));
+        }
+        self.pending_menu = menu.choices;
+        self.last_suggestions.clear();
+        vec![ReplEvent::Output(lines.join("\n"))]
+    }
+
+    /// Numbered-text fallback for `/import`'s menu (used by non-TTY hosts).
+    fn present_import_menu(&mut self, only: Option<crate::import::SourceTool>) -> Vec<ReplEvent> {
+        match self.import_menu(only) {
+            Some(menu) => self.present_menu(menu),
+            None => {
+                let scope = only.map(|s| s.label()).unwrap_or("any agent");
+                vec![ReplEvent::Output(format!(
+                    "No importable sessions found for this project ({scope}). Sessions \
+                     come from Claude Code, Codex, or deeptide for this directory."
+                ))]
+            }
+        }
     }
 
     /// Resolve `<source> [<id>|--latest]` to a concrete foreign session for the

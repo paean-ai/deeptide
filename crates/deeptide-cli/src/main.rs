@@ -28,6 +28,7 @@ use rustyline::{
 };
 
 mod chrome;
+mod picker;
 mod queue_editor;
 mod queue_input;
 mod status_bar;
@@ -2081,6 +2082,23 @@ fn run_interactive(
                 {
                     bar.recover_to_scroll_region(&bar_styled, &spinner_lock);
                 }
+
+                // Interactive selection menu: if this line opens one (e.g. a
+                // bare `/import`), run the fuzzy picker and replace `content`
+                // with the chosen row's action. Cancel skips the turn; an
+                // unsupported terminal falls through to the numbered-text menu
+                // that `submit` prints.
+                let content = if use_color
+                    && let Some(menu) = repl.menu_for(&content)
+                {
+                    match picker::run(&menu, use_color) {
+                        picker::PickResult::Selected(action) => action,
+                        picker::PickResult::Cancelled => continue,
+                        picker::PickResult::Unsupported => content,
+                    }
+                } else {
+                    content
+                };
 
                 // Echo the user's submitted text into the scrollback as a
                 // styled `▎ you ▾` block. Without this the conversation
@@ -4197,9 +4215,14 @@ mod tests {
             continue_session: false,
             resume: None,
             list_sessions: false,
+            import: None,
+            import_session: None,
+            import_as: "context".to_owned(),
             list_models: false,
             doctor: false,
             no_session_persistence: false,
+            no_session_capture: false,
+            no_suggestions: false,
             settings: None,
             add_dir: Vec::new(),
         }
