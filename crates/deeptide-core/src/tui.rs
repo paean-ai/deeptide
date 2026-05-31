@@ -1,9 +1,54 @@
 use crate::{MarkdownRenderOptions, MarkdownRenderer};
 
+/// Visual urgency level applied to a [`StatusSegment`]'s **value**.
+/// Labels and separators always render dim; only the value receives
+/// the severity color so the user's eye is drawn to the data that
+/// matters (mode, ctx percent, key state) without painting the
+/// whole bar in distracting colors.
+///
+/// The mapping is intentionally narrow so the UI stays calm:
+///
+/// * `Neutral` — no color override; the value is dim like the rest
+///   of the bar. The default for non-actionable segments
+///   (`model`, `cwd`, `git`, `turns`, `cost`).
+/// * `Info`    — cyan. Used for transient indicators like
+///   `queue N` so the user notices the queue is non-empty.
+/// * `Success` — green. Reserved for explicit "all good" states
+///   that we want to celebrate.
+/// * `Warning` — yellow. Pre-trouble: e.g. ctx > 80%,
+///   `accept-edits` mode, `auto<N>` close to threshold.
+/// * `Alert`   — bold red. Active danger: `bypass` (YOLO)
+///   mode, ctx > 95%, missing auth credentials.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Severity {
+    #[default]
+    Neutral,
+    Info,
+    Success,
+    Warning,
+    Alert,
+}
+
+impl Severity {
+    /// SGR opener for this severity. Empty string for `Neutral`
+    /// because Neutral values inherit the bar's ambient dim
+    /// styling — no override needed.
+    pub fn sgr_open(self) -> &'static str {
+        match self {
+            Severity::Neutral => "",
+            Severity::Info => "\x1b[36m",
+            Severity::Success => "\x1b[32m",
+            Severity::Warning => "\x1b[33m",
+            Severity::Alert => "\x1b[1;31m",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusSegment {
     pub label: String,
     pub value: String,
+    pub severity: Severity,
 }
 
 impl StatusSegment {
@@ -11,7 +56,19 @@ impl StatusSegment {
         Self {
             label: label.into(),
             value: value.into(),
+            severity: Severity::Neutral,
         }
+    }
+
+    /// Builder for the optional [`Severity`] override. Returns
+    /// `self` so calls can chain in the segment-construction site:
+    ///
+    /// ```ignore
+    /// StatusSegment::new("mode", "bypass").with_severity(Severity::Alert)
+    /// ```
+    pub fn with_severity(mut self, severity: Severity) -> Self {
+        self.severity = severity;
+        self
     }
 
     fn render(&self) -> String {
@@ -19,6 +76,40 @@ impl StatusSegment {
             self.value.clone()
         } else {
             format!("{} {}", self.label, self.value)
+        }
+    }
+
+    /// Render with ANSI SGR codes applied per the segment's
+    /// severity. Label stays dim (it's metadata); the value
+    /// receives the severity's color, falling back to dim when
+    /// the severity is `Neutral`.
+    ///
+    /// `color == false` returns the same plain string as
+    /// [`StatusSegment::render`] — single rendering pathway for
+    /// piped sessions / `--no-color`.
+    fn render_styled(&self, color: bool) -> String {
+        if !color {
+            return self.render();
+        }
+        const DIM: &str = "\x1b[2m";
+        const RESET: &str = "\x1b[0m";
+        let value_sgr = self.severity.sgr_open();
+        if self.label.is_empty() {
+            if value_sgr.is_empty() {
+                format!("{DIM}{}{RESET}", self.value)
+            } else {
+                format!("{value_sgr}{}{RESET}", self.value)
+            }
+        } else if value_sgr.is_empty() {
+            // Neutral: dim everything together.
+            format!("{DIM}{} {}{RESET}", self.label, self.value)
+        } else {
+            // Colored value: keep the label dim so the colored
+            // value visually "pops" against the calmer label.
+            format!(
+                "{DIM}{}{RESET} {value_sgr}{}{RESET}",
+                self.label, self.value
+            )
         }
     }
 }
@@ -54,6 +145,57 @@ impl StatusLine {
         } else {
             pad_to_width(out, width)
         }
+    }
+
+    /// Like [`StatusLine::render`] but emits ANSI SGR codes per
+    /// segment so warnings / alerts (e.g. `mode bypass`,
+    /// `ctx 96%`) draw the user's eye. The visible width
+    /// arithmetic is done against the plain-text form so
+    /// truncation and padding still produce a `width`-column
+    /// line — the SGR codes contribute zero display columns.
+    ///
+    /// `color == false` short-circuits to the plain renderer so
+    /// piped sessions / `--no-color` see the same string as
+    /// before, unchanged.
+    pub fn render_styled(&self, width: usize, color: bool) -> String {
+        if !color {
+            return self.render(width);
+        }
+
+        let width = width.max(12);
+        const DIM_SEP: &str = "\x1b[2m  |  \x1b[0m";
+        const SEP_VISIBLE_WIDTH: usize = 5; // "  |  "
+
+        // Walk segments once, deciding fit on the plain widths so
+        // ANSI codes never sneak into our width arithmetic. We
+        // also accumulate the styled string in parallel so a
+        // second pass isn't needed.
+        let mut out = String::from(" ");
+        let mut visible_width: usize = 1; // leading space
+        let mut first = true;
+
+        for segment in &self.segments {
+            let plain = segment.render();
+            let plain_width = display_width(&plain);
+            let sep_width = if first { 0 } else { SEP_VISIBLE_WIDTH };
+            if visible_width + sep_width + plain_width > width {
+                break;
+            }
+            if !first {
+                out.push_str(DIM_SEP);
+            }
+            out.push_str(&segment.render_styled(true));
+            visible_width += sep_width + plain_width;
+            first = false;
+        }
+
+        // Pad the visible width up to `width` using plain spaces
+        // (separators / values are already SGR-closed).
+        while visible_width < width {
+            out.push(' ');
+            visible_width += 1;
+        }
+        out
     }
 }
 
@@ -723,10 +865,35 @@ pub fn format_token_count(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        InputBar, InputState, StatusLine, StatusSegment, TranscriptItem, TuiFrame, format_elapsed,
-        format_token_count, render_output_panel, render_spinner_line, render_spinner_line_rich,
-        render_spinner_line_with_phase, spinner_frame, spinner_verb,
+        InputBar, InputState, Severity, StatusLine, StatusSegment, TranscriptItem, TuiFrame,
+        display_width, format_elapsed, format_token_count, render_output_panel,
+        render_spinner_line, render_spinner_line_rich, render_spinner_line_with_phase,
+        spinner_frame, spinner_verb,
     };
+
+    /// Strip ANSI SGR sequences so width / content assertions can
+    /// compare against the visible payload. Used by the styled
+    /// status-line tests to verify both that the SGR pattern is
+    /// emitted *and* that the visible columns still line up.
+    fn strip_sgr(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut chars = input.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                for ch in chars.by_ref() {
+                    // SGR final byte is in 0x40..=0x7e; in
+                    // practice we only see `m`.
+                    if ('@'..='~').contains(&ch) {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
 
     #[test]
     fn status_line_fits_requested_width() {
@@ -738,6 +905,116 @@ mod tests {
 
         assert_eq!(line.render(24).chars().count(), 24);
         assert!(line.render(80).contains("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn severity_sgr_open_maps_to_expected_palette() {
+        assert_eq!(Severity::Neutral.sgr_open(), "");
+        assert_eq!(Severity::Info.sgr_open(), "\x1b[36m");
+        assert_eq!(Severity::Success.sgr_open(), "\x1b[32m");
+        assert_eq!(Severity::Warning.sgr_open(), "\x1b[33m");
+        assert_eq!(Severity::Alert.sgr_open(), "\x1b[1;31m");
+    }
+
+    #[test]
+    fn segment_with_severity_chains_in_builder_position() {
+        let seg = StatusSegment::new("mode", "bypass").with_severity(Severity::Alert);
+        assert_eq!(seg.label, "mode");
+        assert_eq!(seg.value, "bypass");
+        assert_eq!(seg.severity, Severity::Alert);
+    }
+
+    #[test]
+    fn status_line_render_styled_is_plain_when_color_off() {
+        let line = StatusLine::new([
+            StatusSegment::new("mode", "bypass").with_severity(Severity::Alert),
+            StatusSegment::new("ctx", "96%").with_severity(Severity::Alert),
+        ]);
+        let styled = line.render_styled(40, false);
+        let plain = line.render(40);
+        assert_eq!(styled, plain);
+        assert!(!styled.contains('\x1b'));
+    }
+
+    #[test]
+    fn status_line_render_styled_emits_alert_sgr_for_yolo_mode() {
+        let line = StatusLine::new([
+            StatusSegment::new("mode", "bypass").with_severity(Severity::Alert),
+            StatusSegment::new("ctx", "0%"),
+        ]);
+        let styled = line.render_styled(40, true);
+        // Bold-red SGR opener appears once around the `bypass`
+        // value, while the `mode` label stays dim.
+        assert!(
+            styled.contains("\x1b[1;31mbypass\x1b[0m"),
+            "missing alert SGR: {styled}"
+        );
+        assert!(
+            styled.contains("\x1b[2mmode\x1b[0m"),
+            "missing dim label SGR: {styled}"
+        );
+    }
+
+    #[test]
+    fn status_line_render_styled_paints_warning_ctx_yellow() {
+        let line =
+            StatusLine::new([StatusSegment::new("ctx", "85%").with_severity(Severity::Warning)]);
+        let styled = line.render_styled(40, true);
+        assert!(
+            styled.contains("\x1b[33m85%\x1b[0m"),
+            "missing warning SGR: {styled}"
+        );
+    }
+
+    #[test]
+    fn status_line_render_styled_visible_width_equals_requested() {
+        let line = StatusLine::new([
+            StatusSegment::new("model", "deepseek-v4-pro"),
+            StatusSegment::new("mode", "bypass").with_severity(Severity::Alert),
+            StatusSegment::new("ctx", "96%").with_severity(Severity::Alert),
+            StatusSegment::new("key", "ok"),
+        ]);
+        let styled = line.render_styled(80, true);
+        // SGR codes occupy zero columns, so the *visible* width
+        // must still hit the requested 80 — this is what keeps
+        // the anchored status bar from leaving trailing junk on
+        // the row when it repaints.
+        assert_eq!(display_width(&strip_sgr(&styled)), 80);
+    }
+
+    #[test]
+    fn status_line_render_styled_drops_trailing_segments_on_narrow_terminals() {
+        let line = StatusLine::new([
+            StatusSegment::new("model", "deepseek-v4-pro"),
+            StatusSegment::new("mode", "bypass").with_severity(Severity::Alert),
+            StatusSegment::new("turns", "1/100"),
+            StatusSegment::new("cost", "$0.00"),
+        ]);
+        let styled = line.render_styled(30, true);
+        let visible = strip_sgr(&styled);
+        // High-priority segments survive truncation; low-priority
+        // ones fall off the end first. We don't pin the exact
+        // boundary (it depends on the separator math) — just
+        // assert the survival ordering.
+        assert!(visible.contains("model"), "{visible}");
+        assert!(visible.contains("mode"), "{visible}");
+        assert!(!visible.contains("cost"), "{visible}");
+    }
+
+    #[test]
+    fn status_segment_render_styled_neutral_dims_label_and_value_together() {
+        let seg = StatusSegment::new("git", "main");
+        let styled = seg.render_styled(true);
+        // Neutral collapses to a single dim wrapper instead of
+        // emitting a redundant value-side SGR.
+        assert_eq!(styled, "\x1b[2mgit main\x1b[0m");
+    }
+
+    #[test]
+    fn status_segment_render_styled_labelless_alert_wraps_value_only() {
+        let seg = StatusSegment::new("", "DANGER").with_severity(Severity::Alert);
+        let styled = seg.render_styled(true);
+        assert_eq!(styled, "\x1b[1;31mDANGER\x1b[0m");
     }
 
     #[test]

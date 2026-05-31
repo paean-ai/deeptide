@@ -807,12 +807,46 @@ impl ReplSession {
             format!("{context_pct}%")
         };
 
+        // Severity assignment for the live segments. Kept terse and
+        // local so the policy is visible at-a-glance instead of
+        // scattered across helpers:
+        //
+        //   * `mode`  — Alert when YOLO is on (`bypass`), Warning for
+        //               `accept-edits` (silent file modifications),
+        //               Info for `plan` (read-only), Neutral
+        //               otherwise. Mirrors how Codex / Claude Code
+        //               flag dangerous modes.
+        //   * `ctx`   — Alert at ≥ 95% (about to truncate), Warning
+        //               at ≥ 80% (compaction zone), Neutral below.
+        //               Without this the user has no chance to
+        //               trigger `/compact` before the model starts
+        //               dropping context.
+        let mode_label = self.agent_loop.permission_mode().label();
+        // Label strings come from `PermissionMode::label()` — keep
+        // these arms in sync with that definition. "yolo" is the
+        // user-visible label for `Bypass`; pinned in
+        // `permissions::PermissionMode::label` tests so any rename
+        // there fails the unit tests covering this mapping.
+        let mode_severity = match mode_label {
+            "yolo" => crate::Severity::Alert,
+            "accept-edits" => crate::Severity::Warning,
+            "plan" => crate::Severity::Info,
+            _ => crate::Severity::Neutral,
+        };
+        let ctx_severity = if context_pct >= 95 {
+            crate::Severity::Alert
+        } else if context_pct >= 80 {
+            crate::Severity::Warning
+        } else {
+            crate::Severity::Neutral
+        };
+
         let mut segments = vec![
             StatusSegment::new("model", self.agent_loop.model()),
-            StatusSegment::new("mode", self.agent_loop.permission_mode().label()),
+            StatusSegment::new("mode", mode_label).with_severity(mode_severity),
             StatusSegment::new("cwd", cwd),
             StatusSegment::new("git", branch),
-            StatusSegment::new("ctx", ctx_value),
+            StatusSegment::new("ctx", ctx_value).with_severity(ctx_severity),
         ];
         if let Some(auth) = auth {
             segments.push(auth);
@@ -828,7 +862,13 @@ impl ReplSession {
         if let Ok(q) = self.message_queue.lock()
             && !q.is_empty()
         {
-            segments.push(StatusSegment::new("queue", format!("{}", q.len())));
+            // Cyan `queue N` so the user spots that automatic
+            // submits are pending even at a glance — the bar is
+            // otherwise dim everywhere.
+            segments.push(
+                StatusSegment::new("queue", format!("{}", q.len()))
+                    .with_severity(crate::Severity::Info),
+            );
         }
         // Surface the active TODO backlog the same way. Format is
         // `todo IP/N` where IP is the count of items currently
