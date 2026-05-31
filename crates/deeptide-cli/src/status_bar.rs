@@ -37,15 +37,34 @@ const MIN_ROWS: u16 = 8;
 const MIN_COLS: u16 = 24;
 
 /// Default number of rows the pinned footer reserves at the bottom of
-/// the terminal. Layout:
+/// the terminal. Layout (for a 24-row terminal):
 ///
-/// * row `rows`     → status bar (model / mode / cwd / ctx / …)
-/// * row `rows - 1` → input prompt (the rustyline edit line)
+/// * row `rows`         → status bar (model / mode / cwd / ctx / …)
+/// * rows `rows-3..rows-1` → input edit area (rustyline writes starting
+///   at the topmost reserved row and wraps downward as the input
+///   grows; 3 rows of headroom keep multi-line / wrapped CJK input
+///   from spilling into the status bar)
 ///
-/// Increasing this would give the input a multi-row edit area but
-/// rustyline only knows how to manage a single growing line, so
-/// reserving more rows just leaves blank space; 2 is the sweet spot.
-pub const DEFAULT_FOOTER_ROWS: u16 = 2;
+/// We used to reserve only 2 rows (1 for input + 1 for status), but
+/// that made any input wider than `cols - prompt` columns wrap into
+/// the status-bar row, which then either flickered as the status bar
+/// repainted or — worse — visually overlapped with conversation
+/// content above. With a 4-row footer the input has 3 rows of safe
+/// wrap area before it hits the status bar:
+///
+/// * 80-col terminal:  3 × 80  = 240 cols of ASCII safety
+/// * 80-col + CJK:     3 × 40  = 120 wide chars
+/// * 120-col terminal: 3 × 120 = 360 cols
+///
+/// Tradeoff: when the input is empty / short, 2 rows of the reserved
+/// footer area sit blank between the input cursor row and the status
+/// bar. We accept that tradeoff (vs. a dynamic resize) because
+/// rustyline's redraw is anchored to the `start_row` it captured at
+/// `readline()` entry — there's no public API to shift that mid-edit,
+/// so a static, generous reservation is the only reliable way to
+/// guarantee multi-line input never overwrites the status bar or the
+/// last visible row of the scroll region.
+pub const DEFAULT_FOOTER_ROWS: u16 = 4;
 
 /// Set by the SIGWINCH handler. The next `repaint` reads + clears it
 /// to force a fresh `terminal_size` probe + re-engage of the scroll
@@ -177,17 +196,23 @@ impl AnchoredStatusBar {
     }
 
     /// Position the cursor at the input row (`rows - footer_rows + 1`)
-    /// and clear it, so the next `rl.readline(...)` call writes its
-    /// prompt + edit buffer there. Must be called BEFORE invoking
-    /// rustyline; the cursor stays at the cleared column until
-    /// rustyline's prompt write moves it.
+    /// and clear it — plus every other reserved input row below it,
+    /// so the next `rl.readline(...)` call starts from a fully blank
+    /// edit area. Must be called BEFORE invoking rustyline; the
+    /// cursor lands on the topmost reserved row after the clears.
+    ///
+    /// The "clear all input rows" loop matters when the user's
+    /// **previous** input wrapped into rows-2 / rows-1. Without
+    /// wiping those rows, rustyline would render the new (possibly
+    /// short) input on the topmost row while stale text from the
+    /// previous wrap stayed visible below it.
     ///
     /// Holding `lock` keeps the cursor jump atomic against the spinner
     /// thread — without it, a spinner tick could squeeze in between the
     /// jump and the readline call.
     pub fn prepare_input_row(&self, lock: &std::sync::Mutex<()>) {
         if let Ok(_guard) = lock.lock() {
-            let seq = jump_and_clear_seq(self.input_row());
+            let seq = clear_input_area_seq(self.input_row(), self.footer_rows.saturating_sub(1));
             let mut out = io::stdout();
             let _ = out.write_all(seq.as_bytes());
             let _ = out.flush();
@@ -242,11 +267,20 @@ impl AnchoredStatusBar {
     pub fn recover_to_scroll_region(&mut self, status_line: &str, lock: &std::sync::Mutex<()>) {
         if let Ok(_guard) = lock.lock() {
             let mut out = io::stdout();
-            // (1) Clear the input row when we actually reserved one
-            //     (footer >= 2). For the single-row legacy footer
-            //     there is no separate input row to wipe.
+            // (1) Clear the entire input area when we actually
+            //     reserved one (footer >= 2). For the single-row
+            //     legacy footer there is no separate input area to
+            //     wipe.
+            //
+            //     Multi-row input regularly leaves stale wrapped
+            //     text on rows-2 / rows-1 after the user submits;
+            //     wiping only the topmost row would leave those
+            //     fragments visible until the next stream event
+            //     happens to overwrite them.
             if self.footer_rows >= 2 {
-                let _ = out.write_all(jump_and_clear_seq(self.input_row()).as_bytes());
+                let seq =
+                    clear_input_area_seq(self.input_row(), self.footer_rows.saturating_sub(1));
+                let _ = out.write_all(seq.as_bytes());
             }
             // (2) Repaint the status row. We bypass the
             //     last_painted cache: input overflow could have
@@ -370,6 +404,26 @@ fn disengage_seq(rows: u16) -> String {
 /// rustyline edit area at the bottom-most non-status row.
 fn jump_and_clear_seq(row: u16) -> String {
     format!("\x1b[{row};1H\x1b[2K", row = row.max(1))
+}
+
+/// Build the ANSI sequence that clears every reserved input row
+/// (top → bottom) and parks the cursor on the topmost one, ready
+/// for a `rl.readline()` write.
+///
+/// Extracted from [`AnchoredStatusBar::prepare_input_row`] so the
+/// row arithmetic is unit-testable without going through a real
+/// TTY engage. `top_row` is the topmost reserved row (== `input_row`);
+/// `input_rows` is the number of reserved rows the input may grow
+/// into (== `footer_rows - 1`). A `0` count short-circuits to just
+/// parking the cursor.
+fn clear_input_area_seq(top_row: u16, input_rows: u16) -> String {
+    let mut out = String::new();
+    for offset in 0..input_rows {
+        let row = top_row.saturating_add(offset);
+        out.push_str(&jump_and_clear_seq(row));
+    }
+    out.push_str(&format!("\x1b[{row};1H", row = top_row.max(1)));
+    out
 }
 
 /// Build the ANSI sequence that paints `text` at `row` without
@@ -543,6 +597,79 @@ mod tests {
             seq.contains("\x1b[23;1H"),
             "must clear input row 23: {seq:?}"
         );
+    }
+
+    #[test]
+    fn engage_seq_four_row_footer_clears_all_three_input_rows_and_status_row() {
+        // The current default. The input lives at row `rows-3` and
+        // can wrap into rows-2 and rows-1 before any further wrap
+        // would hit the status bar — verify all four reserved rows
+        // get an explicit clear during engage.
+        let seq = engage_seq(24, 4);
+        assert!(
+            seq.contains("\x1b[1;20r"),
+            "four-row footer must leave scroll region [1;20]: {seq:?}"
+        );
+        for row in [24u16, 23, 22, 21] {
+            let expected = format!("\x1b[{row};1H");
+            assert!(seq.contains(&expected), "must clear row {row}: {seq:?}");
+        }
+    }
+
+    #[test]
+    fn default_footer_rows_reserves_three_input_rows_for_wrap_safety() {
+        // The Anthropic-facing CJK input regression motivated this:
+        // a single long sentence (~94 cols on an 80-col terminal)
+        // used to wrap into the status bar row. The 4-row default
+        // is what protects against that without a dynamic resize
+        // path. Pin the value so refactors don't accidentally
+        // collapse it back to 2.
+        assert_eq!(DEFAULT_FOOTER_ROWS, 4);
+    }
+
+    #[test]
+    fn input_row_for_default_footer_sits_three_rows_above_status() {
+        // Build a synthetic bar without going through `try_engage`
+        // (which requires a real TTY). The arithmetic is what we
+        // want to verify: input lives at rows-3, leaving rows-2 and
+        // rows-1 as wrap headroom and row `rows` for the status
+        // bar.
+        let bar = AnchoredStatusBar {
+            rows: 24,
+            cols: 80,
+            footer_rows: DEFAULT_FOOTER_ROWS,
+            last_painted: String::new(),
+        };
+        assert_eq!(bar.input_row(), 21);
+        assert_eq!(bar.scroll_region_bottom(), 20);
+    }
+
+    #[test]
+    fn clear_input_area_seq_wipes_each_reserved_row_top_to_bottom() {
+        // 4-row footer ⇒ 3 input rows (top = rows-3 = 21 on a
+        // 24-row terminal). Verify each row gets its own jump +
+        // EL2 in order, and the cursor parks on the topmost row.
+        let seq = clear_input_area_seq(21, 3);
+        let expected = "\x1b[21;1H\x1b[2K\
+                        \x1b[22;1H\x1b[2K\
+                        \x1b[23;1H\x1b[2K\
+                        \x1b[21;1H";
+        assert_eq!(seq, expected);
+    }
+
+    #[test]
+    fn clear_input_area_seq_with_single_row_only_clears_and_parks_once() {
+        let seq = clear_input_area_seq(23, 1);
+        assert_eq!(seq, "\x1b[23;1H\x1b[2K\x1b[23;1H");
+    }
+
+    #[test]
+    fn clear_input_area_seq_with_zero_rows_only_parks_cursor() {
+        // Degenerate single-row footer (footer=1 → input_rows=0):
+        // there's no input area to wipe, just park the cursor for
+        // the caller's downstream write.
+        let seq = clear_input_area_seq(24, 0);
+        assert_eq!(seq, "\x1b[24;1H");
     }
 
     #[test]
