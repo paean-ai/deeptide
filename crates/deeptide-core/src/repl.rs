@@ -49,6 +49,16 @@ pub enum SystemMessage {
         /// (small, successful tool results only — see
         /// `should_expand_tool_result`).
         body: Option<String>,
+        /// Optional one-line "subject" extracted from the tool's INPUT —
+        /// `file_path` for Read/Write/Edit, the shell command for Bash,
+        /// the URL for WebFetch, the search pattern for Grep, etc. The
+        /// CLI renders this between the tool name and the result summary
+        /// so a user can see at a glance *what* was acted on without
+        /// having to expand the body.
+        ///
+        /// Populated by `build_tool_system_message` from the tool's input
+        /// JSON; `None` for tools we don't have a subject extractor for.
+        subject: Option<String>,
     },
     /// Auto-compaction completed; `compressed_messages` older messages
     /// folded into a summary, `tokens_after` tokens remain.
@@ -3464,6 +3474,7 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
         } => Some(ReplEvent::System(build_tool_system_message(
             &tool_call.name,
             &tool_call.id,
+            &tool_call.input,
             &content,
             is_error,
         ))),
@@ -3483,10 +3494,12 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
 fn build_tool_system_message(
     tool_name: &str,
     tool_id: &str,
+    input: &serde_json::Value,
     content: &str,
     is_error: bool,
 ) -> SystemMessage {
     let summary = ToolResultSummaryFormatter::summary(tool_name, content, is_error);
+    let subject = extract_tool_subject(tool_name, input);
     let trimmed = content.trim();
 
     let body = if is_error
@@ -3505,6 +3518,112 @@ fn build_tool_system_message(
         summary,
         is_error,
         body,
+        subject,
+    }
+}
+
+/// Pull a short, human-readable "subject" out of a tool call's input
+/// JSON — the file path for Read / Write / Edit / AppendFile /
+/// NotebookEdit, the command for Bash / Monitor, the URL for
+/// WebFetch, the pattern for Grep / Glob, the search term for
+/// WebSearch / MemorySearch, etc.
+///
+/// Why a separate helper, not part of `ToolResultSummaryFormatter`?
+/// The summary formatter only sees the *result*; the subject lives
+/// in the *input*. They're independent slices of the call (output
+/// shape vs input shape) and conflating them would make either
+/// piece harder to evolve.
+///
+/// Returns `None` when:
+///   * the tool isn't one we recognise, OR
+///   * the input shape doesn't carry an obvious subject field, OR
+///   * the candidate string is empty / whitespace.
+///
+/// The returned string is already truncated to `MAX_SUBJECT_LEN`
+/// chars (UTF-8 aware) so the CLI can splice it directly into a
+/// single-line header without further checks.
+pub(crate) fn extract_tool_subject(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    const MAX_SUBJECT_LEN: usize = 80;
+
+    let raw = match tool_name.to_ascii_lowercase().as_str() {
+        // Filesystem tools — the file path is the subject.
+        "read" | "write" | "edit" | "appendfile" | "notebookedit" => {
+            input.get("file_path").and_then(|v| v.as_str())
+        }
+        // Multi-file read — show count instead of the full list.
+        "readfiles" => {
+            let count = input
+                .get("file_paths")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .or_else(|| {
+                    input
+                        .get("paths")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                })?;
+            return Some(format!("{count} file(s)"));
+        }
+        // Shell-flavoured tools — the command is the subject. Newlines
+        // collapsed so it fits on one line; the diff-preview is where
+        // the full multi-line text lives.
+        "bash" | "monitor" | "shell" => input.get("command").and_then(|v| v.as_str()),
+        // Search / discovery — the pattern.
+        "grep" => input.get("pattern").and_then(|v| v.as_str()),
+        "glob" => input.get("pattern").and_then(|v| v.as_str()),
+        // Web.
+        "webfetch" => input.get("url").and_then(|v| v.as_str()),
+        "websearch" => input.get("query").and_then(|v| v.as_str()),
+        // Memory & search.
+        "memorysearch" => input.get("query").and_then(|v| v.as_str()),
+        "memorywrite" => input.get("key").and_then(|v| v.as_str()),
+        // Tasks / planning — the description / title.
+        "todowrite" => input
+            .get("todos")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|t| t.get("content").or_else(|| t.get("title")))
+            .and_then(|v| v.as_str()),
+        // Subagent / skill — name them so the user knows which one ran.
+        "agent" => input
+            .get("subagent_type")
+            .or_else(|| input.get("agent_type"))
+            .or_else(|| input.get("name"))
+            .and_then(|v| v.as_str()),
+        "skill" => input
+            .get("name")
+            .or_else(|| input.get("skill"))
+            .and_then(|v| v.as_str()),
+        // MCP — surface the tool ID.
+        "mcp" => input
+            .get("tool")
+            .or_else(|| input.get("name"))
+            .and_then(|v| v.as_str()),
+        // Sleep / wait.
+        "sleep" => {
+            let secs = input.get("seconds").and_then(|v| v.as_f64())?;
+            return Some(format!("{secs}s"));
+        }
+        _ => None,
+    };
+
+    let raw = raw?;
+    let single_line = raw
+        .lines()
+        .next()
+        .unwrap_or(raw)
+        .trim_end()
+        .trim_end_matches('\\');
+    let collapsed = single_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() > MAX_SUBJECT_LEN {
+        let mut truncated: String = collapsed.chars().take(MAX_SUBJECT_LEN).collect();
+        truncated.push('…');
+        Some(truncated)
+    } else {
+        Some(collapsed)
     }
 }
 
@@ -5187,5 +5306,128 @@ mod auto_compact_config_tests {
             text.contains(&format!("{AUTO_COMPACT_MAX_THRESHOLD}")),
             "help text must mention the max threshold ({AUTO_COMPACT_MAX_THRESHOLD}): {text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod extract_tool_subject_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::extract_tool_subject;
+    use serde_json::json;
+
+    #[test]
+    fn read_returns_file_path() {
+        let subj = extract_tool_subject("Read", &json!({"file_path": "src/main.rs"}));
+        assert_eq!(subj.as_deref(), Some("src/main.rs"));
+    }
+
+    #[test]
+    fn write_returns_file_path_case_insensitive() {
+        let subj = extract_tool_subject("write", &json!({"file_path": "out/log.txt"}));
+        assert_eq!(subj.as_deref(), Some("out/log.txt"));
+    }
+
+    #[test]
+    fn edit_and_appendfile_and_notebookedit_return_file_path() {
+        for name in ["Edit", "AppendFile", "NotebookEdit"] {
+            let subj = extract_tool_subject(name, &json!({"file_path": "notes.md"}));
+            assert_eq!(subj.as_deref(), Some("notes.md"), "tool: {name}");
+        }
+    }
+
+    #[test]
+    fn readfiles_summarises_count() {
+        let subj = extract_tool_subject(
+            "ReadFiles",
+            &json!({"file_paths": ["a.rs", "b.rs", "c.rs"]}),
+        );
+        assert_eq!(subj.as_deref(), Some("3 file(s)"));
+    }
+
+    #[test]
+    fn bash_collapses_newlines_to_a_single_line() {
+        let subj = extract_tool_subject(
+            "Bash",
+            &json!({"command": "cargo test\n  --workspace\n  -- --nocapture"}),
+        );
+        // Only the first command line is shown — multi-line bodies
+        // belong in the diff preview, not the post-completion row.
+        assert_eq!(subj.as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn bash_truncates_long_commands_with_ellipsis() {
+        let long_cmd = "a".repeat(200);
+        let subj = extract_tool_subject("Bash", &json!({"command": long_cmd}));
+        let s = subj.expect("subject");
+        assert!(s.ends_with('…'), "expected ellipsis suffix: {s}");
+        assert!(
+            s.chars().count() <= 81,
+            "expected ≤80 chars + ellipsis: len={}",
+            s.chars().count()
+        );
+    }
+
+    #[test]
+    fn webfetch_returns_url() {
+        let subj = extract_tool_subject("WebFetch", &json!({"url": "https://example.com/a"}));
+        assert_eq!(subj.as_deref(), Some("https://example.com/a"));
+    }
+
+    #[test]
+    fn websearch_returns_query() {
+        let subj = extract_tool_subject("WebSearch", &json!({"query": "rustyline highlight_char"}));
+        assert_eq!(subj.as_deref(), Some("rustyline highlight_char"));
+    }
+
+    #[test]
+    fn grep_returns_pattern() {
+        let subj = extract_tool_subject("Grep", &json!({"pattern": "TODO|FIXME", "path": "src/"}));
+        assert_eq!(subj.as_deref(), Some("TODO|FIXME"));
+    }
+
+    #[test]
+    fn todowrite_returns_first_todo_content() {
+        let subj = extract_tool_subject(
+            "TodoWrite",
+            &json!({"todos": [
+                {"content": "Diff preview", "status": "done"},
+                {"content": "Slash palette", "status": "in_progress"},
+            ]}),
+        );
+        assert_eq!(subj.as_deref(), Some("Diff preview"));
+    }
+
+    #[test]
+    fn agent_returns_subagent_type() {
+        let subj = extract_tool_subject(
+            "Agent",
+            &json!({"subagent_type": "generalPurpose", "prompt": "x"}),
+        );
+        assert_eq!(subj.as_deref(), Some("generalPurpose"));
+    }
+
+    #[test]
+    fn sleep_formats_seconds() {
+        let subj = extract_tool_subject("Sleep", &json!({"seconds": 5.0}));
+        assert_eq!(subj.as_deref(), Some("5s"));
+    }
+
+    #[test]
+    fn unknown_tool_returns_none() {
+        let subj = extract_tool_subject("DefinitelyNotARealTool", &json!({"foo": "bar"}));
+        assert!(subj.is_none());
+    }
+
+    #[test]
+    fn missing_input_field_returns_none() {
+        let subj = extract_tool_subject("Read", &json!({}));
+        assert!(subj.is_none());
+    }
+
+    #[test]
+    fn whitespace_only_subject_returns_none() {
+        let subj = extract_tool_subject("Read", &json!({"file_path": "   "}));
+        assert!(subj.is_none(), "expected None for whitespace-only path");
     }
 }
