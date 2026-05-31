@@ -1139,6 +1139,19 @@ fn run_interactive(
     let editor_suspend: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let editor_suspended: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
+    // Shift+Tab pressed inside the raw-mode editor sets this flag.
+    // The CLI consumes it in two places:
+    //   1. In `ask_callback` (next permission prompt) — return
+    //      `AllowAndSetMode(Bypass)` so the prompt resolves as
+    //      a fast "yes + YOLO".
+    //   2. After `repl.submit()` returns (turn boundary) — cycle
+    //      to the next mode like the between-turn rustyline
+    //      handler does, in case no permission prompt fired this
+    //      turn.
+    // Whichever consumer fires first wins; both call `.swap(false)`
+    // so the flag can't be applied twice.
+    let editor_mode_cycle: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
     let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
         match event {
             StreamingEvent::TextDelta { delta, .. } => {
@@ -1240,8 +1253,30 @@ fn run_interactive(
     let ask_editor_suspend = Arc::clone(&editor_suspend);
     let ask_editor_suspended = Arc::clone(&editor_suspended);
     let ask_raw_editor_active = Arc::clone(&raw_editor_active);
-    let ask_callback: deeptide_core::PermissionAskCallback =
-        Arc::new(move |tool_call: &ToolCall| {
+    let ask_editor_mode_cycle = Arc::clone(&editor_mode_cycle);
+    let ask_callback: deeptide_core::PermissionAskCallback = Arc::new(
+        move |tool_call: &ToolCall| {
+            // Shift+Tab pressed mid-turn before this prompt fired
+            // — resolve as a fast "yes + YOLO" without showing the
+            // [y]es/[n]o/[t]/[a] menu. This matches the
+            // single-key UX users expect: hit Shift+Tab, prompt
+            // disappears, mode flips to Bypass for the rest of
+            // the session.
+            //
+            // We print a one-line notice so the user sees the
+            // mode change instead of just observing tool calls
+            // suddenly stop prompting.
+            if ask_editor_mode_cycle.swap(false, Ordering::Relaxed) {
+                let mut out = io::stdout();
+                let line = if ask_use_color {
+                    "  \x1b[2m→ Shift+Tab: allowed this call and switched session to YOLO (Bypass)\x1b[0m"
+                } else {
+                    "  → Shift+Tab: allowed this call and switched session to YOLO (Bypass)"
+                };
+                let _ = writeln!(out, "{line}");
+                let _ = out.flush();
+                return AskOutcome::AllowAndSetMode(PermissionMode::Bypass);
+            }
             // If the raw-mode editor is live, take exclusive stdin
             // for the prompt. We:
             //   1. Raise `editor_suspend` so the pump observes the
@@ -1279,7 +1314,8 @@ fn run_interactive(
             }
 
             outcome
-        });
+        },
+    );
 
     // Shared state for "what tool is currently executing". The
     // agent_loop's `tool_progress_callback` writes here under its
@@ -1596,6 +1632,12 @@ fn run_interactive(
                             // so we reset them rather than swap.
                             editor_suspend.store(false, Ordering::Relaxed);
                             editor_suspended.store(false, Ordering::Relaxed);
+                            // editor_mode_cycle survives across turns
+                            // intentionally — if the user presses
+                            // Shift+Tab and we don't manage to apply
+                            // it this turn (e.g. the editor failed
+                            // to spawn), we still pick it up at the
+                            // turn-boundary check below.
                             let ctx = queue_editor::EditorContext {
                                 queue: repl.message_queue_handle(),
                                 stop: Arc::clone(&editor_stop),
@@ -1607,6 +1649,7 @@ fn run_interactive(
                                 line_width: terminal_width().unwrap_or(80),
                                 suspend: Arc::clone(&editor_suspend),
                                 suspended: Arc::clone(&editor_suspended),
+                                mode_cycle: Arc::clone(&editor_mode_cycle),
                             };
                             // Flip the suppression flag BEFORE spawning
                             // so the streaming handler's first tick sees
@@ -1664,6 +1707,24 @@ fn run_interactive(
                 editor_suspend.store(false, Ordering::Relaxed);
                 editor_suspended.store(false, Ordering::Relaxed);
                 raw_editor_active.store(false, Ordering::Relaxed);
+
+                // Apply any Shift+Tab the user pressed during the
+                // turn that wasn't already eaten by a permission
+                // prompt. Mirrors the between-turn rustyline arm so
+                // mid-turn Shift+Tab cycles modes identically to
+                // between-turn Shift+Tab: Default → AcceptEdits →
+                // Plan → Bypass → Default.
+                if editor_mode_cycle.swap(false, Ordering::Relaxed) {
+                    let next = next_permission_mode(repl.agent_loop().permission_mode());
+                    repl.set_permission_mode(next);
+                    let label = next.label();
+                    let line = if use_color {
+                        format!("  → mode \x1b[1m{label}\x1b[0m")
+                    } else {
+                        format!("  → mode {label}")
+                    };
+                    writeln!(stdout, "{line}").map_err(|error| error.to_string())?;
+                }
 
                 // Drain the streaming markdown buffer. The model often
                 // produces a trailing line without a final newline; without
