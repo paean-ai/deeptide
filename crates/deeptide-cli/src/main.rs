@@ -347,6 +347,14 @@ struct Cli {
     no_session_persistence: bool,
 
     #[arg(
+        long = "no-session-capture",
+        env = "DEEPTIDE_NO_SESSION_CAPTURE",
+        action = ArgAction::SetTrue,
+        help = "Skip the end-of-session memory consolidation pass so /exit and Ctrl-D return immediately."
+    )]
+    no_session_capture: bool,
+
+    #[arg(
         long = "settings",
         value_name = "PATH",
         help = "Merge an explicit settings.json file on top of the global/project/local scopes."
@@ -1834,6 +1842,7 @@ fn run_interactive(
         .with_hooks(hooks)
         .with_tool_restrictions(allowed_tools, disallowed_tools)
         .with_session_persistence(!cli.no_session_persistence)
+        .with_session_end_capture(!cli.no_session_capture)
         .with_additional_dirs(&cli.add_dir)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config))

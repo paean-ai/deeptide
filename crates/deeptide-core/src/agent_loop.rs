@@ -535,6 +535,15 @@ impl AgentLoop {
         self
     }
 
+    /// Mutable counterpart to [`with_max_turns`], for temporarily bounding a
+    /// one-off pass (e.g. end-of-session consolidation) without rebuilding the
+    /// loop. Returns the previous cap so the caller can restore it.
+    pub fn set_max_turns(&mut self, max_turns: usize) -> usize {
+        let prev = self.max_turns;
+        self.max_turns = max_turns.max(1);
+        prev
+    }
+
     /// Replace the context-window manager configuration used for auto-compaction
     /// (the soft token threshold and preserved-message window).
     pub fn with_context_window_config(mut self, config: ContextWindowConfig) -> Self {

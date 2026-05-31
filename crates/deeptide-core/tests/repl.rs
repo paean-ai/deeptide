@@ -1841,3 +1841,15 @@ fn version_command_falls_back_to_crate_version() {
     let out = only_output(repl.submit("/version"));
     assert!(out.contains("deeptide-rs"), "fallback should name the binary: {out}");
 }
+
+#[test]
+fn no_session_capture_makes_exit_instant() {
+    // With capture disabled, finalize_session must be a no-op even after a real
+    // turn — no consolidation pass, so /exit and Ctrl-D return immediately.
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_session_end_capture(false);
+    repl.submit("hello");
+    assert!(
+        repl.finalize_session().is_empty(),
+        "capture disabled must skip the end-of-session consolidation entirely"
+    );
+}

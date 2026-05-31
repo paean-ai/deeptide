@@ -259,6 +259,12 @@ const MIN_DREAM_CADENCE: usize = 1;
 const MAX_DREAM_CADENCE: usize = 500;
 const DEFAULT_DREAM_CADENCE: usize = 25;
 
+/// Turn cap for the end-of-session / `/dream` consolidation pass. It only needs
+/// a MemorySearch and a handful of MemoryWrite calls; bounding it here (instead
+/// of inheriting the session's `max_turns`, up to 200) keeps `/exit` and Ctrl-D
+/// from blocking on many model round-trips before the REPL returns.
+const CONSOLIDATION_MAX_TURNS: usize = 8;
+
 impl Default for DreamSchedule {
     fn default() -> Self {
         Self {
@@ -402,7 +408,7 @@ impl ReplSession {
         }
 
         let mut events = vec![ReplEvent::Output(String::from(
-            "[session end] consolidating memory…",
+            "[session end] consolidating memory… (skip next time with --no-session-capture)",
         ))];
         events.extend(self.run_dream_consolidation_once());
         events
@@ -786,11 +792,20 @@ impl ReplSession {
             - Do not add memories that are generic, obvious, temporary, secret, or unsupported by session history.\n\
             - Keep each memory shard concise and human-readable."
         );
-        self.agent_loop
+        // Bound the pass: consolidation is a MemorySearch + a few MemoryWrite
+        // calls, not open-ended agentic work. Without this it inherits the
+        // session `max_turns` (up to 200), so on `/exit` / Ctrl-D it could run
+        // many model round-trips before the REPL returned — a slow, unskippable
+        // exit. Cap it low, then restore the prior limit.
+        let prev_turns = self.agent_loop.set_max_turns(CONSOLIDATION_MAX_TURNS);
+        let events = self
+            .agent_loop
             .run(&prompt)
             .into_iter()
             .filter_map(agent_event_to_repl_event)
-            .collect()
+            .collect();
+        self.agent_loop.set_max_turns(prev_turns);
+        events
     }
 
     fn autosave_session(&self) {
