@@ -131,3 +131,45 @@ fn status_line_pins_todo_segment_through_each_storage_transition() {
         "post-cleanup render must not contain `todo`: {final_render}"
     );
 }
+
+/// Regression: on a narrow terminal the token/context indicator (`ctx`) must
+/// NOT be the first thing dropped. `StatusLine::render` keeps leading segments
+/// and prunes trailing ones, so this pins the priority ORDER — `ctx` must come
+/// before the longer, static `cwd`/`git` segments. The bug: a long working
+/// directory used to sit ahead of `ctx` and push it off a small tab entirely.
+#[test]
+fn status_line_keeps_ctx_when_narrow_and_drops_cwd_first() {
+    // Keep the global TODO storage clean so a `todo` segment doesn't perturb
+    // the segment positions this test reasons about.
+    write_todos(json!({ "todos": [] }));
+
+    let repl = ReplSession::new(Box::new(EchoBackend));
+
+    // Wide: everything fits, so we can read the intended priority order.
+    let wide = render_status(&repl, 200);
+    let ctx_at = wide
+        .find("ctx")
+        .expect("ctx segment present in wide render");
+    let cwd_at = wide
+        .find("cwd")
+        .expect("cwd segment present in wide render");
+    let git_at = wide
+        .find("git")
+        .expect("git segment present in wide render");
+    assert!(
+        ctx_at < cwd_at && ctx_at < git_at,
+        "ctx must precede cwd/git so it survives truncation; got order: {wide}"
+    );
+
+    // Narrow: at a width that can't fit `cwd`, the token indicator must still
+    // be shown (cwd is the one that drops).
+    let narrow = render_status(&repl, cwd_at);
+    assert!(
+        narrow.contains("ctx"),
+        "ctx must survive a width too small for cwd: {narrow:?}"
+    );
+    assert!(
+        !narrow.contains("cwd"),
+        "cwd should be pruned before ctx on a narrow terminal: {narrow:?}"
+    );
+}

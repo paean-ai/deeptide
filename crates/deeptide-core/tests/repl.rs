@@ -1825,3 +1825,71 @@ fn exit_with_no_turns_just_exits() {
         "no turns → plain exit, no pass"
     );
 }
+
+#[test]
+fn version_command_reports_injected_build_string() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend))
+        .with_version("deeptide-rs 0.2.0 (abc1234 2026-05-31)");
+    let out = only_output(repl.submit("/version"));
+    assert!(
+        out.contains("0.2.0"),
+        "version command should show the version: {out}"
+    );
+    assert!(
+        out.contains("abc1234"),
+        "should include injected provenance: {out}"
+    );
+}
+
+#[test]
+fn version_command_falls_back_to_crate_version() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let out = only_output(repl.submit("/version"));
+    assert!(
+        out.contains("deeptide-rs"),
+        "fallback should name the binary: {out}"
+    );
+}
+
+#[test]
+fn no_session_capture_makes_exit_instant() {
+    // With capture disabled, finalize_session must be a no-op even after a real
+    // turn — no consolidation pass, so /exit and Ctrl-D return immediately.
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_session_end_capture(false);
+    repl.submit("hello");
+    assert!(
+        repl.finalize_session().is_empty(),
+        "capture disabled must skip the end-of-session consolidation entirely"
+    );
+}
+
+#[test]
+fn model_menu_opens_for_bare_command_and_tags_current() {
+    let repl = ReplSession::new(Box::new(StaticBackend)).with_model("deepseek-chat");
+    // Bare /model → a picker; a concrete name → run directly (no menu).
+    let menu = repl
+        .menu_for("/model")
+        .expect("bare /model should open a picker");
+    assert_eq!(menu.title, "Switch model");
+    assert!(
+        menu.choices
+            .iter()
+            .any(|c| c.label.contains("deepseek-chat") && c.label.contains("current")),
+        "current model should lead and be tagged: {:?}",
+        menu.choices
+    );
+    assert!(menu.choices.iter().all(|c| c.action.starts_with("/model ")));
+    assert!(
+        repl.menu_for("/model flash").is_none(),
+        "a named model runs directly"
+    );
+}
+
+#[test]
+fn resume_menu_is_none_without_saved_sessions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(temp.path());
+    // No sessions on disk → no picker (falls through to the listing path).
+    assert!(repl.menu_for("/resume").is_none());
+    assert!(repl.menu_for("/resume some-id").is_none());
+}

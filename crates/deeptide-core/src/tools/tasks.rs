@@ -502,6 +502,18 @@ impl TodoSummary {
     }
 }
 
+/// The content of the next actionable todo: the first in-progress item, else
+/// the first pending one. `None` when the plan is empty or fully done. Used by
+/// the follow-up suggestion engine to propose "continue with <task>".
+pub fn next_actionable_todo() -> Option<String> {
+    let todos = todo_storage().lock().ok()?;
+    todos
+        .iter()
+        .find(|t| t.status == TodoStatus::InProgress)
+        .or_else(|| todos.iter().find(|t| t.status == TodoStatus::Pending))
+        .map(|t| t.content.clone())
+}
+
 /// Read the current todo storage and reduce it to a [`TodoSummary`].
 /// Public because the pinned status bar needs to surface this on
 /// every repaint, but the underlying `TodoItem` type stays private
