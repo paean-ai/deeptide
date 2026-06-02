@@ -168,6 +168,38 @@ pub struct ReplSession {
     /// via `/auto-compact on` because silently rewriting the
     /// transcript can surprise people the first time they hit it.
     auto_compact: AutoCompactConfig,
+    /// Build/version string for `/version`, injected by the CLI (which owns the
+    /// git-provenance build vars). `None` falls back to the crate version.
+    version_info: Option<String>,
+    /// Whether to offer follow-up prompt suggestions after a task finishes.
+    suggestions_enabled: bool,
+    /// The suggestions shown after the last turn, so a bare numeric input
+    /// (`1`/`2`/`3`) on the next line expands to the chosen follow-up prompt.
+    last_suggestions: Vec<crate::suggestions::Suggestion>,
+    /// An interactive menu awaiting a numeric pick (e.g. the session list shown
+    /// by a bare `/import`). Each entry's `action` is a line re-submitted when
+    /// chosen. Takes precedence over `last_suggestions` for a bare number.
+    pending_menu: Vec<ReplMenuChoice>,
+}
+
+/// One row of an interactive `/command` selection menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplMenuChoice {
+    /// Display text shown next to the number / in the picker.
+    pub label: String,
+    /// Line re-submitted verbatim when this row is chosen (a slash command or
+    /// a prompt).
+    pub action: String,
+}
+
+/// A selectable menu a `/command` wants to present. A rich CLI renders this as
+/// an interactive picker (type-to-filter, arrows, Enter); a plain/non-TTY host
+/// falls back to the numbered text form and a numeric reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplMenu {
+    pub title: String,
+    pub footer: String,
+    pub choices: Vec<ReplMenuChoice>,
 }
 
 /// Runtime configuration for the smart auto-compact feature.
@@ -256,6 +288,12 @@ const MIN_DREAM_CADENCE: usize = 1;
 const MAX_DREAM_CADENCE: usize = 500;
 const DEFAULT_DREAM_CADENCE: usize = 25;
 
+/// Turn cap for the end-of-session / `/dream` consolidation pass. It only needs
+/// a MemorySearch and a handful of MemoryWrite calls; bounding it here (instead
+/// of inheriting the session's `max_turns`, up to 200) keeps `/exit` and Ctrl-D
+/// from blocking on many model round-trips before the REPL returns.
+const CONSOLIDATION_MAX_TURNS: usize = 8;
+
 impl Default for DreamSchedule {
     fn default() -> Self {
         Self {
@@ -297,7 +335,26 @@ impl ReplSession {
             checkpoints: crate::checkpoints::CheckpointStore::new(),
             last_context_warn_bucket: 0,
             auto_compact: AutoCompactConfig::default(),
+            version_info: None,
+            suggestions_enabled: true,
+            last_suggestions: Vec::new(),
+            pending_menu: Vec::new(),
         }
+    }
+
+    /// Enable or disable follow-up suggestions (`--no-suggestions` turns them
+    /// off). When off, no "Next steps" block is shown and numeric pick is inert.
+    pub fn with_suggestions(mut self, enabled: bool) -> Self {
+        self.suggestions_enabled = enabled;
+        self
+    }
+
+    /// Inject the build/version string shown by `/version`. The CLI passes its
+    /// full provenance line (version + git hash + date); core alone can't see
+    /// the CLI crate's build vars.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version_info = Some(version.into());
+        self
     }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
@@ -390,7 +447,7 @@ impl ReplSession {
         }
 
         let mut events = vec![ReplEvent::Output(String::from(
-            "[session end] consolidating memory…",
+            "[session end] consolidating memory… (skip next time with --no-session-capture)",
         ))];
         events.extend(self.run_dream_consolidation_once());
         events
@@ -438,6 +495,57 @@ impl ReplSession {
         self.agent_loop.restore_messages(messages);
         self.session_id = session_id.to_owned();
         Ok(count)
+    }
+
+    /// `/suggest [on|off|show]` — toggle or re-display follow-up suggestions.
+    fn execute_suggest_command(&mut self, args: &str) -> CommandResult {
+        match args.trim().to_ascii_lowercase().as_str() {
+            "on" | "enable" => {
+                self.suggestions_enabled = true;
+                CommandResult::Text(String::from("Follow-up suggestions enabled."))
+            }
+            "off" | "disable" => {
+                self.suggestions_enabled = false;
+                self.last_suggestions.clear();
+                CommandResult::Text(String::from("Follow-up suggestions disabled."))
+            }
+            "" | "show" | "status" => {
+                if !self.suggestions_enabled {
+                    return CommandResult::Text(String::from(
+                        "Follow-up suggestions are OFF. Enable with /suggest on.",
+                    ));
+                }
+                match crate::suggestions::render_block(&self.last_suggestions) {
+                    Some(block) => CommandResult::Text(block),
+                    None => CommandResult::Text(String::from(
+                        "No suggestions yet — they appear after a task finishes.",
+                    )),
+                }
+            }
+            other => CommandResult::Text(format!("Usage: /suggest [on|off|show] (got `{other}`)")),
+        }
+    }
+
+    /// `/version` — show the running build. Uses the CLI-injected provenance
+    /// string when present, else the core crate version.
+    fn execute_version_command(&self) -> CommandResult {
+        let body = self
+            .version_info
+            .clone()
+            .unwrap_or_else(|| format!("deeptide-rs {}", env!("CARGO_PKG_VERSION")));
+        CommandResult::Text(body)
+    }
+
+    /// CLI-facing entry for `/import` — same arg grammar as the slash command
+    /// (`<tool> [<id>|--latest] [--as memory|context]`). Returns the events the
+    /// REPL would emit so the caller can render them identically.
+    pub fn run_import(&mut self, args: &str) -> Vec<ReplEvent> {
+        self.execute_import_command(args)
+    }
+
+    /// CLI-facing entry for `/continue` — newest foreign session → live handoff.
+    pub fn run_continue(&mut self, args: &str) -> Vec<ReplEvent> {
+        self.execute_continue_command(args)
     }
 
     pub fn with_pricing_overrides(
@@ -529,6 +637,36 @@ impl ReplSession {
             return Vec::new();
         }
 
+        let numeric = trimmed.parse::<usize>().ok();
+
+        // Numeric pick of an interactive menu (e.g. a bare `/import`'s session
+        // list). Highest precedence — a menu is an explicit, just-shown prompt.
+        if !self.pending_menu.is_empty()
+            && let Some(choice) = numeric
+            && choice >= 1
+            && choice <= self.pending_menu.len()
+        {
+            let action = self.pending_menu[choice - 1].action.clone();
+            self.pending_menu.clear();
+            return self.submit(&action);
+        }
+        // Any other input dismisses a stale menu so a later bare number can't
+        // accidentally trigger it.
+        self.pending_menu.clear();
+
+        // Numeric pick of a follow-up suggestion from the previous turn: a bare
+        // `1`/`2`/`3` in range expands to that suggestion's prompt and runs it
+        // as a normal turn. Cleared first so it can't re-trigger or recurse.
+        if !self.last_suggestions.is_empty()
+            && let Some(choice) = numeric
+            && choice >= 1
+            && choice <= self.last_suggestions.len()
+        {
+            let prompt = self.last_suggestions[choice - 1].prompt.clone();
+            self.last_suggestions.clear();
+            return self.submit(&prompt);
+        }
+
         if let Some(command_line) = trimmed.strip_prefix('/') {
             return self.execute_command(command_line);
         }
@@ -554,6 +692,7 @@ impl ReplSession {
 
         self.user_turn_count += 1;
         let turns_before = self.agent_loop.cost_tracker().summary().turns.len();
+        let messages_before = self.agent_loop.messages().len();
         events.extend(
             self.agent_loop
                 .run(&prompt_to_agent)
@@ -606,8 +745,54 @@ impl ReplSession {
             events.extend(dream_events);
         }
 
+        // Offer follow-up suggestions for the task that just finished. Derived
+        // deterministically from this turn's signals (tools run, errors, active
+        // TODO, closing text) — no extra model call. Stored so a bare `1`/`2`
+        // next line expands to the chosen prompt.
+        if self.suggestions_enabled {
+            let signals = self.collect_turn_signals(messages_before);
+            let suggestions = crate::suggestions::suggest(&signals);
+            if let Some(block) = crate::suggestions::render_block(&suggestions) {
+                events.push(ReplEvent::Output(block));
+            }
+            self.last_suggestions = suggestions;
+        }
+
         self.autosave_session();
         events
+    }
+
+    /// Read the signals the suggestion engine needs from the messages this turn
+    /// appended (assistant tool calls, tool errors, shell commands, closing
+    /// text) plus the current TODO state.
+    fn collect_turn_signals(&self, messages_before: usize) -> crate::suggestions::TurnSignals {
+        let mut signals = crate::suggestions::TurnSignals {
+            next_todo: crate::tools::next_actionable_todo(),
+            ..Default::default()
+        };
+        let messages = self.agent_loop.messages();
+        for message in messages.iter().skip(messages_before) {
+            for call in &message.tool_calls {
+                match call.name.as_str() {
+                    "Edit" | "Write" | "NotebookEdit" | "MultiEdit" => signals.edited_files = true,
+                    "Bash" => {
+                        if let Some(cmd) = call.input.get("command").and_then(|v| v.as_str()) {
+                            signals.bash_commands.push(cmd.to_owned());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if message.tool_results.iter().any(|r| r.is_error) {
+                signals.had_tool_error = true;
+            }
+            if message.role == crate::agent_loop::MessageRole::Assistant
+                && !message.content.trim().is_empty()
+            {
+                signals.assistant_text = message.content.clone();
+            }
+        }
+        signals
     }
 
     /// Inspect the current transcript size against the model's window
@@ -752,11 +937,20 @@ impl ReplSession {
             - Do not add memories that are generic, obvious, temporary, secret, or unsupported by session history.\n\
             - Keep each memory shard concise and human-readable."
         );
-        self.agent_loop
+        // Bound the pass: consolidation is a MemorySearch + a few MemoryWrite
+        // calls, not open-ended agentic work. Without this it inherits the
+        // session `max_turns` (up to 200), so on `/exit` / Ctrl-D it could run
+        // many model round-trips before the REPL returned — a slow, unskippable
+        // exit. Cap it low, then restore the prior limit.
+        let prev_turns = self.agent_loop.set_max_turns(CONSOLIDATION_MAX_TURNS);
+        let events = self
+            .agent_loop
             .run(&prompt)
             .into_iter()
             .filter_map(agent_event_to_repl_event)
-            .collect()
+            .collect();
+        self.agent_loop.set_max_turns(prev_turns);
+        events
     }
 
     fn autosave_session(&self) {
@@ -852,11 +1046,18 @@ impl ReplSession {
             crate::Severity::Neutral
         };
 
+        // Segment order IS priority order: `StatusLine::render` keeps the
+        // leading segments and drops the trailing ones first when the terminal
+        // is too narrow to fit them all. So the high-value, volatile session
+        // metrics the user actively watches — `model`, `mode`, and especially
+        // `ctx` (context/token usage) — lead, and the longer, more static
+        // context (`cwd`, `git`) plus the low-priority `turns`/`cost` trail and
+        // get pruned first. Putting `cwd`/`git` ahead of `ctx` (as we used to)
+        // let a long working-directory path push the token indicator off a
+        // narrow tab entirely — the exact thing the user shouldn't lose.
         let mut segments = vec![
             StatusSegment::new("model", self.agent_loop.model()),
             StatusSegment::new("mode", mode_label).with_severity(mode_severity),
-            StatusSegment::new("cwd", cwd),
-            StatusSegment::new("git", branch),
             StatusSegment::new("ctx", ctx_value).with_severity(ctx_severity),
         ];
         if let Some(auth) = auth {
@@ -898,6 +1099,11 @@ impl ReplSession {
                 format!("{}/{}", active, todo.total()),
             ));
         }
+        // Static context — useful but recoverable elsewhere (`pwd`, the shell
+        // prompt, `git status`), so it trails the live metrics and is the first
+        // thing dropped on a narrow terminal.
+        segments.push(StatusSegment::new("cwd", cwd));
+        segments.push(StatusSegment::new("git", branch));
         segments.push(StatusSegment::new(
             "turns",
             format!("{}/{}", summary.turns.len(), self.agent_loop.max_turns()),
@@ -1004,6 +1210,10 @@ impl ReplSession {
             "keybindings" | "keys" => self.execute_keybindings_command(args),
             "sessions" | "session" => self.execute_sessions_command(args),
             "resume" | "load" | "restore" => self.execute_resume_command(args),
+            "import" => return self.execute_import_command(args),
+            "continue" | "handoff" => return self.execute_continue_command(args),
+            "version" | "ver" => self.execute_version_command(),
+            "suggest" | "suggestions" => self.execute_suggest_command(args),
             "open" => self.execute_open_command(args),
             "paste" | "p" => self.execute_paste_command(args),
             "doctor" => self.execute_doctor_command(args),
@@ -1371,8 +1581,20 @@ impl ReplSession {
     }
 
     fn execute_sessions_command(&self, args: &str) -> CommandResult {
-        if args.split_whitespace().count() > 1 {
-            return CommandResult::Text(String::from("Usage: /sessions [filter]"));
+        // `--all` widens the listing to importable sessions from other agents
+        // (Claude Code, Codex) discovered for this project.
+        let want_all = args.split_whitespace().any(|a| a == "--all" || a == "-a");
+        let filter_args: Vec<&str> = args
+            .split_whitespace()
+            .filter(|a| *a != "--all" && *a != "-a")
+            .collect();
+        if filter_args.len() > 1 {
+            return CommandResult::Text(String::from("Usage: /sessions [filter] [--all]"));
+        }
+        let args = filter_args.first().copied().unwrap_or("");
+
+        if want_all {
+            return self.execute_sessions_all_command(args);
         }
 
         let entries = SessionStore::list(&self.tool_context.cwd);
@@ -1418,6 +1640,47 @@ impl ReplSession {
         CommandResult::Text(lines.join("\n"))
     }
 
+    /// `/sessions --all`: native deeptide sessions plus importable sessions
+    /// from other agents (Claude Code, Codex), newest first.
+    fn execute_sessions_all_command(&self, filter: &str) -> CommandResult {
+        let refs = crate::import::discover(&self.tool_context.cwd);
+        let native = SessionStore::list(&self.tool_context.cwd);
+        if refs.is_empty() && native.is_empty() {
+            return CommandResult::Text(String::from(
+                "No sessions found for this project (deeptide, Claude Code, or Codex).",
+            ));
+        }
+        let filter = filter.trim().to_ascii_lowercase();
+        let mut lines = vec![String::from("Importable sessions (newest first):")];
+        let mut shown = 0;
+        for r in refs.iter() {
+            if shown >= 25 {
+                break;
+            }
+            let id = session_short(&r.session_id);
+            if !filter.is_empty() && !id.to_ascii_lowercase().contains(&filter) {
+                continue;
+            }
+            lines.push(format!(
+                "  [{}] {}  →  /import {} {}",
+                r.source.label(),
+                id,
+                r.source.label(),
+                id,
+            ));
+            shown += 1;
+        }
+        if shown == 0 {
+            lines.push(String::from("  (none matched)"));
+        }
+        lines.push(String::new());
+        lines.push(String::from(
+            "Use `/import <tool> <id> --as memory` to distil it, or `--as context` \
+             (or `/continue <tool>`) for a live handoff.",
+        ));
+        CommandResult::Text(lines.join("\n"))
+    }
+
     fn execute_resume_command(&mut self, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.split_whitespace().count() > 1 {
@@ -1438,6 +1701,493 @@ impl ReplSession {
             }
             Err(e) => CommandResult::Text(format!("Cannot resume: {e}")),
         }
+    }
+
+    /// Whether `line` (a full input line) would open an interactive selection
+    /// menu, and the menu's data if so. Pure / side-effect-free: a rich CLI
+    /// calls this BEFORE `submit` to render a picker; returning `None` means
+    /// "just submit it normally".
+    pub fn menu_for(&self, line: &str) -> Option<ReplMenu> {
+        let command = line.trim().strip_prefix('/')?;
+        let (name, args) = command
+            .split_once(char::is_whitespace)
+            .unwrap_or((command, ""));
+        match name.to_ascii_lowercase().as_str() {
+            "import" => self.import_menu_for_args(args),
+            "resume" | "load" | "restore" => self.resume_menu(args),
+            "model" | "m" => self.model_menu(args),
+            _ => None,
+        }
+    }
+
+    /// `/resume` (no id) → a picker of saved sessions for this project; each row
+    /// resumes that session. `None` when an id is given or there are none.
+    fn resume_menu(&self, args: &str) -> Option<ReplMenu> {
+        if !args.trim().is_empty() {
+            return None;
+        }
+        let choices: Vec<ReplMenuChoice> = SessionStore::list(&self.tool_context.cwd)
+            .into_iter()
+            .take(30)
+            .map(|entry| {
+                let preview = if entry.preview.is_empty() {
+                    "(empty)".to_owned()
+                } else {
+                    entry.preview.clone()
+                };
+                ReplMenuChoice {
+                    label: format!(
+                        "{}  \"{}\"  ({} msgs)",
+                        session_short(&entry.session_id),
+                        preview,
+                        entry.message_count
+                    ),
+                    action: format!("/resume {}", entry.session_id),
+                }
+            })
+            .collect();
+        if choices.is_empty() {
+            return None;
+        }
+        Some(ReplMenu {
+            title: String::from("Resume a session"),
+            footer: String::from(
+                "/sessions for the full list  ·  /sessions --all to import from other agents",
+            ),
+            choices,
+        })
+    }
+
+    /// `/model` (no name) → a picker of known models; each row switches to it.
+    /// `None` when a name is given. The current model leads and is tagged.
+    fn model_menu(&self, args: &str) -> Option<ReplMenu> {
+        if !args.trim().is_empty() {
+            return None;
+        }
+        let current = self.agent_loop.model().to_owned();
+        let mut names: Vec<String> = vec![current.clone()];
+        for model in crate::cost::known_models() {
+            if !names.iter().any(|n| n == model.name) {
+                names.push(model.name.to_owned());
+            }
+        }
+        let choices: Vec<ReplMenuChoice> = names
+            .into_iter()
+            .map(|name| {
+                let tag = if name == current { "  · current" } else { "" };
+                ReplMenuChoice {
+                    label: format!("{name}{tag}"),
+                    action: format!("/model {name}"),
+                }
+            })
+            .collect();
+        Some(ReplMenu {
+            title: String::from("Switch model"),
+            footer: String::from("or type a name/alias directly: /model <name|flash|pro>"),
+            choices,
+        })
+    }
+
+    /// The `/import` menu for the given args, or `None` when the args name a
+    /// concrete session (so it should import directly, not open a menu) or no
+    /// sessions exist.
+    fn import_menu_for_args(&self, args: &str) -> Option<ReplMenu> {
+        let mut tokens = args.split_whitespace().peekable();
+        let only = match tokens.next() {
+            None => None, // bare `/import` → all sources
+            Some(raw) => Some(crate::import::SourceTool::parse(raw)?),
+        };
+        // A concrete selector or an explicit --as means "not a menu".
+        let mut has_selector = false;
+        let mut mode_given = false;
+        while let Some(tok) = tokens.next() {
+            if tok == "--as" || tok == "-a" {
+                mode_given = true;
+                let _ = tokens.next();
+            } else {
+                has_selector = true;
+            }
+        }
+        if has_selector || mode_given {
+            return None;
+        }
+        self.import_menu(only)
+    }
+
+    /// Build the `/import` selection menu: one row per discovered session
+    /// (optionally filtered to `only`), newest first. Choosing a row hands that
+    /// session off into the live conversation. `None` when there are none.
+    fn import_menu(&self, only: Option<crate::import::SourceTool>) -> Option<ReplMenu> {
+        let sessions: Vec<_> = crate::import::discover(&self.tool_context.cwd)
+            .into_iter()
+            .filter(|r| only.is_none_or(|s| r.source == s))
+            .take(20)
+            .collect();
+        if sessions.is_empty() {
+            return None;
+        }
+        let mut choices: Vec<ReplMenuChoice> = Vec::with_capacity(sessions.len() + 1);
+        // Lead with the bulk action — "stand on all prior work" — when there's
+        // more than one session to fold in.
+        if sessions.len() > 1 {
+            choices.push(ReplMenuChoice {
+                label: format!(
+                    "✨ Import ALL {} sessions into long-term memory",
+                    sessions.len()
+                ),
+                action: String::from("/import all"),
+            });
+        }
+        choices.extend(sessions.iter().enumerate().map(|(i, r)| {
+            let id = session_short(&r.session_id);
+            let newest = if i == 0 { " · newest" } else { "" };
+            ReplMenuChoice {
+                label: format!(
+                    "[{}] {id}{newest} — continue here (handoff)",
+                    r.source.label()
+                ),
+                action: format!("/import {} {} --as context", r.source.label(), r.session_id),
+            }
+        }));
+        Some(ReplMenu {
+            title: String::from("Select a session to continue"),
+            footer: String::from(
+                "Distil one into memory: /import <tool> <id> --as memory  ·  /sessions --all  ·  import sends session content to your model",
+            ),
+            choices,
+        })
+    }
+
+    /// Store a menu for numeric-pick and render its numbered text form (the
+    /// fallback path when the host can't run an interactive picker).
+    fn present_menu(&mut self, menu: ReplMenu) -> Vec<ReplEvent> {
+        let mut lines = vec![format!("{} (type a number):", menu.title)];
+        for (i, choice) in menu.choices.iter().enumerate() {
+            lines.push(format!("  {}. {}", i + 1, choice.label));
+        }
+        if !menu.footer.is_empty() {
+            lines.push(format!("  {}", menu.footer));
+        }
+        self.pending_menu = menu.choices;
+        self.last_suggestions.clear();
+        vec![ReplEvent::Output(lines.join("\n"))]
+    }
+
+    /// First-run onboarding: if deeptide hasn't been used here before AND there
+    /// are importable sessions from other agents for this project, return a hint
+    /// nudging the user to import them (especially `/import all`). The host
+    /// prints it once after the welcome banner and then calls [`mark_onboarded`].
+    pub fn first_run_import_hint(&self) -> Option<String> {
+        if !is_first_run() {
+            return None;
+        }
+        let count = crate::import::discover(&self.tool_context.cwd).len();
+        if count == 0 {
+            return None;
+        }
+        Some(format!(
+            "Found {count} prior session(s) from Claude Code / Codex in this project.\n\
+             Start with their context instead of from scratch:\n\
+             \x20 /import all   distil every past session into long-term memory (recommended)\n\
+             \x20 /import       pick one session to continue here\n\
+             \x20 (import sends those sessions' content to your configured model.)"
+        ))
+    }
+
+    /// Numbered-text fallback for `/import`'s menu (used by non-TTY hosts).
+    fn present_import_menu(&mut self, only: Option<crate::import::SourceTool>) -> Vec<ReplEvent> {
+        match self.import_menu(only) {
+            Some(menu) => self.present_menu(menu),
+            None => {
+                let scope = only.map(|s| s.label()).unwrap_or("any agent");
+                vec![ReplEvent::Output(format!(
+                    "No importable sessions found for this project ({scope}). Sessions \
+                     come from Claude Code, Codex, or deeptide for this directory."
+                ))]
+            }
+        }
+    }
+
+    /// Resolve `<source> [<id>|--latest]` to a concrete foreign session for the
+    /// current project. Empty/`--latest`/`latest` picks the newest.
+    fn resolve_import_ref(
+        &self,
+        source: crate::import::SourceTool,
+        selector: &str,
+    ) -> Result<crate::import::SessionRef, String> {
+        crate::import::resolve_ref(&self.tool_context.cwd, source, selector)
+    }
+
+    /// `/import <tool> [<id>|--latest] [--as memory|context]` — bring an
+    /// external agent's session into deeptide. `--as memory` (default) distils
+    /// durable facts via the consolidation pass; `--as context` splices a
+    /// framed handoff block into the live conversation.
+    fn execute_import_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let mut tokens = args.split_whitespace().peekable();
+
+        // Bare `/import` (no source) — show an interactive menu of every
+        // importable session for this project instead of a usage line.
+        let Some(source_raw) = tokens.next() else {
+            return self.present_import_menu(None);
+        };
+        // `/import all` — distil EVERY discovered session into long-term memory
+        // (the first-install "stand on prior work" bootstrap).
+        if source_raw.eq_ignore_ascii_case("all") {
+            return self.import_all_to_memory();
+        }
+        let Some(source) = crate::import::SourceTool::parse(source_raw) else {
+            return vec![ReplEvent::Output(format!(
+                "Unknown source `{source_raw}`. Use claude, codex, or deeptide."
+            ))];
+        };
+        // Split remaining args into a selector and an `--as <mode>`.
+        let mut selector = String::new();
+        let mut mode = "memory";
+        let mut mode_given = false;
+        while let Some(tok) = tokens.next() {
+            if tok == "--as" || tok == "-a" {
+                if let Some(m) = tokens.next() {
+                    mode_given = true;
+                    mode = match m {
+                        "context" | "handoff" => "context",
+                        _ => "memory",
+                    };
+                }
+            } else if selector.is_empty() {
+                selector = tok.to_owned();
+            }
+        }
+
+        // `/import <tool>` with no session AND no mode → menu of that tool's
+        // sessions, so the user picks rather than silently getting the newest.
+        if selector.is_empty() && !mode_given {
+            return self.present_import_menu(Some(source));
+        }
+
+        let session_ref = match self.resolve_import_ref(source, &selector) {
+            Ok(r) => r,
+            Err(e) => return vec![ReplEvent::Output(e)],
+        };
+        let transcript = match crate::import::parse_file(&session_ref.path, source) {
+            Ok(t) => t,
+            Err(e) => return vec![ReplEvent::Output(format!("Cannot read session: {e}"))],
+        };
+
+        if mode == "context" {
+            self.import_as_context(transcript)
+        } else {
+            self.import_as_memory(transcript)
+        }
+    }
+
+    /// `/continue [tool]` — newest foreign session → live handoff. Convenience
+    /// over `/import <tool> --latest --as context`; defaults to Claude.
+    fn execute_continue_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let source_raw = args.split_whitespace().next().unwrap_or("claude");
+        let Some(source) = crate::import::SourceTool::parse(source_raw) else {
+            return vec![ReplEvent::Output(format!(
+                "Unknown source `{source_raw}`. Use claude, codex, or deeptide."
+            ))];
+        };
+        let session_ref = match self.resolve_import_ref(source, "--latest") {
+            Ok(r) => r,
+            Err(e) => return vec![ReplEvent::Output(e)],
+        };
+        match crate::import::parse_file(&session_ref.path, source) {
+            Ok(t) => self.import_as_context(t),
+            Err(e) => vec![ReplEvent::Output(format!("Cannot read session: {e}"))],
+        }
+    }
+
+    /// `/import all` — distil EVERY discovered session (Claude Code, Codex,
+    /// deeptide) for this project into long-term memory in ONE consolidation
+    /// pass. Flattened transcripts are concatenated newest-first up to a byte
+    /// budget so a deep history doesn't blow the window; the model dedups via
+    /// MemorySearch as usual.
+    fn import_all_to_memory(&mut self) -> Vec<ReplEvent> {
+        const MAX_SESSIONS: usize = 15;
+        const CHAR_BUDGET: usize = 60_000;
+
+        let refs: Vec<_> = crate::import::discover(&self.tool_context.cwd)
+            .into_iter()
+            .take(MAX_SESSIONS)
+            .collect();
+        if refs.is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "No importable sessions found for this project (Claude Code, Codex, or deeptide).",
+            ))];
+        }
+
+        let mut combined = String::new();
+        let mut included = 0usize;
+        let mut skipped = 0usize;
+        for r in &refs {
+            let Ok(transcript) = crate::import::parse_file(&r.path, r.source) else {
+                continue;
+            };
+            let flat = crate::import::flatten_for_extraction(&transcript);
+            if flat.trim().is_empty() {
+                continue;
+            }
+            if combined.len() + flat.len() > CHAR_BUDGET && included > 0 {
+                skipped += 1;
+                continue;
+            }
+            combined.push_str(&format!(
+                "\n\n===== {} session {} =====\n",
+                r.source.label(),
+                session_short(&r.session_id)
+            ));
+            combined.push_str(&flat);
+            included += 1;
+        }
+        if included == 0 {
+            return vec![ReplEvent::Output(String::from(
+                "Found sessions, but none had distillable conversational content.",
+            ))];
+        }
+
+        let cwd = self.tool_context.cwd.display().to_string();
+        let prompt = format!(
+            "[bulk session import — execute once, do NOT create cron jobs or loops]\n\n\
+            You are importing context from {included} previous coding sessions (Claude Code, \
+            Codex, deeptide) into deeptide's long-term memory for workspace:\n{cwd}\n\n\
+            Below are the flattened transcripts, separated by `===== … =====` headers. Extract \
+            the DURABLE, reusable project facts, decisions, conventions, environment \
+            constraints, and unresolved follow-ups that recur across them — favour facts that \
+            show up in more than one session.\n\n\
+            Rules:\n\
+            - Persist each kept fact with the `MemoryWrite` tool (scope `project` unless it is a \
+            cross-project user preference, then `global`).\n\
+            - Before each write, call `MemorySearch`; if a fact is already stored, skip it — do \
+            NOT write duplicates (there will be overlap across sessions).\n\
+            - Do not import one-off task details, transient state, secrets, or anything not \
+            durable.\n\
+            - Execute exactly once; do not edit settings, cron, or provider config.\n\n\
+            Transcripts:\n{combined}"
+        );
+
+        let tail = if skipped > 0 {
+            format!(" ({skipped} older session(s) skipped for length)")
+        } else {
+            String::new()
+        };
+        let mut events = vec![ReplEvent::Output(format!(
+            "[import] distilling {included} session(s) into long-term memory{tail} \
+             (sends their content to your configured model)…"
+        ))];
+        // Bulk distillation may touch more facts than a single session; give it
+        // a slightly higher ceiling than the end-of-session pass, still bounded.
+        events.extend(self.run_memory_consolidation(&prompt, CONSOLIDATION_MAX_TURNS * 3));
+        events
+    }
+
+    /// Run a one-off memory-consolidation pass over `prompt`, restricted to the
+    /// memory tools only and bounded to `max_turns`, restoring both afterwards.
+    ///
+    /// The tool allowlist matters because `prompt` embeds imported, potentially
+    /// untrusted transcript text (a past session may have pasted web/file
+    /// content). Even if that text tries to prompt-inject, the pass can only
+    /// `MemorySearch` / `MemoryWrite` — never run a shell, edit files, or touch
+    /// settings/cron/provider config — instead of relying on prose guardrails.
+    fn run_memory_consolidation(&mut self, prompt: &str, max_turns: usize) -> Vec<ReplEvent> {
+        let prev_turns = self.agent_loop.set_max_turns(max_turns);
+        let (prev_allowed, prev_disallowed) = self.agent_loop.set_tool_restrictions(
+            Some(vec![
+                String::from("MemorySearch"),
+                String::from("MemoryWrite"),
+            ]),
+            Vec::new(),
+        );
+        let events = self
+            .agent_loop
+            .run(prompt)
+            .into_iter()
+            .filter_map(agent_event_to_repl_event)
+            .collect::<Vec<_>>();
+        self.agent_loop
+            .set_tool_restrictions(prev_allowed, prev_disallowed);
+        self.agent_loop.set_max_turns(prev_turns);
+        events
+    }
+
+    /// Distil an imported transcript into durable memory shards by running the
+    /// consolidation pass seeded with its flattened text. Reuses the same
+    /// agent-driven `MemoryWrite` path as `/dream`, so dedup + scope rules
+    /// apply unchanged.
+    fn import_as_memory(
+        &mut self,
+        transcript: crate::import::ImportedTranscript,
+    ) -> Vec<ReplEvent> {
+        let flat = crate::import::flatten_for_extraction(&transcript);
+        if flat.trim().is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "Imported session has no conversational content to distil.",
+            ))];
+        }
+        let source = transcript.source.label();
+        let cwd = self.tool_context.cwd.display().to_string();
+        let prompt = format!(
+            "[session import — execute once, do NOT create cron jobs or loops]\n\n\
+            You are importing context from a previous {source} session into deeptide's \
+            long-term memory for workspace:\n{cwd}\n\n\
+            Below is the conversational transcript of that session. Extract durable, \
+            reusable project facts, decisions, conventions, constraints, and unresolved \
+            follow-ups worth remembering for future sessions.\n\n\
+            Rules:\n\
+            - Persist each kept fact with the `MemoryWrite` tool (scope `project` unless it \
+            is a cross-project user preference, then `global`).\n\
+            - Before writing, call `MemorySearch`; if a fact is already stored, skip it — \
+            do NOT write duplicates.\n\
+            - Do not import one-off task details, transient state, secrets, or anything not \
+            durable.\n\
+            - Execute exactly once; do not edit settings, cron, or provider config.\n\n\
+            Transcript:\n{flat}"
+        );
+        let mut events = vec![ReplEvent::Output(format!(
+            "[import] distilling {} conversational turns from {source} session {} into memory \
+             (sends the transcript to your configured model)…",
+            transcript.message_turns(),
+            session_short(&transcript.session_id),
+        ))];
+        events.extend(self.run_memory_consolidation(&prompt, CONSOLIDATION_MAX_TURNS));
+        events
+    }
+
+    /// Splice a framed handoff block (older turns noted, recent tail verbatim)
+    /// to the FRONT of the live conversation so it's a stable, cache-friendly
+    /// prefix. Snapshots the pre-splice transcript first so `/rewind` undoes it.
+    fn import_as_context(
+        &mut self,
+        transcript: crate::import::ImportedTranscript,
+    ) -> Vec<ReplEvent> {
+        if transcript.message_turns() == 0 {
+            return vec![ReplEvent::Output(String::from(
+                "Imported session has no conversational content to hand off.",
+            ))];
+        }
+        // Snapshot the current transcript so the splice is undoable via /rewind.
+        // (No-op when the conversation is still empty.)
+        self.snapshot_checkpoint("before import handoff");
+
+        const RECENT_TAIL: usize = 8;
+        let handoff = crate::import::handoff_message(&transcript, RECENT_TAIL);
+        let mut combined = vec![handoff];
+        combined.extend(self.agent_loop.messages().to_vec());
+        // `replace_messages` (not `restore_messages`): this AUGMENTS history, so
+        // the cumulative cost/turn telemetry in the status bar must be preserved,
+        // not reset as it would be for resuming a saved session.
+        self.agent_loop.replace_messages(combined);
+
+        let source = transcript.source.label();
+        vec![ReplEvent::Output(format!(
+            "[import] handed off {} turns from {source} session {} into the live \
+             conversation (recent {} kept verbatim). Continue where it left off; \
+             use `/import {source} --as memory` for the full durable context.",
+            transcript.message_turns(),
+            session_short(&transcript.session_id),
+            RECENT_TAIL.min(transcript.message_turns()),
+        ))]
     }
 
     fn execute_open_command(&self, args: &str) -> CommandResult {
@@ -2753,6 +3503,28 @@ impl ReplSession {
         self.checkpoint_restore(args.trim())
     }
 
+    /// Push an in-memory checkpoint of the current transcript (for programmatic
+    /// callers that mutate history, e.g. an import handoff). No-op when the
+    /// transcript is empty. Mirrors `checkpoint_save` without the user-facing
+    /// validation / messaging.
+    fn snapshot_checkpoint(&mut self, label: &str) {
+        let messages = self.agent_loop.messages().to_vec();
+        if messages.is_empty() {
+            return;
+        }
+        let created_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        self.checkpoints.push(crate::checkpoints::Checkpoint {
+            id: crate::checkpoints::fresh_checkpoint_id(),
+            label: label.to_owned(),
+            created_at,
+            message_count: messages.len(),
+            model: self.agent_loop.model().to_owned(),
+            messages,
+        });
+    }
+
     fn checkpoint_save(&mut self, label_args: &str) -> CommandResult {
         // Reject the no-op case early: a snapshot of an empty
         // transcript would just clutter the list.
@@ -3262,6 +4034,36 @@ fn build_goal_continuation_prompt(goal: &str) -> String {
 /// (`/dream start 50`) and `--every`/`-n` flags (`/dream start --every 50`).
 /// Empty input means "use the default cadence". Invalid input produces a
 /// short, actionable error message.
+/// Path of the marker written after the first interactive launch.
+fn onboarded_marker() -> std::path::PathBuf {
+    crate::memory::MemorySystem::tide_config_dir().join("onboarded")
+}
+
+/// True until [`mark_onboarded`] has run (i.e. this looks like a first install).
+pub fn is_first_run() -> bool {
+    !onboarded_marker().exists()
+}
+
+/// Record that the first-run onboarding has been shown, so it never fires again.
+pub fn mark_onboarded() {
+    let path = onboarded_marker();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, "1\n");
+}
+
+/// Shorten a (possibly UUID-long) session id for display: first dash-group,
+/// capped, so listings and import receipts stay tidy.
+fn session_short(id: &str) -> String {
+    let head = id.split('-').next().unwrap_or(id);
+    if head.chars().count() >= 8 {
+        head.chars().take(8).collect()
+    } else {
+        id.chars().take(16).collect()
+    }
+}
+
 fn parse_dream_cadence(rest: &str) -> Result<usize, String> {
     let rest = rest.trim();
     if rest.is_empty() {
@@ -3795,14 +4597,38 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
         CommandCompletionSource::new(
             "sessions",
             ["session"],
-            "List saved sessions",
-            "/sessions [filter]",
+            "List saved sessions (--all includes Claude Code / Codex)",
+            "/sessions [filter] [--all]",
         ),
         CommandCompletionSource::new(
             "resume",
             ["load", "restore"],
             "Resume a previous session",
             "/resume [session-id]",
+        ),
+        CommandCompletionSource::new(
+            "import",
+            Vec::<&str>::new(),
+            "Import a session from another agent (Claude Code / Codex)",
+            "/import <claude|codex|deeptide> [<id>|--latest] [--as memory|context]",
+        ),
+        CommandCompletionSource::new(
+            "continue",
+            ["handoff"],
+            "Hand off the newest foreign session into the live conversation",
+            "/continue [claude|codex|deeptide]",
+        ),
+        CommandCompletionSource::new(
+            "version",
+            ["ver"],
+            "Show the running deeptide build (version, commit, date)",
+            "/version",
+        ),
+        CommandCompletionSource::new(
+            "suggest",
+            ["suggestions"],
+            "Toggle or re-show follow-up suggestions",
+            "/suggest [on|off|show]",
         ),
         CommandCompletionSource::new(
             "open",

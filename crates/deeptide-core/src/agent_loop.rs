@@ -451,6 +451,24 @@ impl AgentLoop {
         self
     }
 
+    /// Mutable counterpart to [`with_tool_restrictions`], for scoping a one-off
+    /// pass (e.g. a memory-only consolidation over untrusted imported text)
+    /// without rebuilding the loop. Returns the previous restrictions so the
+    /// caller can restore them afterwards.
+    pub fn set_tool_restrictions(
+        &mut self,
+        allowed: Option<Vec<String>>,
+        disallowed: Vec<String>,
+    ) -> (Option<Vec<String>>, Vec<String>) {
+        let prev = (
+            self.allowed_tools.take(),
+            std::mem::take(&mut self.disallowed_tools),
+        );
+        self.allowed_tools = allowed;
+        self.disallowed_tools = disallowed;
+        prev
+    }
+
     /// The set of tools to advertise to the model. `None` when unrestricted
     /// (advertise everything); otherwise only the permitted tools, so a
     /// restricted sub-agent is never offered a tool it cannot call.
@@ -533,6 +551,15 @@ impl AgentLoop {
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns.max(1);
         self
+    }
+
+    /// Mutable counterpart to [`with_max_turns`], for temporarily bounding a
+    /// one-off pass (e.g. end-of-session consolidation) without rebuilding the
+    /// loop. Returns the previous cap so the caller can restore it.
+    pub fn set_max_turns(&mut self, max_turns: usize) -> usize {
+        let prev = self.max_turns;
+        self.max_turns = max_turns.max(1);
+        prev
     }
 
     /// Replace the context-window manager configuration used for auto-compaction

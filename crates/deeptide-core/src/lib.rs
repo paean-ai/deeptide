@@ -11,6 +11,7 @@ pub mod cost;
 pub mod diff_preview;
 pub mod embedded_protocol;
 pub mod hooks;
+pub mod import;
 pub mod markdown;
 pub mod memory;
 pub mod memory_capture;
@@ -26,6 +27,7 @@ pub mod safety_guard;
 pub mod sensitive_file;
 pub mod session;
 pub mod streaming;
+pub mod suggestions;
 pub mod tool_batch_labeler;
 pub mod tool_result_summary;
 pub mod tool_usage;
@@ -79,7 +81,8 @@ pub use project_toolchain::{
 pub use prompt::build_system_prompt;
 pub use repl::{
     AUTO_COMPACT_DEFAULT_THRESHOLD, AUTO_COMPACT_MAX_THRESHOLD, AUTO_COMPACT_MIN_THRESHOLD,
-    AutoCompactConfig, ReplEvent, ReplSession, SystemMessage, slash_command_invokes_agent,
+    AutoCompactConfig, ReplEvent, ReplMenu, ReplMenuChoice, ReplSession, SystemMessage,
+    is_first_run, mark_onboarded, slash_command_invokes_agent,
 };
 pub use routing::{EscalationPolicy, Route, RoutingBackend};
 pub use safety_guard::{

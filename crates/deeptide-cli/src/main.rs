@@ -28,6 +28,7 @@ use rustyline::{
 };
 
 mod chrome;
+mod picker;
 mod queue_editor;
 mod queue_input;
 mod status_bar;
@@ -303,6 +304,28 @@ struct Cli {
     list_sessions: bool,
 
     #[arg(
+        long = "import",
+        value_name = "TOOL",
+        help = "Import a prior session from another agent (claude|codex|deeptide) for this directory before the first prompt."
+    )]
+    import: Option<String>,
+
+    #[arg(
+        long = "import-session",
+        value_name = "ID",
+        help = "Which session to import (id prefix). Defaults to the most recent for this directory."
+    )]
+    import_session: Option<String>,
+
+    #[arg(
+        long = "import-as",
+        value_name = "MODE",
+        default_value = "context",
+        help = "How to bring the imported session in: `context` (splice a live handoff) or `memory` (distil durable facts)."
+    )]
+    import_as: String,
+
+    #[arg(
         long = "list-models",
         action = ArgAction::SetTrue,
         help = "List models with built-in pricing data and exit (no API key required)."
@@ -323,6 +346,22 @@ struct Cli {
         help = "Do not autosave conversation turns to disk (privacy / scratch sessions)."
     )]
     no_session_persistence: bool,
+
+    #[arg(
+        long = "no-session-capture",
+        env = "DEEPTIDE_NO_SESSION_CAPTURE",
+        action = ArgAction::SetTrue,
+        help = "Skip the end-of-session memory consolidation pass so /exit and Ctrl-D return immediately."
+    )]
+    no_session_capture: bool,
+
+    #[arg(
+        long = "no-suggestions",
+        env = "DEEPTIDE_NO_SUGGESTIONS",
+        action = ArgAction::SetTrue,
+        help = "Do not show follow-up prompt suggestions after a task finishes."
+    )]
+    no_suggestions: bool,
 
     #[arg(
         long = "settings",
@@ -1471,6 +1510,13 @@ fn run_interactive(
     let current_tool_phase_for_handler = Arc::clone(&current_tool_phase);
     let current_tool_phase_for_callback = Arc::clone(&current_tool_phase);
 
+    // Turn-scoped count of tools that have FINISHED this turn. Surfaced in the
+    // progress line ("· N done") so a long, multi-tool turn never reads as idle
+    // between tool rounds. Reset to 0 at the start of each turn.
+    let tools_done: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let tools_done_for_callback = Arc::clone(&tools_done);
+    let tools_done_for_handler = Arc::clone(&tools_done);
+
     // Live "preparing tool" ticker — see [`LiveToolArgsTicker`] for
     // the full rationale. Mid-turn, when the model has already
     // streamed some preamble text (which kills the main spinner) and
@@ -1563,12 +1609,21 @@ fn run_interactive(
                     *phase = Some(format!("Preparing {name}"));
                 }
                 if did_stream_handler.load(Ordering::Relaxed) {
-                    // Acquire the same lock the spinner & text
-                    // writers use, write a single `\n` to drop us
-                    // onto a fresh line below the assistant
-                    // markdown, then spawn the ticker.
+                    // Acquire the same lock the spinner & text writers use, then:
+                    //  1. Flush any partial narration line held by the markdown
+                    //     renderer, so the model's between-tool text (which often
+                    //     arrives without a trailing newline) doesn't run on into
+                    //     the next text segment after the tool.
+                    //  2. Write a single `\n` to drop us onto a fresh line below
+                    //     the assistant markdown, then spawn the ticker.
                     if let Ok(_guard) = live_tool_args_lock_for_handler.lock() {
                         let mut out = io::stdout();
+                        if let Ok(mut renderer) = streaming_md_handler.lock() {
+                            let pending = renderer.flush();
+                            if !pending.is_empty() {
+                                let _ = out.write_all(pending.as_bytes());
+                            }
+                        }
                         let _ = out.write_all(b"\n");
                         let _ = out.flush();
                     }
@@ -1579,6 +1634,7 @@ fn run_interactive(
                     let baseline = live_tool_args_chars_for_handler.load(Ordering::Relaxed);
                     let name_for_thread = name.clone();
                     let color = live_tool_args_use_color;
+                    let done_for_thread = Arc::clone(&tools_done_for_handler);
                     let handle = thread::spawn(move || {
                         run_tool_args_ticker(
                             &stop_for_thread,
@@ -1588,6 +1644,7 @@ fn run_interactive(
                             &name_for_thread,
                             Instant::now(),
                             color,
+                            &done_for_thread,
                         );
                     });
                     if let Ok(mut slot) = live_tool_args_handler.lock() {
@@ -1794,8 +1851,12 @@ fn run_interactive(
                 }
             }
             deeptide_core::ToolProgressEvent::Finished { .. } => {
+                // Count the completed tool and keep a running "N done" label in
+                // the phase, so between tools the spinner shows progress instead
+                // of reverting to a bare "Working".
+                let n = tools_done_for_callback.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Ok(mut phase) = current_tool_phase_for_callback.lock() {
-                    *phase = None;
+                    *phase = Some(format!("{n} tool{} done", if n == 1 { "" } else { "s" }));
                 }
             }
         },
@@ -1803,6 +1864,7 @@ fn run_interactive(
 
     let mut repl = ReplSession::new(configured.backend)
         .with_model(configured.model)
+        .with_version(format!("deeptide-rs {VERSION_LONG}"))
         .with_permission_mode(permission_mode)
         .with_max_turns(cli.max_turns)
         .with_pricing_overrides(pricing_overrides)
@@ -1811,6 +1873,8 @@ fn run_interactive(
         .with_hooks(hooks)
         .with_tool_restrictions(allowed_tools, disallowed_tools)
         .with_session_persistence(!cli.no_session_persistence)
+        .with_session_end_capture(!cli.no_session_capture)
+        .with_suggestions(!cli.no_suggestions)
         .with_additional_dirs(&cli.add_dir)
         .with_tps_store_dir(deeptide_core::tps::default_store_dir())
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config))
@@ -1890,6 +1954,20 @@ fn run_interactive(
         .map_err(|error| error.to_string())?;
     }
 
+    // First-run onboarding: on a fresh install with prior Claude Code / Codex
+    // sessions in this project, nudge the user to import them (especially
+    // `/import all`). Mark onboarded UNCONDITIONALLY on the first run so the
+    // discovery walk (which scans ~/.claude and the whole ~/.codex tree) runs
+    // at most once, not on every startup until a session-bearing project is
+    // opened.
+    if deeptide_core::is_first_run() {
+        if let Some(hint) = repl.first_run_import_hint() {
+            writeln!(stdout, "{}", status_bar::dim(&hint, use_color))
+                .map_err(|error| error.to_string())?;
+        }
+        deeptide_core::mark_onboarded();
+    }
+
     // --resume / --continue: restore a prior conversation before the first prompt.
     let resume_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if let Some(session_id) = resolve_resume_id(cli, &resume_cwd) {
@@ -1899,6 +1977,19 @@ fn run_interactive(
             "Resumed session {session_id}: {count} message(s) restored."
         )
         .map_err(|error| error.to_string())?;
+    }
+
+    // --import <tool>: bring in a prior session from another agent (Claude Code,
+    // Codex) before the first prompt. Renders the same events the `/import`
+    // slash command would.
+    if let Some(tool) = cli.import.as_deref() {
+        let selector = cli.import_session.as_deref().unwrap_or("--latest");
+        let import_args = format!("{tool} {selector} --as {}", cli.import_as);
+        for event in repl.run_import(&import_args) {
+            if let deeptide_core::ReplEvent::Output(text) = event {
+                writeln!(stdout, "{text}").map_err(|error| error.to_string())?;
+            }
+        }
     }
 
     // Anchor the status bar to the bottom row of the terminal so it doesn't
@@ -2101,6 +2192,21 @@ fn run_interactive(
                     bar.recover_to_scroll_region(&bar_styled, &spinner_lock);
                 }
 
+                // Interactive selection menu: if this line opens one (e.g. a
+                // bare `/import`), run the fuzzy picker and replace `content`
+                // with the chosen row's action. Cancel skips the turn; an
+                // unsupported terminal falls through to the numbered-text menu
+                // that `submit` prints.
+                let content = if use_color && let Some(menu) = repl.menu_for(&content) {
+                    match picker::run(&menu, use_color) {
+                        picker::PickResult::Selected(action) => action,
+                        picker::PickResult::Cancelled => continue,
+                        picker::PickResult::Unsupported => content,
+                    }
+                } else {
+                    content
+                };
+
                 // Echo the user's submitted text into the scrollback as a
                 // styled `▎ you ▾` block. Without this the conversation
                 // looks one-sided once the input row is wiped — the
@@ -2231,6 +2337,7 @@ fn run_interactive(
                 // start adding to it as soon as the first
                 // `TextDelta` / `ToolUseInputDelta` arrives.
                 stream_chars_received.store(0, Ordering::Relaxed);
+                tools_done.store(0, Ordering::Relaxed);
                 let spinner_handle = if invokes_agent && use_color {
                     let stop = Arc::clone(&spinner_stop);
                     let started = Arc::clone(&output_started);
@@ -2564,6 +2671,7 @@ fn drain_live_tool_args(slot: &Mutex<Option<LiveToolArgsTicker>>) {
 /// but draws under a separate stop flag and reports tokens **for
 /// this tool's args alone** (subtracting `baseline_chars` from the
 /// shared turn counter).
+#[allow(clippy::too_many_arguments)] // internal progress-ticker helper; args are all distinct primitives
 fn run_tool_args_ticker(
     stop: &AtomicBool,
     lock: &Mutex<()>,
@@ -2572,6 +2680,7 @@ fn run_tool_args_ticker(
     tool_name: &str,
     started_at: Instant,
     color: bool,
+    tools_done: &AtomicUsize,
 ) {
     // Match `run_spinner`'s 150 ms grace so a quick BlockStop never
     // produces a flash. The model often emits the full tool_use in
@@ -2580,7 +2689,6 @@ fn run_tool_args_ticker(
     if stop.load(Ordering::Relaxed) {
         return;
     }
-    let phase = format!("Preparing {tool_name}");
     let mut tick = 0usize;
     while !stop.load(Ordering::Relaxed) {
         if let Ok(_guard) = lock.lock() {
@@ -2592,6 +2700,14 @@ fn run_tool_args_ticker(
             // never produces a negative token count.
             let scoped_chars = total_chars.saturating_sub(baseline_chars);
             let tokens_estimate = scoped_chars / 4;
+            // Append a running "· N done" so a multi-tool turn shows cumulative
+            // progress, not just the current tool.
+            let done = tools_done.load(Ordering::Relaxed);
+            let phase = if done > 0 {
+                format!("Preparing {tool_name} · {done} done")
+            } else {
+                format!("Preparing {tool_name}")
+            };
             let raw = tui::render_spinner_line_rich(
                 tick,
                 started_at.elapsed().as_secs(),
@@ -2819,6 +2935,35 @@ fn run_prompt(
     if let Some(session_id) = resolve_resume_id(cli, cwd) {
         let messages = deeptide_core::SessionStore::load(cwd, &session_id)?;
         loop_.restore_messages(messages);
+    }
+
+    // --import <tool> --import-as context: prepend a framed handoff from a
+    // foreign session so the one-shot prompt continues prior work. (Memory-mode
+    // import is interactive-only; it needs its own agent pass.)
+    if let Some(tool) = cli.import.as_deref() {
+        if cli.import_as != "memory" {
+            if let Some(source) = deeptide_core::import::SourceTool::parse(tool) {
+                let selector = cli.import_session.as_deref().unwrap_or("--latest");
+                match deeptide_core::import::resolve_ref(cwd, source, selector)
+                    .and_then(|r| deeptide_core::import::parse_file(&r.path, source))
+                {
+                    Ok(t) if t.message_turns() > 0 => {
+                        let handoff = deeptide_core::import::handoff_message(&t, 8);
+                        let mut combined = vec![handoff];
+                        combined.extend(loop_.messages().to_vec());
+                        loop_.restore_messages(combined);
+                    }
+                    Ok(_) => eprintln!("[import] session had no conversational content; skipped."),
+                    Err(e) => eprintln!("[import] {e}"),
+                }
+            } else {
+                eprintln!("[import] unknown source `{tool}`; use claude, codex, or deeptide.");
+            }
+        } else {
+            eprintln!(
+                "[import] --import-as memory is interactive-only; run deeptide without --print."
+            );
+        }
     }
 
     let events = loop_.run(prompt);
@@ -4179,9 +4324,14 @@ mod tests {
             continue_session: false,
             resume: None,
             list_sessions: false,
+            import: None,
+            import_session: None,
+            import_as: "context".to_owned(),
             list_models: false,
             doctor: false,
             no_session_persistence: false,
+            no_session_capture: false,
+            no_suggestions: false,
             settings: None,
             add_dir: Vec::new(),
         }

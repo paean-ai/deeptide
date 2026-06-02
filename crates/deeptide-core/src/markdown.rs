@@ -25,10 +25,10 @@ pub struct MarkdownRenderer;
 /// Multi-line constructs that depend on a closing token — fenced code blocks
 /// — are passed through unchanged while we're inside them: the renderer
 /// detects the opening fence and switches to verbatim mode so partial code
-/// remains readable as it streams in. Tables aren't streamable this way
-/// (they need the separator row to be recognised); the fully-assembled
-/// re-render via [`crate::render_output_panel`] still handles those when the
-/// turn completes without streaming.
+/// remains readable as it streams in. Tables (which need every row to compute
+/// column widths) are held in a small buffer until the block ends, then
+/// rendered together so columns align — rendering rows one-at-a-time would
+/// produce misaligned garbage.
 ///
 /// Trade-off: lines now appear as a unit rather than character-by-character.
 /// In practice an LLM emits dozens of characters per token, so the human eye
@@ -36,6 +36,11 @@ pub struct MarkdownRenderer;
 pub struct StreamingMarkdownRenderer {
     buf: String,
     in_fence: bool,
+    /// Contiguous markdown table lines (`| … |`) held until the table block
+    /// ends, then rendered together. A table needs every row to compute column
+    /// widths, so rendering rows one-at-a-time (as the rest of the stream does)
+    /// produces misaligned garbage — buffering the block fixes that.
+    table_buf: Vec<String>,
     options: MarkdownRenderOptions,
 }
 
@@ -44,8 +49,20 @@ impl StreamingMarkdownRenderer {
         Self {
             buf: String::new(),
             in_fence: false,
+            table_buf: Vec::new(),
             options,
         }
+    }
+
+    /// Render the buffered table block (joined) through the full block-aware
+    /// renderer so columns align, ensuring a trailing newline.
+    fn render_table_block(&self) -> String {
+        let mut rendered =
+            MarkdownRenderer::render_with_options(&self.table_buf.join("\n"), self.options);
+        if !rendered.ends_with('\n') {
+            rendered.push('\n');
+        }
+        rendered
     }
 
     /// Feed a streamed chunk of markdown text and return the bytes that
@@ -64,6 +81,17 @@ impl StreamingMarkdownRenderer {
             line.pop();
             let trimmed = line.trim_start();
 
+            // A table row outside a fence — defer it so the whole block renders
+            // together (column alignment needs every row).
+            let is_table = !self.in_fence && trimmed.starts_with('|');
+
+            // Any non-table line ends a pending table block: flush it first so
+            // it lands above this line in order.
+            if !is_table && !self.table_buf.is_empty() {
+                out.push_str(&self.render_table_block());
+                self.table_buf.clear();
+            }
+
             if trimmed.starts_with("```") {
                 // Fence lines themselves stay verbatim — the full block-aware
                 // renderer would render an empty box around an unmatched
@@ -77,6 +105,11 @@ impl StreamingMarkdownRenderer {
             if self.in_fence {
                 out.push_str(&line);
                 out.push('\n');
+                continue;
+            }
+
+            if is_table {
+                self.table_buf.push(line);
                 continue;
             }
 
@@ -95,25 +128,31 @@ impl StreamingMarkdownRenderer {
         out
     }
 
-    /// Drain any trailing partial line (no terminating newline yet) and
-    /// return its rendered form. Safe to call repeatedly.
+    /// Drain any pending table block and trailing partial line, returning their
+    /// rendered form. Safe to call repeatedly (e.g. at end-of-turn, or when a
+    /// tool call interrupts streamed text so narration doesn't run on).
     pub fn flush(&mut self) -> String {
-        if self.buf.is_empty() {
-            return String::new();
+        let mut out = String::new();
+        if !self.table_buf.is_empty() {
+            out.push_str(&self.render_table_block());
+            self.table_buf.clear();
         }
-        let line = std::mem::take(&mut self.buf);
-        if self.in_fence {
-            line
-        } else {
-            MarkdownRenderer::render_with_options(&line, self.options)
+        if !self.buf.is_empty() {
+            let line = std::mem::take(&mut self.buf);
+            if self.in_fence {
+                out.push_str(&line);
+            } else {
+                out.push_str(&MarkdownRenderer::render_with_options(&line, self.options));
+            }
         }
+        out
     }
 
     /// True if no buffered text and not currently inside a fenced block. The
     /// caller can use this to decide whether a trailing blank-line separator
     /// is needed after streaming completes.
     pub fn is_idle(&self) -> bool {
-        self.buf.is_empty() && !self.in_fence
+        self.buf.is_empty() && self.table_buf.is_empty() && !self.in_fence
     }
 
     /// Discard all buffered state without rendering it.
@@ -127,6 +166,7 @@ impl StreamingMarkdownRenderer {
     /// far the previous attempt got.
     pub fn reset(&mut self) {
         self.buf.clear();
+        self.table_buf.clear();
         self.in_fence = false;
     }
 }
@@ -771,6 +811,48 @@ mod tests {
         assert_eq!(r.push(" there"), "");
         assert_eq!(r.push("**"), "");
         assert_eq!(r.push("\n"), "hi there\n");
+        assert!(r.is_idle());
+    }
+
+    #[test]
+    fn streaming_buffers_table_block_so_columns_align() {
+        // Streaming a table one character at a time must produce the SAME
+        // aligned output as block-rendering it whole — i.e. rows are held and
+        // rendered together, not one-at-a-time (which can't compute column
+        // widths and produces misaligned garbage).
+        let opts = MarkdownRenderOptions { color: false };
+        let table = "| Area | Rating |\n|---|---|\n| Design | Good |\n| Tests | Strong feature |\n";
+        let mut r = StreamingMarkdownRenderer::new(opts);
+        let mut streamed = String::new();
+        for ch in table.chars() {
+            streamed.push_str(&r.push(&ch.to_string()));
+        }
+        streamed.push_str(&r.flush());
+        let block = MarkdownRenderer::render_with_options(table, opts);
+        assert_eq!(
+            streamed.trim_end(),
+            block.trim_end(),
+            "streamed table must match the block-rendered (aligned) table"
+        );
+        assert!(r.is_idle(), "renderer must be idle after the table flushes");
+    }
+
+    #[test]
+    fn streaming_flushes_table_before_following_prose() {
+        // A non-table line ends the table block and lands after it, in order.
+        let mut r = streaming_plain();
+        let out = r.push("| a | b |\n|---|---|\n| 1 | 2 |\nAfter the table.\n");
+        assert!(
+            out.contains("After the table."),
+            "prose after table must render: {out:?}"
+        );
+        // The table content precedes the prose line.
+        let table_at = out.find('1').expect("table cell present");
+        let prose_at = out.find("After").expect("prose present");
+        assert!(
+            table_at < prose_at,
+            "table must render before the following prose"
+        );
         assert!(r.is_idle());
     }
 
