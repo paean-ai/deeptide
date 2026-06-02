@@ -929,7 +929,7 @@ fn render_help_index(registered: &[CommandCompletionSource]) -> String {
 
     lines.push(String::new());
     lines.push(String::from(
-        "Keybindings: Enter=submit  Tab=autocomplete  Ctrl+C=interrupt  Ctrl+D=exit",
+        "Keybindings: Enter=submit  Tab=autocomplete  Ctrl+C=interrupt (×2 to exit)  Ctrl+D=exit",
     ));
     lines.push(String::from(
         "Type /help <command> for details on a single command.",
