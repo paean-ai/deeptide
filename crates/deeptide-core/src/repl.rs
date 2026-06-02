@@ -1357,7 +1357,7 @@ impl ReplSession {
                 "  Enter           Submit prompt",
                 "  Backslash + Enter Continue on next line",
                 "  Tab             Autocomplete /command or @path",
-                "  Ctrl+C          Interrupt running tool / exit when idle",
+                "  Ctrl+C          Interrupt running tool / press twice to exit when idle",
                 "  Ctrl+D          Exit on empty line",
                 "  Ctrl+L          Clear screen",
                 "  Ctrl+A / Ctrl+E Move to start / end of line",

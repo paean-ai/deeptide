@@ -1942,6 +1942,74 @@ fn run_interactive(
     // `QueueMode`.
     let mut pending_queued_input: Option<String> = None;
 
+    // Ctrl+C double-tap to exit. A first Interrupt at the idle prompt echoes
+    // `^C` plus a hint; a second within `CTRL_C_DOUBLE_TAP_WINDOW` falls
+    // through into the same finalize-and-exit path as Ctrl+D / `/exit`, so
+    // `/help`'s "exit when idle" is no longer aspirational. Any successful
+    // readline resets the timer so a stale tap from minutes ago can't pair
+    // with a fresh one.
+    const CTRL_C_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(1500);
+    let mut last_interrupt_at: Option<Instant> = None;
+
+    // Shared end-of-session flow for Ctrl+D and Ctrl+C double-tap. Kept as a
+    // closure (rather than a free function) so it can borrow all the spinner /
+    // streaming Arcs and `use_color` without a 9-argument signature. Captures
+    // are by shared reference; mutation lives behind the Arcs' interior
+    // mutability, so this is `Fn` and callable from any match arm.
+    let finalize_and_render = |stdout: &mut io::Stdout,
+                               repl: &mut ReplSession|
+     -> Result<(), String> {
+        writeln!(stdout).map_err(|error| error.to_string())?;
+
+        // The pass runs an agent round-trip; animate the same spinner as
+        // a normal turn so it isn't a silent hang. (No-op without color;
+        // the 150ms grace means it never flashes when there's no pass.)
+        did_stream.store(false, Ordering::Relaxed);
+        output_started.store(false, Ordering::Relaxed);
+        spinner_stop.store(false, Ordering::Relaxed);
+        stream_chars_received.store(0, Ordering::Relaxed);
+        let spinner_handle = if use_color {
+            let stop = Arc::clone(&spinner_stop);
+            let started = Arc::clone(&output_started);
+            let lock = Arc::clone(&spinner_lock);
+            let phase = Arc::clone(&current_tool_phase);
+            let chars = Arc::clone(&stream_chars_received);
+            Some(thread::spawn(move || {
+                run_spinner(&stop, &started, &lock, true, &phase, &chars)
+            }))
+        } else {
+            None
+        };
+
+        let events = repl.finalize_session();
+
+        // Mirror the regular turn's defensive ticker drain
+        // (see comment in the main submit path). Cheap when
+        // there's nothing to drain — just an Arc lock.
+        drain_live_tool_args(&live_tool_args);
+
+        spinner_stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = spinner_handle {
+            let _ = handle.join();
+        }
+
+        for event in events {
+            if let ReplEvent::Output(text) = event {
+                if did_stream.swap(false, Ordering::Relaxed) {
+                    writeln!(stdout).map_err(|error| error.to_string())?;
+                } else {
+                    writeln!(
+                        stdout,
+                        "{}",
+                        tui::render_output_panel(&text, terminal_width().unwrap_or(100), use_color,)
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        Ok(())
+    };
+
     loop {
         // Paint the status bar (anchored at row N, OR inline above the
         // prompt as a safe fallback when anchoring isn't available).
@@ -1995,6 +2063,11 @@ fn run_interactive(
         };
         match readline {
             Ok(line) => {
+                // Any successful input (typed, queued, or empty) cancels a
+                // pending Ctrl+C double-tap so the user can't accidentally
+                // exit by tapping Ctrl+C, typing for a while, then tapping it
+                // again as a real interrupt.
+                last_interrupt_at = None;
                 let trimmed = line.trim().to_owned();
                 if trimmed.is_empty() {
                     continue;
@@ -2297,6 +2370,10 @@ fn run_interactive(
                 // flag, this isn't a real Ctrl+C — it's the user asking to
                 // rotate the permission mode.
                 if pending_mode_cycle.swap(false, Ordering::Relaxed) {
+                    // Clear any pending double-tap timer too: a mode cycle is
+                    // a deliberate non-exit action and should not be paired
+                    // with an earlier `^C` to close the REPL.
+                    last_interrupt_at = None;
                     let next = next_permission_mode(repl.agent_loop().permission_mode());
                     repl.set_permission_mode(next);
                     let label = next.label();
@@ -2308,9 +2385,41 @@ fn run_interactive(
                     writeln!(stdout, "{line}").map_err(|error| error.to_string())?;
                     continue;
                 }
-                // Ctrl+C — echo ^C and continue (matches Swift/zero-cli behaviour)
+                // Real Ctrl+C at the idle prompt. First tap echoes `^C` plus a
+                // hint and arms the double-tap timer; second tap within
+                // `CTRL_C_DOUBLE_TAP_WINDOW` falls through to the same
+                // finalize-and-exit path as Ctrl+D / `/exit`.
+                let now = Instant::now();
+                let is_double_tap = last_interrupt_at
+                    .is_some_and(|t| now.duration_since(t) < CTRL_C_DOUBLE_TAP_WINDOW);
+                if !is_double_tap {
+                    last_interrupt_at = Some(now);
+                    // Same scroll-region recovery as the `Ok(line)` arm: when
+                    // the anchored footer is active, readline returns with the
+                    // cursor still inside the reserved input row, so a naive
+                    // `writeln!` would land in the footer and get clobbered by
+                    // the next repaint. Skip silently when not anchored.
+                    if let Some(bar) = anchored.as_mut()
+                        && bar.footer_rows() >= 2
+                    {
+                        bar.recover_to_scroll_region(&bar_styled, &spinner_lock);
+                    }
+                    writeln!(stdout, "^C (press Ctrl+C again or /exit to quit)")
+                        .map_err(|error| error.to_string())?;
+                    continue;
+                }
+                // Double-tap → exit. Echo a final `^C` so the second press has
+                // a visible acknowledgement (the user might not realise the
+                // first was registered), then run the shared end-of-session
+                // consolidation pass and break out of the REPL loop.
+                if let Some(bar) = anchored.as_mut()
+                    && bar.footer_rows() >= 2
+                {
+                    bar.recover_to_scroll_region(&bar_styled, &spinner_lock);
+                }
                 writeln!(stdout, "^C").map_err(|error| error.to_string())?;
-                continue;
+                finalize_and_render(&mut stdout, &mut repl)?;
+                break;
             }
             Err(ReadlineError::Eof) => {
                 // Ctrl+D on empty line — the most common way to leave the REPL.
@@ -2319,58 +2428,12 @@ fn run_interactive(
                 // capture only fired on the literal `/exit` command and silently
                 // skipped every Ctrl-D exit. `finalize_session` emits Output
                 // events only (it never returns Exit), so we render and break.
-                writeln!(stdout).map_err(|error| error.to_string())?;
-
-                // The pass runs an agent round-trip; animate the same spinner as
-                // a normal turn so it isn't a silent hang. (No-op without color;
-                // the 150ms grace means it never flashes when there's no pass.)
-                did_stream.store(false, Ordering::Relaxed);
-                output_started.store(false, Ordering::Relaxed);
-                spinner_stop.store(false, Ordering::Relaxed);
-                stream_chars_received.store(0, Ordering::Relaxed);
-                let spinner_handle = if use_color {
-                    let stop = Arc::clone(&spinner_stop);
-                    let started = Arc::clone(&output_started);
-                    let lock = Arc::clone(&spinner_lock);
-                    let phase = Arc::clone(&current_tool_phase);
-                    let chars = Arc::clone(&stream_chars_received);
-                    Some(thread::spawn(move || {
-                        run_spinner(&stop, &started, &lock, true, &phase, &chars)
-                    }))
-                } else {
-                    None
-                };
-
-                let events = repl.finalize_session();
-
-                // Mirror the regular turn's defensive ticker drain
-                // (see comment in the main submit path). Cheap when
-                // there's nothing to drain — just an Arc lock.
-                drain_live_tool_args(&live_tool_args);
-
-                spinner_stop.store(true, Ordering::Relaxed);
-                if let Some(handle) = spinner_handle {
-                    let _ = handle.join();
+                if let Some(bar) = anchored.as_mut()
+                    && bar.footer_rows() >= 2
+                {
+                    bar.recover_to_scroll_region(&bar_styled, &spinner_lock);
                 }
-
-                for event in events {
-                    if let ReplEvent::Output(text) = event {
-                        if did_stream.swap(false, Ordering::Relaxed) {
-                            writeln!(stdout).map_err(|error| error.to_string())?;
-                        } else {
-                            writeln!(
-                                stdout,
-                                "{}",
-                                tui::render_output_panel(
-                                    &text,
-                                    terminal_width().unwrap_or(100),
-                                    use_color,
-                                )
-                            )
-                            .map_err(|error| error.to_string())?;
-                        }
-                    }
-                }
+                finalize_and_render(&mut stdout, &mut repl)?;
                 break;
             }
             Err(error) => {
