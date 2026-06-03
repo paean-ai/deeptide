@@ -14,6 +14,7 @@ deeptide-host = { path = "../deeptide-host" }
 eframe = "0.34"
 crossbeam-channel = "0.5"
 time = { workspace = true, features = ["formatting"] }
+egui_commonmark = { version = "0.23.0", default-features = false, features = ["pulldown_cmark"] }
 
 [lints]
 workspace = true

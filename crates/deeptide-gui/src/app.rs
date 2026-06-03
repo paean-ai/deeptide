@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use deeptide_core::{AskOutcome, SessionEntry, SessionStore};
 use eframe::egui;
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use crate::conversation::Conversation;
 use crate::events::{TerminalKind, UiEvent};
@@ -50,6 +51,8 @@ pub struct App {
     cwd: PathBuf,
     /// Past sessions for `cwd`, newest first — refreshed when a turn saves.
     sessions: Vec<SessionEntry>,
+    /// Markdown layout/image cache reused across frames for assistant bubbles.
+    markdown_cache: CommonMarkCache,
 }
 
 impl App {
@@ -66,6 +69,7 @@ impl App {
             pending: Vec::new(),
             cwd,
             sessions,
+            markdown_cache: CommonMarkCache::default(),
         }
     }
 
@@ -354,16 +358,19 @@ impl eframe::App for App {
             }
         }
 
+        let transcript = &self.transcript;
+        let markdown_cache = &mut self.markdown_cache;
+        let running = self.running;
         egui::CentralPanel::default().show_inside(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    for bubble in &self.transcript {
-                        render_bubble(ui, bubble);
+                    for bubble in transcript {
+                        render_bubble(ui, bubble, markdown_cache);
                         ui.add_space(8.0);
                     }
-                    if self.running {
+                    if running {
                         ui.label(egui::RichText::new("…").color(egui::Color32::GRAY));
                     }
                 });
@@ -371,7 +378,7 @@ impl eframe::App for App {
     }
 }
 
-fn render_bubble(ui: &mut egui::Ui, bubble: &Bubble) {
+fn render_bubble(ui: &mut egui::Ui, bubble: &Bubble, markdown_cache: &mut CommonMarkCache) {
     match bubble {
         Bubble::User(text) => {
             ui.label(
@@ -403,8 +410,9 @@ fn render_bubble(ui: &mut egui::Ui, bubble: &Bubble) {
                     .strong()
                     .color(egui::Color32::LIGHT_GREEN),
             );
-            // Markdown rendering arrives in a later phase; plain text for now.
-            ui.label(text);
+            // Render the answer as markdown (headings, lists, tables, fenced
+            // code with syntax highlighting) — richer than the terminal.
+            CommonMarkViewer::new().show(ui, markdown_cache, text);
         }
         Bubble::Tool {
             tool,
