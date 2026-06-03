@@ -5,10 +5,18 @@
 //! worker calls `ctx.request_repaint()` on every event, so streaming feels live
 //! without polling.
 
+use deeptide_core::AskOutcome;
 use eframe::egui;
 
 use crate::conversation::Conversation;
 use crate::events::{TerminalKind, UiEvent};
+
+/// An approval the user still needs to answer.
+struct PendingPermission {
+    req_id: String,
+    tool: String,
+    preview: String,
+}
 
 /// One rendered item in the transcript.
 enum Bubble {
@@ -34,6 +42,8 @@ pub struct App {
     streaming: Option<usize>,
     /// Index of the reasoning bubble currently being streamed into, if any.
     thinking: Option<usize>,
+    /// Tool approvals awaiting the user's decision.
+    pending: Vec<PendingPermission>,
 }
 
 impl App {
@@ -45,6 +55,7 @@ impl App {
             running: false,
             streaming: None,
             thinking: None,
+            pending: Vec::new(),
         }
     }
 
@@ -112,10 +123,22 @@ impl App {
                     self.transcript
                         .push(Bubble::Status(format!("{label}{suffix}")));
                 }
+                UiEvent::PermissionRequest {
+                    req_id,
+                    tool,
+                    preview,
+                } => self.pending.push(PendingPermission {
+                    req_id,
+                    tool,
+                    preview,
+                }),
                 UiEvent::Terminal(kind) => {
                     self.running = false;
                     self.streaming = None;
                     self.thinking = None;
+                    // Any approvals still open at end-of-turn are moot (the
+                    // worker auto-denies them on cancel/timeout).
+                    self.pending.clear();
                     if let Some(note) = terminal_note(&kind) {
                         self.transcript.push(Bubble::Status(note));
                     }
@@ -189,6 +212,52 @@ impl eframe::App for App {
                 self.submit();
             }
         });
+
+        // Pending tool approvals sit above the composer until answered.
+        if !self.pending.is_empty() {
+            let mut decision: Option<(String, AskOutcome)> = None;
+            egui::Panel::bottom("approvals").show_inside(ui, |ui| {
+                for pending in &self.pending {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(format!("⚠ Allow {} ?", pending.tool))
+                            .strong()
+                            .color(egui::Color32::YELLOW),
+                    );
+                    ui.label(
+                        egui::RichText::new(&pending.preview)
+                            .monospace()
+                            .color(egui::Color32::GRAY),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Allow").clicked() {
+                            decision = Some((pending.req_id.clone(), AskOutcome::Allow));
+                        }
+                        if ui.button(format!("Allow all {}", pending.tool)).clicked() {
+                            decision = Some((
+                                pending.req_id.clone(),
+                                AskOutcome::AllowAllSession {
+                                    tool_name: pending.tool.clone(),
+                                },
+                            ));
+                        }
+                        if ui.button("Deny").clicked() {
+                            decision = Some((
+                                pending.req_id.clone(),
+                                AskOutcome::Deny {
+                                    reason: String::from("denied by user"),
+                                },
+                            ));
+                        }
+                    });
+                    ui.add_space(6.0);
+                }
+            });
+            if let Some((req_id, outcome)) = decision {
+                self.conversation.respond_permission(&req_id, outcome);
+                self.pending.retain(|pending| pending.req_id != req_id);
+            }
+        }
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             egui::ScrollArea::vertical()

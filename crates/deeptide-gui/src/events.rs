@@ -33,6 +33,16 @@ pub enum UiEvent {
     },
     /// Summary line wrapping a batch of tool calls.
     ToolBatch { label: String, failed: usize },
+    /// A gated tool needs the user's approval. The worker thread is BLOCKED in
+    /// its `ask_callback` until the UI replies via `Conversation::respond_permission`.
+    PermissionRequest {
+        /// Correlates the reply to the blocked request (the tool-call id).
+        req_id: String,
+        /// Tool name (e.g. `Write`, `Bash`).
+        tool: String,
+        /// Short human preview of what the tool will do.
+        preview: String,
+    },
     /// The turn ended.
     Terminal(TerminalKind),
     /// A worker-side failure (e.g. a panic caught around `run()`).

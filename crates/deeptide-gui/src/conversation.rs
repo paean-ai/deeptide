@@ -12,19 +12,26 @@
 //! model/provider with no duplicated wiring. When no credential is configured,
 //! the host builder yields the local-echo backend and the UI shows a banner.
 
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use deeptide_core::{
-    AgentEventCallback, AgentLoop, AgentLoopEvent, AgentTerminalEvent, StreamingEvent,
-    StreamingHandler,
+    AgentEventCallback, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AskOutcome,
+    PermissionAskCallback, StreamingEvent, StreamingHandler, ToolCall,
 };
 use eframe::egui;
 
 use crate::events::{TerminalKind, UiEvent, WorkerMsg};
+
+/// Pending tool-approval rendezvous: maps a request id to the channel the
+/// blocked `ask_callback` is waiting on. The UI inserts a reply via
+/// [`Conversation::respond_permission`]; the worker's callback receives it.
+type PendingPermissions = Arc<Mutex<HashMap<String, Sender<AskOutcome>>>>;
 
 /// Handle the UI holds to one running conversation.
 pub struct Conversation {
@@ -34,6 +41,8 @@ pub struct Conversation {
     /// Cooperative cancel — flipped from the UI's Stop button; the loop and
     /// every running tool observe it.
     interrupt: Arc<AtomicBool>,
+    /// Outstanding approval requests the UI can answer.
+    pending: PendingPermissions,
 }
 
 impl Conversation {
@@ -43,21 +52,42 @@ impl Conversation {
         let (to_worker, worker_rx) = unbounded::<WorkerMsg>();
         let (worker_tx, from_worker) = unbounded::<UiEvent>();
         let interrupt = Arc::new(AtomicBool::new(false));
+        let pending: PendingPermissions = Arc::new(Mutex::new(HashMap::new()));
         let interrupt_for_worker = Arc::clone(&interrupt);
+        let pending_for_worker = Arc::clone(&pending);
         thread::Builder::new()
             .name("deeptide-conversation".to_owned())
-            .spawn(move || worker_loop(worker_rx, worker_tx, ctx, interrupt_for_worker))
+            .spawn(move || {
+                worker_loop(
+                    worker_rx,
+                    worker_tx,
+                    ctx,
+                    interrupt_for_worker,
+                    pending_for_worker,
+                )
+            })
             .expect("spawn conversation worker thread");
         Self {
             to_worker,
             from_worker,
             interrupt,
+            pending,
         }
     }
 
     /// Enqueue a user prompt; output arrives asynchronously via `from_worker`.
     pub fn send_prompt(&self, text: String) {
         let _ = self.to_worker.send(WorkerMsg::Prompt(text));
+    }
+
+    /// Answer a pending [`UiEvent::PermissionRequest`]; unblocks the worker's
+    /// `ask_callback`. A no-op if the request already timed out / was cancelled.
+    pub fn respond_permission(&self, req_id: &str, outcome: AskOutcome) {
+        if let Ok(mut map) = self.pending.lock()
+            && let Some(sender) = map.remove(req_id)
+        {
+            let _ = sender.send(outcome);
+        }
     }
 
     /// Request cooperative cancellation of the in-flight turn.
@@ -74,6 +104,7 @@ fn worker_loop(
     tx: Sender<UiEvent>,
     ctx: egui::Context,
     interrupt: Arc<AtomicBool>,
+    pending: PendingPermissions,
 ) {
     // Live structured-event sink: map each core event to a UI event, send it,
     // and wake the UI. Synchronous and cheap (just a channel send + repaint).
@@ -132,9 +163,51 @@ fn worker_loop(
         ctx.request_repaint();
     }
 
+    // Interactive approval: emit a PermissionRequest, then BLOCK on a per-request
+    // channel until the UI replies (or we're interrupted / it times out). This
+    // is the synchronous rendezvous the agent loop expects — it parks the worker
+    // thread here exactly like the CLI parks on stdin.
+    let tx_perm = tx.clone();
+    let ctx_perm = ctx.clone();
+    let interrupt_perm = Arc::clone(&interrupt);
+    let pending_perm = Arc::clone(&pending);
+    let ask_cb: PermissionAskCallback = Arc::new(move |tool_call: &ToolCall| -> AskOutcome {
+        let req_id = tool_call.id.clone();
+        let (decision_tx, decision_rx) = bounded::<AskOutcome>(1);
+        if let Ok(mut map) = pending_perm.lock() {
+            map.insert(req_id.clone(), decision_tx);
+        }
+        let _ = tx_perm.send(UiEvent::PermissionRequest {
+            req_id: req_id.clone(),
+            tool: tool_call.name.clone(),
+            preview: permission_preview(tool_call),
+        });
+        ctx_perm.request_repaint();
+        // Park until the UI answers; poll so a Stop/cancel can't hang us.
+        loop {
+            match decision_rx.recv_timeout(Duration::from_millis(150)) {
+                Ok(outcome) => return outcome,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    if interrupt_perm.load(Ordering::Relaxed) {
+                        cleanup_pending(&pending_perm, &req_id);
+                        return AskOutcome::Deny {
+                            reason: String::from("cancelled"),
+                        };
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    return AskOutcome::Deny {
+                        reason: String::from("approval channel closed"),
+                    };
+                }
+            }
+        }
+    });
+
     let mut agent = AgentLoop::new(configured.backend)
         .with_model(configured.model)
         .with_event_callback(event_cb)
+        .with_ask_callback(ask_cb)
         .with_interrupt_flag(Arc::clone(&interrupt));
 
     while let Ok(msg) = rx.recv() {
@@ -198,5 +271,25 @@ fn map_event(event: &AgentLoopEvent) -> Option<UiEvent> {
             AgentTerminalEvent::Interrupted => TerminalKind::Interrupted,
         })),
         AgentLoopEvent::User(_) | AgentLoopEvent::Compaction(_) => None,
+    }
+}
+
+/// A short, human-readable preview of what a gated tool will do, for the
+/// approval prompt — the tool's most relevant argument, truncated.
+fn permission_preview(tool_call: &ToolCall) -> String {
+    let raw = tool_call.input.to_string();
+    const MAX: usize = 200;
+    if raw.chars().count() > MAX {
+        let head: String = raw.chars().take(MAX).collect();
+        format!("{head}…")
+    } else {
+        raw
+    }
+}
+
+/// Drop a stale pending entry (e.g. when a request is cancelled before reply).
+fn cleanup_pending(pending: &PendingPermissions, req_id: &str) {
+    if let Ok(mut map) = pending.lock() {
+        map.remove(req_id);
     }
 }
