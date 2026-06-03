@@ -51,8 +51,19 @@ pub enum UiEvent {
     /// A resumed session's prior transcript, for the UI to render before the
     /// user continues it.
     Hydrate(Vec<HydratedBubble>),
+    /// Updated cumulative token/cost totals (emitted after each turn).
+    Usage(Usage),
     /// A worker-side failure (e.g. a panic caught around `run()`).
     Error(String),
+}
+
+/// Cumulative token/cost totals for the conversation, shown in the status bar.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Usage {
+    pub input: usize,
+    pub output: usize,
+    pub cache_read: usize,
+    pub cost_usd: f64,
 }
 
 /// One message restored from a saved session, for hydrating the transcript on

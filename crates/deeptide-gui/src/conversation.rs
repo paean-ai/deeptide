@@ -27,7 +27,7 @@ use deeptide_core::{
 };
 use eframe::egui;
 
-use crate::events::{HydratedBubble, TerminalKind, UiEvent, WorkerMsg};
+use crate::events::{HydratedBubble, TerminalKind, UiEvent, Usage, WorkerMsg};
 
 /// Pending tool-approval rendezvous: maps a request id to the channel the
 /// blocked `ask_callback` is waiting on. The UI inserts a reply via
@@ -268,6 +268,13 @@ fn worker_loop(
                     &started_at,
                     agent.messages(),
                 );
+                let summary = agent.cost_tracker().summary();
+                let _ = tx.send(UiEvent::Usage(Usage {
+                    input: summary.total_input,
+                    output: summary.total_output,
+                    cache_read: summary.total_cache_read,
+                    cost_usd: summary.total_cost_usd,
+                }));
                 let _ = tx.send(UiEvent::SessionsChanged);
                 ctx.request_repaint();
             }

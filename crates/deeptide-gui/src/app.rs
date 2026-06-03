@@ -12,7 +12,7 @@ use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use crate::conversation::Conversation;
-use crate::events::{TerminalKind, UiEvent};
+use crate::events::{TerminalKind, UiEvent, Usage};
 
 /// An approval the user still needs to answer.
 struct PendingPermission {
@@ -53,6 +53,8 @@ pub struct App {
     sessions: Vec<SessionEntry>,
     /// Markdown layout/image cache reused across frames for assistant bubbles.
     markdown_cache: CommonMarkCache,
+    /// Cumulative token/cost totals shown in the status bar.
+    usage: Usage,
 }
 
 impl App {
@@ -70,6 +72,7 @@ impl App {
             cwd,
             sessions,
             markdown_cache: CommonMarkCache::default(),
+            usage: Usage::default(),
         }
     }
 
@@ -160,6 +163,7 @@ impl App {
                 UiEvent::SessionsChanged => {
                     self.sessions = SessionStore::list(&self.cwd);
                 }
+                UiEvent::Usage(usage) => self.usage = usage,
                 UiEvent::Hydrate(bubbles) => {
                     // A resumed session's history replaces the current transcript.
                     self.transcript = bubbles
@@ -211,6 +215,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
 
+        let usage = self.usage;
         egui::Panel::top("header").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Deeptide");
@@ -219,6 +224,22 @@ impl eframe::App for App {
                         .small()
                         .color(egui::Color32::GRAY),
                 );
+                // Cumulative token/cost totals, right-aligned.
+                if usage.input > 0 || usage.output > 0 || usage.cost_usd > 0.0 {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "↑{} ↓{} · cache {} · ${:.4}",
+                                fmt_tokens(usage.input),
+                                fmt_tokens(usage.output),
+                                fmt_tokens(usage.cache_read),
+                                usage.cost_usd,
+                            ))
+                            .small()
+                            .color(egui::Color32::GRAY),
+                        );
+                    });
+                }
             });
         });
 
@@ -437,6 +458,17 @@ fn render_bubble(ui: &mut egui::Ui, bubble: &Bubble, markdown_cache: &mut Common
                     .color(egui::Color32::GRAY),
             );
         }
+    }
+}
+
+/// Compact token count for the status bar (`1234` → `1.2k`, `1_200_000` → `1.2M`).
+fn fmt_tokens(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 
