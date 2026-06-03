@@ -10,6 +10,7 @@ description = "Native desktop GUI for Deeptide — embeds deeptide-core, shares 
 
 [dependencies]
 deeptide-core = { path = "../deeptide-core" }
+deeptide-host = { path = "../deeptide-host" }
 eframe = "0.34"
 crossbeam-channel = "0.5"
 

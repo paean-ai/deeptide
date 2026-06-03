@@ -8,4 +8,5 @@
 //! leaving each front-end to own only its own I/O (terminal vs. windowed).
 
 pub mod backend;
+pub mod config;
 pub mod provider;

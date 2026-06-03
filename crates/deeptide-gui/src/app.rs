@@ -13,6 +13,8 @@ use crate::events::{TerminalKind, UiEvent};
 /// One rendered item in the transcript.
 enum Bubble {
     User(String),
+    /// Model reasoning / chain-of-thought (rendered dim, above the answer).
+    Thinking(String),
     Assistant(String),
     Tool {
         tool: String,
@@ -30,6 +32,8 @@ pub struct App {
     running: bool,
     /// Index of the assistant bubble currently being streamed into, if any.
     streaming: Option<usize>,
+    /// Index of the reasoning bubble currently being streamed into, if any.
+    thinking: Option<usize>,
 }
 
 impl App {
@@ -40,6 +44,7 @@ impl App {
             input: String::new(),
             running: false,
             streaming: None,
+            thinking: None,
         }
     }
 
@@ -48,6 +53,8 @@ impl App {
         while let Ok(event) = self.conversation.from_worker.try_recv() {
             match event {
                 UiEvent::AssistantDelta(delta) => {
+                    // The answer has started; stop appending to the reasoning bubble.
+                    self.thinking = None;
                     let idx = match self.streaming {
                         Some(i) => i,
                         None => {
@@ -61,8 +68,19 @@ impl App {
                         text.push_str(&delta);
                     }
                 }
-                UiEvent::ThinkingDelta(_) => {
-                    // Reasoning rendering arrives in a later phase; ignore for MVP.
+                UiEvent::ThinkingDelta(delta) => {
+                    let idx = match self.thinking {
+                        Some(i) => i,
+                        None => {
+                            self.transcript.push(Bubble::Thinking(String::new()));
+                            let i = self.transcript.len() - 1;
+                            self.thinking = Some(i);
+                            i
+                        }
+                    };
+                    if let Some(Bubble::Thinking(text)) = self.transcript.get_mut(idx) {
+                        text.push_str(&delta);
+                    }
                 }
                 UiEvent::Assistant(full) => {
                     // Authoritative assistant text. If we were streaming deltas,
@@ -97,6 +115,7 @@ impl App {
                 UiEvent::Terminal(kind) => {
                     self.running = false;
                     self.streaming = None;
+                    self.thinking = None;
                     if let Some(note) = terminal_note(&kind) {
                         self.transcript.push(Bubble::Status(note));
                     }
@@ -104,6 +123,7 @@ impl App {
                 UiEvent::Error(message) => {
                     self.running = false;
                     self.streaming = None;
+                    self.thinking = None;
                     self.transcript.push(Bubble::Status(format!("⚠ {message}")));
                 }
             }
@@ -196,6 +216,22 @@ fn render_bubble(ui: &mut egui::Ui, bubble: &Bubble) {
                     .color(egui::Color32::LIGHT_BLUE),
             );
             ui.label(text);
+        }
+        Bubble::Thinking(text) => {
+            egui::CollapsingHeader::new(
+                egui::RichText::new("💭 thinking")
+                    .italics()
+                    .color(egui::Color32::GRAY),
+            )
+            .id_salt(("thinking", ui.next_auto_id()))
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(text)
+                        .italics()
+                        .color(egui::Color32::GRAY),
+                );
+            });
         }
         Bubble::Assistant(text) => {
             ui.label(

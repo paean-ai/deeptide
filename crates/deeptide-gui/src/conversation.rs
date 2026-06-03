@@ -3,13 +3,14 @@
 //! `AgentLoop::run()` is synchronous and blocks for the whole turn, so it must
 //! never run on egui's UI thread. Each conversation owns a worker thread; the
 //! UI talks to it only via channels and a shared interrupt flag. The worker
-//! installs the core's live event callback (and, with real backends, a
-//! StreamingHandler) so events flow to the UI AS THEY HAPPEN, then calls
-//! `ctx.request_repaint()` to wake the UI immediately.
+//! installs the core's live event callback plus a `StreamingHandler` so events
+//! (token deltas, tool activity, terminal) flow to the UI AS THEY HAPPEN, then
+//! calls `ctx.request_repaint()` to wake the UI immediately.
 //!
-//! This MVP wires the built-in `LocalEchoBackend` (no API key, no network) to
-//! validate the bridge end-to-end. Real model backends plug in here later via
-//! the shared host/runtime builder, with zero change to the bridge itself.
+//! The backend is built from the SHARED config (`settings.json`) through the
+//! same `deeptide-host` builder the CLI uses, so the GUI talks to the identical
+//! model/provider with no duplicated wiring. When no credential is configured,
+//! the host builder yields the local-echo backend and the UI shows a banner.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -18,7 +19,8 @@ use std::thread;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use deeptide_core::{
-    AgentEventCallback, AgentLoop, AgentLoopEvent, AgentTerminalEvent, LocalEchoBackend,
+    AgentEventCallback, AgentLoop, AgentLoopEvent, AgentTerminalEvent, StreamingEvent,
+    StreamingHandler,
 };
 use eframe::egui;
 
@@ -84,7 +86,54 @@ fn worker_loop(
         }
     });
 
-    let mut agent = AgentLoop::new(Box::new(LocalEchoBackend))
+    // Live token stream: the backend fires this per delta during a turn. Answer
+    // text → AssistantDelta, reasoning → ThinkingDelta; both wake the UI.
+    let tx_stream = tx.clone();
+    let ctx_stream = ctx.clone();
+    let streaming_handler: StreamingHandler = Arc::new(move |event: &StreamingEvent| {
+        let ui_event = match event {
+            StreamingEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                Some(UiEvent::AssistantDelta(delta.clone()))
+            }
+            StreamingEvent::ThinkingDelta { delta } if !delta.is_empty() => {
+                Some(UiEvent::ThinkingDelta(delta.clone()))
+            }
+            _ => None,
+        };
+        if let Some(ui_event) = ui_event {
+            let _ = tx_stream.send(ui_event);
+            ctx_stream.request_repaint();
+        }
+    });
+
+    // Build the real backend from the shared config (same settings.json the CLI
+    // reads), through the shared host builder — identical to the CLI's path.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let params = deeptide_host::config::resolve_backend_params(&cwd);
+    let configured = match deeptide_host::backend::build_backend(
+        &params,
+        Some(streaming_handler),
+        Some(Arc::clone(&interrupt)),
+    ) {
+        Ok(configured) => configured,
+        Err(error) => {
+            let _ = tx.send(UiEvent::Error(format!(
+                "failed to configure backend: {error}"
+            )));
+            ctx.request_repaint();
+            return;
+        }
+    };
+    if !configured.is_configured {
+        let _ = tx.send(UiEvent::Error(
+            "no API key configured — set DEEPTIDE_API_KEY (or settings.json) to talk to a model"
+                .to_owned(),
+        ));
+        ctx.request_repaint();
+    }
+
+    let mut agent = AgentLoop::new(configured.backend)
+        .with_model(configured.model)
         .with_event_callback(event_cb)
         .with_interrupt_flag(Arc::clone(&interrupt));
 

@@ -16,10 +16,6 @@ pub enum WorkerMsg {
 /// An event sent from a worker thread to the UI thread. Mirrors the subset of
 /// `deeptide_core::AgentLoopEvent` / streaming the UI renders; the worker maps
 /// core events to these so the UI never depends on core's internal event shape.
-// `AssistantDelta` / `ThinkingDelta` are constructed once real (streaming)
-// model backends are wired via the shared host builder; the MVP's echo backend
-// only emits whole `Assistant` messages.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     /// Live token of assistant answer text (from the backend StreamingHandler).
