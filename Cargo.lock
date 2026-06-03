@@ -853,6 +853,7 @@ version = "0.2.0"
 dependencies = [
  "clap",
  "deeptide-core",
+ "deeptide-host",
  "libc",
  "serde_json",
  "tempfile",
@@ -883,6 +884,13 @@ dependencies = [
  "crossbeam-channel",
  "deeptide-core",
  "eframe",
+]
+
+[[package]]
+name = "deeptide-host"
+version = "0.2.0"
+dependencies = [
+ "deeptide-core",
 ]
 
 [[package]]

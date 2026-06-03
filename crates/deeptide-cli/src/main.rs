@@ -13,11 +13,10 @@ use deeptide_core::embedded_protocol::{
 };
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
-    AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
-    AskOutcome, CommandCompletionCandidate, CommandCompletionSource, CompletionEngine,
-    LocalEchoBackend, MarkdownRenderOptions, ModelPricing, ReplEvent, ReplSession, StatusSegment,
-    StreamingEvent, StreamingHandler, StreamingMarkdownRenderer, SystemMessage, ThinkingConfig,
-    ToolCall, tui,
+    AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AskOutcome,
+    CommandCompletionCandidate, CommandCompletionSource, CompletionEngine, LocalEchoBackend,
+    MarkdownRenderOptions, ModelPricing, ReplEvent, ReplSession, StatusSegment, StreamingEvent,
+    StreamingHandler, StreamingMarkdownRenderer, SystemMessage, ToolCall, tui,
 };
 /// A single completion candidate produced by the slash-command / `@path`
 /// / argument completers. `replacement` is the text spliced into the
@@ -33,7 +32,7 @@ mod chrome;
 mod line_edit;
 mod picker;
 mod prompt_editor;
-mod provider;
+use deeptide_host::provider;
 mod queue_editor;
 mod queue_input;
 mod status_bar;
@@ -41,36 +40,11 @@ mod status_bar;
 const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
-struct ConfiguredBackend {
-    backend: Box<dyn AgentBackend>,
-    model: String,
-    is_configured: bool,
-    subagent_config: Option<SubagentConfig>,
-}
-
-/// Protocol-tagged backend config used to spawn sub-agents (the `Agent` tool)
-/// with the SAME protocol and endpoint as the main loop. Without this, a
-/// session pointed at DeepSeek/ollama would silently spawn sub-agents against
-/// Anthropic. The variant mirrors whichever backend the main loop is using.
-#[derive(Clone)]
-enum SubagentConfig {
-    Anthropic(AnthropicConfig),
-    OpenAi(deeptide_core::OpenAiConfig),
-    Gemini(deeptide_core::GeminiConfig),
-}
-
-impl SubagentConfig {
-    /// Borrow the Anthropic config when this session speaks the Anthropic
-    /// protocol. Used by tests that assert on Anthropic-specific fields
-    /// (thinking budget, etc.); returns `None` for other protocols.
-    #[cfg(test)]
-    fn as_anthropic(&self) -> Option<&AnthropicConfig> {
-        match self {
-            SubagentConfig::Anthropic(config) => Some(config),
-            SubagentConfig::OpenAi(_) | SubagentConfig::Gemini(_) => None,
-        }
-    }
-}
+// Backend assembly (provider presets, protocol dispatch, sub-agent config) lives
+// in `deeptide-host` so the CLI and the GUI build backends identically.
+use deeptide_host::backend::{
+    BackendParams, CloudCredential, ConfiguredBackend, SubagentConfig, build_backend,
+};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
 enum InputFormat {
@@ -3551,199 +3525,43 @@ fn configured_backend_with_handler(
     streaming_handler: Option<StreamingHandler>,
     interrupt: Option<Arc<AtomicBool>>,
 ) -> Result<ConfiguredBackend, String> {
-    // Resolve the provider preset first: it decides the wire protocol and
-    // supplies default base-url/model that explicit flags/env still override.
-    // No `--provider` ⇒ the default Anthropic preset, preserving prior
-    // behaviour exactly.
-    let preset = provider::resolve_provider(cli.provider.as_deref().unwrap_or("anthropic"));
-
-    let credential = effective_credential(cli);
-    // Keyless local engines (ollama, llama.cpp, mlx with `requires_key=false`)
-    // are usable with no credential. Cloud providers still require one — when
-    // absent we fall back to the local-echo backend exactly as before.
-    if credential.is_none() && preset.requires_key {
-        return Ok(ConfiguredBackend {
-            backend: Box::<LocalEchoBackend>::default(),
-            model: String::from("unconfigured"),
-            is_configured: false,
-            subagent_config: None,
-        });
-    }
-
-    let base_url = effective_base_url_for(cli, &preset);
-    let model = effective_model_for(cli, &preset);
-
-    match preset.protocol {
-        provider::Protocol::Anthropic => configure_anthropic_backend(
-            cli,
-            base_url,
-            model,
-            credential,
-            streaming_handler,
-            interrupt,
-        ),
-        provider::Protocol::OpenAi => configure_openai_backend(
-            cli,
-            base_url,
-            model,
-            credential,
-            streaming_handler,
-            interrupt,
-        ),
-        provider::Protocol::Gemini => configure_gemini_backend(
-            cli,
-            base_url,
-            model,
-            credential,
-            streaming_handler,
-            interrupt,
-        ),
-    }
+    // The CLI resolves provider / credential / overrides from clap flags + env,
+    // then hands a front-end-neutral `BackendParams` to the shared host builder,
+    // so the GUI assembles backends through the identical path (no drift).
+    let params = BackendParams {
+        provider: cli
+            .provider
+            .clone()
+            .unwrap_or_else(|| String::from("anthropic")),
+        base_url_override: base_url_override(cli),
+        model_override: model_override(cli),
+        credential: effective_credential(cli),
+        max_output_tokens: cli.max_output_tokens,
+        enable_prompt_caching: !cli.no_prompt_cache,
+        stream: cli.stream,
+        fallback_model: cli.fallback_model.clone(),
+        thinking_label: cli.thinking.clone().or_else(|| cli.effort.clone()),
+        system_prompt: resolve_system_prompt(cli)?,
+    };
+    build_backend(&params, streaming_handler, interrupt)
 }
 
-/// Build the Anthropic-protocol backend (the original path, factored out so the
-/// dispatcher in [`configured_backend_with_handler`] reads cleanly).
-fn configure_anthropic_backend(
-    cli: &Cli,
-    base_url: String,
-    model: String,
-    credential: Option<CloudCredential>,
-    streaming_handler: Option<StreamingHandler>,
-    interrupt: Option<Arc<AtomicBool>>,
-) -> Result<ConfiguredBackend, String> {
-    // The Anthropic protocol always needs a credential; the keyless short-
-    // circuit above only applies to local OpenAI engines, so a missing
-    // credential here means the caller mis-set the provider — fall back to echo.
-    let Some(credential) = credential else {
-        return Ok(ConfiguredBackend {
-            backend: Box::<LocalEchoBackend>::default(),
-            model: String::from("unconfigured"),
-            is_configured: false,
-            subagent_config: None,
-        });
-    };
-    let mut config = match credential {
-        CloudCredential::ApiKey(api_key) => AnthropicConfig::new(base_url, api_key, model.clone()),
-        CloudCredential::BearerToken(token) => {
-            AnthropicConfig::new_with_bearer_token(base_url, token, model.clone())
-        }
-    };
-    config.max_tokens = cli.max_output_tokens;
-    config.enable_prompt_caching = !cli.no_prompt_cache;
-    config.enable_streaming = cli.stream || streaming_handler.is_some();
-    config.fallback_model = cli.fallback_model.clone();
-    // --thinking takes precedence over --effort; both already absorb config
-    // fallbacks. An unset/`auto` value leaves thinking omitted from requests.
-    config.thinking = cli
-        .thinking
-        .as_deref()
-        .or(cli.effort.as_deref())
-        .and_then(ThinkingConfig::from_label);
-    if let Some(system_prompt) = resolve_system_prompt(cli)? {
-        config = config.with_system_prompt(system_prompt);
+/// The explicit base-URL override (flag or env), or `None` to defer to the
+/// preset default (the host builder applies that fallback).
+fn base_url_override(cli: &Cli) -> Option<String> {
+    if cli.base_url != DEFAULT_BASE_URL {
+        return Some(cli.base_url.clone());
     }
-    let mut backend = AnthropicBackend::new(config.clone())?;
-    if let Some(flag) = interrupt {
-        backend = backend.with_interrupt_flag(flag);
-    }
-    if let Some(handler) = streaming_handler {
-        backend = backend.with_streaming_handler(handler);
-    }
-    Ok(ConfiguredBackend {
-        backend: Box::new(backend),
-        model,
-        is_configured: true,
-        subagent_config: Some(SubagentConfig::Anthropic(config)),
-    })
+    env_first_non_empty(&["ZERO_CLI_BASE_URL", "ZERO_API_BASE", "ANTHROPIC_BASE_URL"])
 }
 
-/// Build the OpenAI-compatible backend (DeepSeek, ollama, LM Studio, vLLM,
-/// mlx, OpenAI, …). Streams when a handler is supplied AND `--stream`/REPL
-/// streaming is on, feeding `parse_openai_stream` so the TUI renders deltas
-/// token-by-token; otherwise runs buffered and the REPL's `did_stream`-false
-/// path prints the assembled panel.
-fn configure_openai_backend(
-    cli: &Cli,
-    base_url: String,
-    model: String,
-    credential: Option<CloudCredential>,
-    streaming_handler: Option<StreamingHandler>,
-    interrupt: Option<Arc<AtomicBool>>,
-) -> Result<ConfiguredBackend, String> {
-    // OpenAI servers authenticate with a bearer token; both credential forms
-    // collapse to the same string. A keyless local engine yields `None` → empty
-    // key → no Authorization header (see OpenAiBackend::try_model).
-    let api_key = match credential {
-        Some(CloudCredential::ApiKey(key)) | Some(CloudCredential::BearerToken(key)) => key,
-        None => String::new(),
-    };
-    let mut config = deeptide_core::OpenAiConfig::new(base_url, api_key, model.clone());
-    config.max_tokens = cli.max_output_tokens;
-    // Stream when the user asked (--stream) or the REPL installed a live
-    // handler. The backend only actually streams when BOTH this flag and a
-    // handler are present (see OpenAiBackend::streaming_active).
-    config.enable_streaming = cli.stream || streaming_handler.is_some();
-    config.fallback_model = cli.fallback_model.clone();
-    if let Some(system_prompt) = resolve_system_prompt(cli)? {
-        config = config.with_system_prompt(system_prompt);
+/// The explicit model override (flag or env), or `None` to defer to the preset
+/// default.
+fn model_override(cli: &Cli) -> Option<String> {
+    if cli.model != DEFAULT_MODEL {
+        return Some(cli.model.clone());
     }
-    let mut backend = deeptide_core::OpenAiBackend::new(config.clone())?;
-    if let Some(flag) = interrupt {
-        backend = backend.with_interrupt_flag(flag);
-    }
-    if let Some(handler) = streaming_handler {
-        backend = backend.with_streaming_handler(handler);
-    }
-    Ok(ConfiguredBackend {
-        backend: Box::new(backend),
-        model,
-        is_configured: true,
-        subagent_config: Some(SubagentConfig::OpenAi(config)),
-    })
-}
-
-/// Build the Gemini backend (`generateContent` / `streamGenerateContent`).
-/// Streams when a handler is installed AND streaming is on, feeding
-/// `parse_gemini_stream` so the TUI renders deltas uniformly; otherwise
-/// buffered. Auth is the `x-goog-api-key` header (both credential forms collapse
-/// to the same key string).
-fn configure_gemini_backend(
-    cli: &Cli,
-    base_url: String,
-    model: String,
-    credential: Option<CloudCredential>,
-    streaming_handler: Option<StreamingHandler>,
-    interrupt: Option<Arc<AtomicBool>>,
-) -> Result<ConfiguredBackend, String> {
-    let api_key = match credential {
-        Some(CloudCredential::ApiKey(key)) | Some(CloudCredential::BearerToken(key)) => key,
-        None => String::new(),
-    };
-    let mut config = deeptide_core::GeminiConfig::new(base_url, api_key, model.clone());
-    config.max_tokens = cli.max_output_tokens;
-    config.enable_streaming = cli.stream || streaming_handler.is_some();
-    config.fallback_model = cli.fallback_model.clone();
-    if let Some(system_prompt) = resolve_system_prompt(cli)? {
-        config = config.with_system_prompt(system_prompt);
-    }
-    let mut backend = deeptide_core::GeminiBackend::new(config.clone())?;
-    if let Some(flag) = interrupt {
-        backend = backend.with_interrupt_flag(flag);
-    }
-    if let Some(handler) = streaming_handler {
-        backend = backend.with_streaming_handler(handler);
-    }
-    Ok(ConfiguredBackend {
-        backend: Box::new(backend),
-        model,
-        is_configured: true,
-        subagent_config: Some(SubagentConfig::Gemini(config)),
-    })
-}
-
-enum CloudCredential {
-    ApiKey(String),
-    BearerToken(String),
+    env_first_non_empty(&["ZERO_CLI_MODEL", "ANTHROPIC_MODEL"])
 }
 
 /// Read the effective system prompt from `--system-prompt-file` (preferred)
@@ -4995,34 +4813,6 @@ fn effective_base_url(cli: &Cli) -> String {
 
     env_first_non_empty(&["ZERO_CLI_BASE_URL", "ZERO_API_BASE", "ANTHROPIC_BASE_URL"])
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned())
-}
-
-/// Base-URL resolution with provider-preset fallback. Precedence (highest
-/// first): explicit `--base-url` → `*_BASE_URL` env → the preset's default →
-/// the global default. So `--provider deepseek` alone points at DeepSeek, but
-/// `--provider deepseek --base-url http://relay` still wins.
-fn effective_base_url_for(cli: &Cli, preset: &provider::ProviderPreset) -> String {
-    if cli.base_url != DEFAULT_BASE_URL {
-        return cli.base_url.clone();
-    }
-    if let Some(url) =
-        env_first_non_empty(&["ZERO_CLI_BASE_URL", "ZERO_API_BASE", "ANTHROPIC_BASE_URL"])
-    {
-        return url;
-    }
-    preset.base_url.clone()
-}
-
-/// Model resolution with provider-preset fallback. Precedence: explicit
-/// `--model` → `*_MODEL` env → the preset's default → the global default.
-fn effective_model_for(cli: &Cli, preset: &provider::ProviderPreset) -> String {
-    if cli.model != DEFAULT_MODEL {
-        return cli.model.clone();
-    }
-    if let Some(model) = env_first_non_empty(&["ZERO_CLI_MODEL", "ANTHROPIC_MODEL"]) {
-        return model;
-    }
-    preset.model.clone()
 }
 
 fn has_provider_base_url(cli: &Cli) -> bool {

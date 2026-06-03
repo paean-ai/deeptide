@@ -3,6 +3,7 @@ members = [
     "crates/deeptide-cli",
     "crates/deeptide-core",
     "crates/deeptide-gui",
+    "crates/deeptide-host",
 ]
 resolver = "2"
 
