@@ -165,11 +165,9 @@ pub fn suggest(signals: &TurnSignals) -> Vec<Suggestion> {
 
 fn truncate_label(text: &str, cap: usize) -> String {
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.chars().count() <= cap {
-        return one_line;
-    }
-    let kept: String = one_line.chars().take(cap.saturating_sub(1)).collect();
-    format!("{kept}…")
+    // `cap` is a display-column budget; width-aware truncation keeps CJK
+    // suggestion labels aligned and cut on the right boundary.
+    crate::width::truncate_to_width(&one_line, cap)
 }
 
 /// Render a suggestion list as a compact, numbered block for the REPL. Returns

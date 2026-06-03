@@ -1798,6 +1798,41 @@ fn session_end_capture_can_be_disabled() {
 }
 
 #[test]
+fn will_consolidate_on_exit_tracks_finalize_gate() {
+    // No user turn yet → nothing to consolidate.
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    assert!(
+        !repl.will_consolidate_on_exit(),
+        "no user turn means no consolidation"
+    );
+
+    // After a user turn the predicate flips true (matches finalize).
+    let _ = repl.submit("do some work");
+    assert!(
+        repl.will_consolidate_on_exit(),
+        "a user turn should arm the exit consolidation"
+    );
+
+    // Once finalize has run, the predicate must report false so the CLI
+    // doesn't spin a spinner over a no-op second finalize.
+    let _ = repl.finalize_session();
+    assert!(
+        !repl.will_consolidate_on_exit(),
+        "already-consolidated session must not re-arm"
+    );
+}
+
+#[test]
+fn will_consolidate_on_exit_false_when_capture_disabled() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_session_end_capture(false);
+    let _ = repl.submit("do some work");
+    assert!(
+        !repl.will_consolidate_on_exit(),
+        "disabled capture must not arm the exit spinner"
+    );
+}
+
+#[test]
 fn exit_command_triggers_capture_then_exits() {
     let mut repl = ReplSession::new(Box::new(StaticBackend));
     let _ = repl.submit("do some work");
@@ -1806,8 +1841,8 @@ fn exit_command_triggers_capture_then_exits() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, ReplEvent::Output(t) if t.contains("consolidating memory"))),
-        "/exit should consolidate before exiting: {events:?}"
+            .all(|e| !matches!(e, ReplEvent::Output(t) if t.contains("consolidating memory"))),
+        "/exit must exit immediately without running the memory consolidation pass: {events:?}"
     );
     assert!(
         matches!(events.last(), Some(ReplEvent::Exit)),
@@ -1892,4 +1927,36 @@ fn resume_menu_is_none_without_saved_sessions() {
     // No sessions on disk → no picker (falls through to the listing path).
     assert!(repl.menu_for("/resume").is_none());
     assert!(repl.menu_for("/resume some-id").is_none());
+}
+
+#[test]
+fn preset_interrupt_flag_stops_the_turn_with_an_interrupted_notice() {
+    // AlwaysToolBackend asks for a tool every turn, so without cancellation the
+    // loop would run to the max-turns cap. With the interrupt flag raised
+    // before submit, the agent loop's between-step check must short-circuit it
+    // almost immediately and surface the "Interrupted by user" notice — not a
+    // max-turns notice.
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut repl = ReplSession::new(Box::new(AlwaysToolBackend))
+        .with_interrupt_flag(std::sync::Arc::clone(&flag))
+        .with_max_turns(200);
+    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let events = repl.submit("do something that loops");
+
+    let notices: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            ReplEvent::System(SystemMessage::Notice(t)) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notices.iter().any(|t| t.contains("Interrupted by user")),
+        "a raised interrupt flag must end the turn with an interrupted notice: {events:?}"
+    );
+    assert!(
+        !notices.iter().any(|t| t.contains("Maximum turns")),
+        "interrupt must short-circuit before the loop reaches the turn cap: {events:?}"
+    );
 }

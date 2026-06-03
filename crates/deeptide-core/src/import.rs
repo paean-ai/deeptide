@@ -361,12 +361,9 @@ fn text_from_content(content: &serde_json::Value) -> String {
 }
 
 fn truncate(text: &str, cap: usize) -> String {
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= cap {
-        return trimmed.to_owned();
-    }
-    let kept: String = trimmed.chars().take(cap).collect();
-    format!("{kept}…")
+    // `cap` is a display-column budget; width-aware so CJK session previews in
+    // the import picker are cut on the right boundary and stay aligned.
+    crate::width::truncate_to_width(text.trim(), cap)
 }
 
 /// Strip the `<wrapper>…</wrapper>` system-context envelopes both Claude and

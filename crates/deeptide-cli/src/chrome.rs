@@ -193,6 +193,58 @@ pub fn render_welcome(
     format!("{head}\n{body}\n{tip}")
 }
 
+/// Render the dim per-turn timing footer printed once an agent turn
+/// finishes, so the user can see how long the agent worked and when it
+/// wrapped up:
+///
+/// ```text
+/// ▎ worked for 1h30m · finished 14:32:07
+/// ```
+///
+/// `elapsed` is the wall-clock duration of the turn; `finished_at`
+/// should already be expressed in the user's local zone (see
+/// `local_now` in the CLI entry point). The line is dim so it recedes
+/// behind the conversation, mirroring [`render_separator`]. No trailing
+/// newline — the caller decides spacing.
+pub fn render_turn_timing(
+    elapsed: std::time::Duration,
+    finished_at: time::OffsetDateTime,
+    color: bool,
+) -> String {
+    let dur = format_compact_duration(elapsed);
+    let clock = format!(
+        "{:02}:{:02}:{:02}",
+        finished_at.hour(),
+        finished_at.minute(),
+        finished_at.second()
+    );
+    sgr(
+        &format!("{ROLE_BAR} worked for {dur} · finished {clock}"),
+        SGR_DIM,
+        color,
+    )
+}
+
+/// Format a duration compactly for the per-turn footer. Granularity
+/// adapts to the magnitude so the common short turn stays terse while
+/// long-running tasks read in hours+minutes:
+///
+/// * `< 1m`  → `45s`
+/// * `< 1h`  → `5m03s`
+/// * `>= 1h` → `1h30m`
+fn format_compact_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        let hours = secs / 3600;
+        let minutes = (secs % 3600) / 60;
+        format!("{hours}h{minutes:02}m")
+    }
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -314,5 +366,84 @@ mod tests {
         // collapse into a wall of text on terminals that disabled
         // color.
         assert!(out.contains("░"));
+    }
+
+    #[test]
+    fn compact_duration_uses_seconds_under_a_minute() {
+        assert_eq!(
+            format_compact_duration(std::time::Duration::from_secs(0)),
+            "0s"
+        );
+        assert_eq!(
+            format_compact_duration(std::time::Duration::from_secs(45)),
+            "45s"
+        );
+        // Sub-second rounds down to whole seconds.
+        assert_eq!(
+            format_compact_duration(std::time::Duration::from_millis(900)),
+            "0s"
+        );
+    }
+
+    #[test]
+    fn compact_duration_uses_minutes_and_seconds_under_an_hour() {
+        assert_eq!(
+            format_compact_duration(std::time::Duration::from_secs(60)),
+            "1m00s"
+        );
+        assert_eq!(
+            format_compact_duration(std::time::Duration::from_secs(5 * 60 + 3)),
+            "5m03s"
+        );
+        assert_eq!(
+            format_compact_duration(std::time::Duration::from_secs(59 * 60 + 59)),
+            "59m59s"
+        );
+    }
+
+    #[test]
+    fn compact_duration_uses_hours_and_minutes_at_or_above_an_hour() {
+        // The example from the feature request: 90 minutes → 1h30m.
+        assert_eq!(
+            format_compact_duration(std::time::Duration::from_secs(90 * 60)),
+            "1h30m"
+        );
+        assert_eq!(
+            format_compact_duration(std::time::Duration::from_secs(3600)),
+            "1h00m"
+        );
+        assert_eq!(
+            format_compact_duration(std::time::Duration::from_secs(2 * 3600 + 5 * 60)),
+            "2h05m"
+        );
+    }
+
+    #[test]
+    fn turn_timing_footer_shows_duration_and_local_clock() {
+        // 14:32:07 past the epoch = 52327s. Deriving from UNIX_EPOCH keeps
+        // the expected clock obviously correct and timezone-independent.
+        let finished = time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(52_327);
+        let out = render_turn_timing(std::time::Duration::from_secs(90 * 60), finished, true);
+        assert!(
+            out.contains("worked for 1h30m"),
+            "duration missing: {out:?}"
+        );
+        assert!(out.contains("finished 14:32:07"), "clock missing: {out:?}");
+        assert!(out.contains("\x1b[2m"), "footer must be dim: {out:?}");
+        assert!(out.contains(ROLE_BAR));
+    }
+
+    #[test]
+    fn turn_timing_footer_no_color_is_plain_text() {
+        let finished = time::OffsetDateTime::from_unix_timestamp(0)
+            .expect("epoch is valid")
+            .to_offset(time::UtcOffset::UTC);
+        let out = render_turn_timing(std::time::Duration::from_secs(12), finished, false);
+        assert!(
+            !out.contains("\x1b["),
+            "no-color footer must be SGR-free: {out:?}"
+        );
+        assert!(out.contains("worked for 12s"));
+        assert!(out.contains("finished 00:00:00"));
     }
 }

@@ -5,6 +5,7 @@ use crate::{
 };
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRole {
@@ -215,6 +216,12 @@ pub enum AgentTerminalEvent {
     /// The transcript exceeded the model's hard context limit even after
     /// compaction, so the run was stopped rather than issuing a doomed request.
     Blocked,
+    /// The user cancelled the turn mid-flight (Ctrl-C). The loop stops at the
+    /// next safe boundary — between steps, after a cancelled model stream, or
+    /// after the current tool batch (remaining tools in the batch get
+    /// synthetic "cancelled" results so every `tool_use` keeps a matching
+    /// `tool_result` and the session stays resumable).
+    Interrupted,
 }
 
 pub trait AgentBackend: Send {
@@ -313,6 +320,15 @@ pub enum ToolProgressEvent {
 /// must return quickly because the agent loop is blocked on it.
 pub type ToolProgressCallback = Arc<dyn Fn(&ToolProgressEvent) + Send + Sync>;
 
+/// Callback fired the moment each structured [`AgentLoopEvent`] is produced
+/// during [`AgentLoop::run`] — in the SAME order they appear in the returned
+/// `Vec`. Without it (the default) `run()` behaves exactly as before, returning
+/// the full event list only when the turn ends; with it, a host (the GUI, or a
+/// live headless stream) sees tool batches/results/compaction/terminal events
+/// AS THEY HAPPEN rather than buffered-then-replayed. Synchronous and must
+/// return quickly — the agent loop is blocked on it, like the other callbacks.
+pub type AgentEventCallback = Arc<dyn Fn(&AgentLoopEvent) + Send + Sync>;
+
 pub struct AgentLoop {
     backend: Box<dyn AgentBackend>,
     messages: Vec<ConversationMessage>,
@@ -344,6 +360,10 @@ pub struct AgentLoop {
     /// the CLI plugs in a callback that updates the spinner / pinned
     /// input-row hint with the current tool name.
     tool_progress_callback: Option<ToolProgressCallback>,
+    /// Optional live structured-event sink (see [`AgentEventCallback`]). When
+    /// set, each `AgentLoopEvent` is delivered as it is produced, not just in
+    /// the `Vec` returned by `run()`.
+    event_callback: Option<AgentEventCallback>,
     /// Runtime override of the backend's extended-thinking directive.
     /// Threaded into every outbound `AgentRequest` so the REPL can flip
     /// thinking on/off (and tune its budget) without rebuilding the
@@ -353,6 +373,11 @@ pub struct AgentLoop {
     /// Per-tool observability counters. Updated on every dispatch in
     /// [`AgentLoop::execute_tool_call`] so `/usage` has live data.
     tool_usage: crate::tool_usage::ToolUsageTracker,
+    /// Cooperative cancellation flag, shared with the CLI's Ctrl-C handler and
+    /// (via `tool_context`) every running tool. `None` = no cancellation wired
+    /// up (the default for library embeds and `--print` mode). Checked between
+    /// steps, after a cancelled model stream, and around each tool call.
+    interrupt: Option<Arc<AtomicBool>>,
 }
 
 impl AgentLoop {
@@ -382,9 +407,28 @@ impl AgentLoop {
             disallowed_tools: Vec::new(),
             ask_callback: None,
             tool_progress_callback: None,
+            event_callback: None,
             thinking_override: None,
             tool_usage: crate::tool_usage::ToolUsageTracker::new(),
+            interrupt: None,
         }
+    }
+
+    /// Attach a cooperative cancellation flag. The same `Arc` is shared with
+    /// the tool context (so running shell/monitor commands observe it) and is
+    /// checked by [`AgentLoop::run`] between steps and around each tool call.
+    /// The CLI sets this from its Ctrl-C handler.
+    pub fn with_interrupt_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.tool_context.interrupt = Some(Arc::clone(&flag));
+        self.interrupt = Some(flag);
+        self
+    }
+
+    /// `true` when a cancellation has been requested for the current turn.
+    fn is_interrupted(&self) -> bool {
+        self.interrupt
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
     }
 
     /// Read-only access to the per-tool observability counters. Used by
@@ -422,6 +466,25 @@ impl AgentLoop {
     pub fn with_tool_progress_callback(mut self, callback: ToolProgressCallback) -> Self {
         self.tool_progress_callback = Some(callback);
         self
+    }
+
+    /// Install a live structured-event sink (see [`AgentEventCallback`]). Each
+    /// `AgentLoopEvent` is delivered to the callback the instant it is produced
+    /// during `run()`, in the same order as the returned `Vec`. Used by the GUI
+    /// (live tool cards) and live headless streaming.
+    pub fn with_event_callback(mut self, callback: AgentEventCallback) -> Self {
+        self.event_callback = Some(callback);
+        self
+    }
+
+    /// Deliver `event` to the live sink (if any) and append it to `events`.
+    /// Routing every emission through this helper guarantees the live stream
+    /// and the returned `Vec` carry the identical sequence.
+    fn emit(&self, events: &mut Vec<AgentLoopEvent>, event: AgentLoopEvent) {
+        if let Some(cb) = &self.event_callback {
+            cb(&event);
+        }
+        events.push(event);
     }
 
     /// Update the active permission mode mid-session. Used by the REPL's
@@ -638,7 +701,8 @@ impl AgentLoop {
         self.current_run_step = 0;
         self.messages.push(user_message.clone());
 
-        let mut events = vec![AgentLoopEvent::User(user_message)];
+        let mut events = Vec::new();
+        self.emit(&mut events, AgentLoopEvent::User(user_message));
 
         loop {
             // Auto-compact the transcript before assembling the next request,
@@ -651,7 +715,7 @@ impl AgentLoop {
                 report = self.context_window.force_compress(&mut self.messages);
             }
             if report.did_compress {
-                events.push(AgentLoopEvent::Compaction(report));
+                self.emit(&mut events, AgentLoopEvent::Compaction(report));
                 if self.hooks.has_hooks(crate::hooks::HookEvent::PreCompact) {
                     let _ = self
                         .hooks
@@ -663,16 +727,30 @@ impl AgentLoop {
             // after compaction, stop instead of issuing a request the model
             // will reject. Mirrors Swift's isBlocked terminal.
             if self.context_window.is_blocked(&self.messages) {
-                events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::Blocked));
+                self.emit(
+                    &mut events,
+                    AgentLoopEvent::Terminal(AgentTerminalEvent::Blocked),
+                );
                 return events;
             }
 
             if self.current_run_step >= self.max_turns {
-                events.push(AgentLoopEvent::Terminal(
-                    AgentTerminalEvent::MaxTurnsReached {
+                self.emit(
+                    &mut events,
+                    AgentLoopEvent::Terminal(AgentTerminalEvent::MaxTurnsReached {
                         cap: self.max_turns,
-                    },
-                ));
+                    }),
+                );
+                return events;
+            }
+
+            // Cancellation requested between steps (e.g. Ctrl-C while we were
+            // about to issue the next request). Stop before spending a turn.
+            if self.is_interrupted() {
+                self.emit(
+                    &mut events,
+                    AgentLoopEvent::Terminal(AgentTerminalEvent::Interrupted),
+                );
                 return events;
             }
 
@@ -707,17 +785,35 @@ impl AgentLoop {
                         tool_calls_for_message,
                     );
                     self.messages.push(assistant_message.clone());
-                    events.push(AgentLoopEvent::Assistant(assistant_message));
+                    self.emit(&mut events, AgentLoopEvent::Assistant(assistant_message));
 
                     if response.tool_calls.is_empty() {
-                        events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::Complete));
+                        self.emit(
+                            &mut events,
+                            AgentLoopEvent::Terminal(AgentTerminalEvent::Complete),
+                        );
                         return events;
                     }
 
                     let total_tools = response.tool_calls.len();
                     let mut tool_results = Vec::with_capacity(total_tools);
                     let mut failure_summaries = Vec::new();
+                    // Set once a cancellation is observed mid-batch. Remaining
+                    // tools are NOT executed — but they still get a synthetic
+                    // "cancelled" tool_result below so every `tool_use` block
+                    // has a matching `tool_result` (Anthropic rejects a
+                    // transcript where one doesn't), keeping the session
+                    // resumable after the interrupt.
+                    let mut interrupted = false;
                     for (idx, tool_call) in response.tool_calls.into_iter().enumerate() {
+                        if interrupted || self.is_interrupted() {
+                            interrupted = true;
+                            let content = String::from("Cancelled by user (Ctrl-C).");
+                            failure_summaries
+                                .push(ToolBatchFailureClassifier::classify(&content, true));
+                            tool_results.push((tool_call, content, true));
+                            continue;
+                        }
                         // Fire the "tool starting" hook BEFORE we
                         // execute. The CLI uses this to swap the
                         // spinner / pinned-row hint from a generic
@@ -753,6 +849,12 @@ impl AgentLoop {
                                 .push(ToolBatchFailureClassifier::classify(&content, is_error));
                         }
                         tool_results.push((tool_call, content, is_error));
+                        // The tool may have been cancelled mid-run (its poll
+                        // loop observed the flag and killed the child). Stop
+                        // executing the rest of the batch.
+                        if self.is_interrupted() {
+                            interrupted = true;
+                        }
                     }
 
                     let tool_calls = tool_results
@@ -781,34 +883,63 @@ impl AgentLoop {
                     // last.
                     let mut result_blocks = Vec::with_capacity(tool_results.len());
                     for (tool_call, content, is_error) in tool_results {
-                        events.push(AgentLoopEvent::ToolResult {
-                            tool_call: tool_call.clone(),
-                            content: content.clone(),
-                            is_error,
-                        });
+                        self.emit(
+                            &mut events,
+                            AgentLoopEvent::ToolResult {
+                                tool_call: tool_call.clone(),
+                                content: content.clone(),
+                                is_error,
+                            },
+                        );
                         result_blocks.push(ToolResultBlock::new(
                             tool_call.id.clone(),
                             content,
                             is_error,
                         ));
                     }
-                    events.push(AgentLoopEvent::ToolBatchSummary {
-                        label: ToolBatchLabeler::label_with_failure_summaries(
-                            &label_items,
-                            &failure_summaries,
-                        ),
-                        tool_calls,
-                        failed_count,
-                    });
+                    self.emit(
+                        &mut events,
+                        AgentLoopEvent::ToolBatchSummary {
+                            label: ToolBatchLabeler::label_with_failure_summaries(
+                                &label_items,
+                                &failure_summaries,
+                            ),
+                            tool_calls,
+                            failed_count,
+                        },
+                    );
                     if !result_blocks.is_empty() {
                         self.messages
                             .push(ConversationMessage::tool_results(result_blocks));
                     }
+
+                    // The transcript is now valid (every tool_use has a
+                    // matching tool_result, including the synthetic cancelled
+                    // ones). Stop here rather than issuing another request.
+                    if interrupted {
+                        self.emit(
+                            &mut events,
+                            AgentLoopEvent::Terminal(AgentTerminalEvent::Interrupted),
+                        );
+                        return events;
+                    }
                 }
                 Err(error) => {
-                    events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(
-                        error,
-                    )));
+                    // A cancelled stream surfaces here as a transport error.
+                    // Report it as an interruption (not a model error) so the
+                    // UI shows "Interrupted by user" rather than a scary
+                    // connection-failure line.
+                    if self.is_interrupted() {
+                        self.emit(
+                            &mut events,
+                            AgentLoopEvent::Terminal(AgentTerminalEvent::Interrupted),
+                        );
+                        return events;
+                    }
+                    self.emit(
+                        &mut events,
+                        AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)),
+                    );
                     return events;
                 }
             }
@@ -1485,5 +1616,46 @@ mod tool_progress_preview_tests {
     fn write_aliases_to_path_field() {
         let tc = call("Write", json!({"file_path": "/tmp/x.txt"}));
         assert_eq!(tool_progress_preview(&tc), "Write(/tmp/x.txt)");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod event_callback_tests {
+    use super::{AgentEventCallback, AgentLoop, AgentLoopEvent, LocalEchoBackend};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn live_event_callback_receives_the_same_sequence_as_the_returned_vec() {
+        // The live sink (used by the GUI / live headless streaming) must observe
+        // EXACTLY the events run() returns, in order — otherwise the returned Vec
+        // and the live stream could diverge. LocalEchoBackend emits no tool calls,
+        // so the turn is User → Assistant → Terminal(Complete).
+        let seen: Arc<Mutex<Vec<AgentLoopEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let cb: AgentEventCallback = Arc::new(move |event: &AgentLoopEvent| {
+            sink.lock().unwrap().push(event.clone());
+        });
+
+        let mut loop_ = AgentLoop::new(Box::new(LocalEchoBackend)).with_event_callback(cb);
+        let returned = loop_.run("hello there");
+
+        let live = seen.lock().unwrap().clone();
+        assert_eq!(
+            live, returned,
+            "live callback sequence must equal the returned Vec"
+        );
+        // Sanity: the expected shape for a no-tool turn.
+        assert!(matches!(returned.first(), Some(AgentLoopEvent::User(_))));
+        assert!(matches!(returned.last(), Some(AgentLoopEvent::Terminal(_))));
+        assert_eq!(returned.len(), 3, "User, Assistant, Terminal: {returned:?}");
+    }
+
+    #[test]
+    fn no_callback_still_returns_events() {
+        // Backwards-compatible: without a sink, run() behaves exactly as before.
+        let mut loop_ = AgentLoop::new(Box::new(LocalEchoBackend));
+        let returned = loop_.run("hi");
+        assert_eq!(returned.len(), 3);
     }
 }

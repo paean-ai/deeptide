@@ -453,6 +453,26 @@ impl ReplSession {
         events
     }
 
+    /// Side-effect-free predicate that reports whether a subsequent
+    /// [`finalize_session`] call would actually run the (model-backed,
+    /// multi-second) consolidation pass. The CLI host uses this to
+    /// decide whether to animate a "consolidating memory" spinner before
+    /// it drives the synchronous exit — otherwise the terminal looks
+    /// frozen while the pass runs.
+    ///
+    /// Must stay in lockstep with the gate conditions in
+    /// [`finalize_session`]; a `true` here followed by a no-op finalize
+    /// would leave a spinner with nothing behind it.
+    ///
+    /// [`finalize_session`]: ReplSession::finalize_session
+    pub fn will_consolidate_on_exit(&self) -> bool {
+        !self.session_consolidated
+            && self.session_end_capture
+            && self.session_persistence
+            && self.user_turn_count > 0
+            && self.dream_schedule.last_user_turn_count != self.user_turn_count
+    }
+
     /// Pre-register additional context directories (from `--add-dir`), resolving
     /// each against the session cwd. Non-directories and duplicates are skipped.
     /// Mirrors registering them via the `/add-dir` command at startup.
@@ -614,6 +634,18 @@ impl ReplSession {
     /// don't need to reach through `agent_loop()`.
     pub fn with_tool_progress_callback(mut self, callback: crate::ToolProgressCallback) -> Self {
         self.agent_loop = self.agent_loop.with_tool_progress_callback(callback);
+        self
+    }
+
+    /// Install the cooperative cancellation flag. Forwarded to the agent loop
+    /// (which shares it with the tool context). The CLI flips this from its
+    /// Ctrl-C handler to cancel an in-flight turn. See
+    /// [`crate::AgentLoop::with_interrupt_flag`].
+    pub fn with_interrupt_flag(
+        mut self,
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.agent_loop = self.agent_loop.with_interrupt_flag(flag);
         self
     }
 
@@ -1060,6 +1092,16 @@ impl ReplSession {
             StatusSegment::new("mode", mode_label).with_severity(mode_severity),
             StatusSegment::new("ctx", ctx_value).with_severity(ctx_severity),
         ];
+        // Live prompt-cache health, right after `ctx` so it rides along with
+        // the other session-state indicators through narrow-terminal
+        // truncation. Silent until the provider reports any cache telemetry —
+        // the bar stays quiet when caching isn't in play (e.g. turn 1, or a
+        // provider that doesn't report cache tokens). This is the real-time
+        // counterpart to the fuller `/usage` cache breakdown: the user sees
+        // "cache 87%" climb as the prefix warms, without running a command.
+        if let Some(cache) = cache_status_segment(&summary.cache_health()) {
+            segments.push(cache);
+        }
         if let Some(auth) = auth {
             segments.push(auth);
         }
@@ -1162,9 +1204,15 @@ impl ReplSession {
         let args = parts.next().unwrap_or_default();
 
         if matches!(name.as_str(), "exit" | "quit" | "q") {
-            let mut events = self.finalize_session();
-            events.push(ReplEvent::Exit);
-            return events;
+            // Exit immediately — `/exit` should quit as fast as Ctrl-C.
+            // We deliberately do NOT run the memory consolidation pass
+            // here: it drives a full agent loop (up to `max_turns` model
+            // round-trips, with no timeout) that can take minutes or
+            // appear to hang. Durable facts are still captured by the
+            // scheduled dream loop during the session, and `/dream`
+            // forces a consolidation pass on demand for anyone who wants
+            // one before leaving.
+            return vec![ReplEvent::Exit];
         }
 
         let context = self.command_context();
@@ -1567,7 +1615,7 @@ impl ReplSession {
                 "  Enter           Submit prompt",
                 "  Backslash + Enter Continue on next line",
                 "  Tab             Autocomplete /command or @path",
-                "  Ctrl+C          Interrupt running tool / press twice to exit when idle",
+                "  Ctrl+C          Cancel the running turn · press twice at the prompt to exit",
                 "  Ctrl+D          Exit on empty line",
                 "  Ctrl+L          Clear screen",
                 "  Ctrl+A / Ctrl+E Move to start / end of line",
@@ -4284,6 +4332,9 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
             compressed_messages: report.compressed_messages,
             tokens_after: report.tokens_after,
         })),
+        AgentLoopEvent::Terminal(AgentTerminalEvent::Interrupted) => Some(ReplEvent::System(
+            SystemMessage::Notice(String::from("⎿ Interrupted by user")),
+        )),
         AgentLoopEvent::User(_) | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => None,
     }
 }
@@ -5074,12 +5125,10 @@ fn format_duration_ms(d: std::time::Duration) -> String {
 /// fit comfortably in 22 chars so this only fires for very long MCP
 /// names.
 fn truncate_for_column(name: &str, max: usize) -> String {
-    if name.chars().count() <= max {
-        return name.to_owned();
-    }
-    let mut s: String = name.chars().take(max - 1).collect();
-    s.push('…');
-    s
+    // Width-aware: `max` is a column budget, so a CJK MCP tool/server name
+    // (2 cells per glyph) is cut on the right display boundary and the
+    // surrounding column alignment stays intact.
+    crate::width::truncate_to_width(name, max)
 }
 
 /// Render the body of `/think status`. Lives outside the impl block so
@@ -5544,6 +5593,33 @@ fn model_alias_summary() -> Vec<&'static str> {
     ]
 }
 
+/// Build the compact live `cache` status-bar segment from cache health, or
+/// `None` when there's nothing worth showing (no cache telemetry reported yet).
+///
+/// Value shape: `cache <rate>%` using the *recent*-turns hit rate (the last few
+/// turns reflect the current prefix's warmth far better than a session-lifetime
+/// average — a session that switched models mid-way shouldn't show a stale
+/// blended number). Falls back to the lifetime rate if recent is unavailable.
+///
+/// Severity drives the color so a glance tells the story:
+///   * `Info` (cyan)    — strong cache (≥ 80%): the prefix is warm, turns cheap.
+///   * `Neutral` (dim)  — warming (60–79%): reads happening, climbing.
+///   * `Warning` (amber)— cold (< 60%) with reads present: prefix not sticking.
+///
+/// Returns `None` for the "warming, turn 1, no reads yet" and "provider didn't
+/// report" cases so the bar stays silent until caching is actually observable.
+fn cache_status_segment(cache: &crate::CacheHealth) -> Option<StatusSegment> {
+    let rate = cache.recent_hit_rate_percent.or(cache.hit_rate_percent)?;
+    let severity = if rate >= 80 {
+        crate::Severity::Info
+    } else if rate >= 60 {
+        crate::Severity::Neutral
+    } else {
+        crate::Severity::Warning
+    };
+    Some(StatusSegment::new("cache", format!("{rate}%")).with_severity(severity))
+}
+
 fn render_cache_health(cache: &crate::CacheHealth) -> String {
     let created = CostTracker::format_tokens(cache.total_create_tokens);
     let read = CostTracker::format_tokens(cache.total_read_tokens);
@@ -5801,13 +5877,10 @@ fn render_git_command(cwd: &std::path::Path, args: &[&str], empty_message: &str)
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let truncated = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
+    // Display-facing one-line previews (retry prompt, etc.): budget by terminal
+    // display width so a CJK prompt is cut on the right column boundary rather
+    // than at a char count that over-counts wide glyphs.
+    crate::width::truncate_to_width(value, max_chars)
 }
 
 fn render_permission_rules(rules: &PermissionRules) -> String {
@@ -6479,5 +6552,74 @@ mod slash_command_classifier_tests {
         // should be robust to a user typing a space before `/`.
         assert!(slash_command_invokes_agent("  /retry"));
         assert!(!slash_command_invokes_agent("  /exit"));
+    }
+}
+
+#[cfg(test)]
+mod cache_segment_tests {
+    use super::cache_status_segment;
+    use crate::{CacheHealth, Severity};
+
+    fn health(
+        recent: Option<usize>,
+        total: Option<usize>,
+        reads: usize,
+        turns: usize,
+    ) -> CacheHealth {
+        CacheHealth {
+            hit_rate_percent: total,
+            recent_hit_rate_percent: recent,
+            total_create_tokens: 0,
+            total_read_tokens: reads,
+            turn_count: turns,
+        }
+    }
+
+    #[test]
+    fn no_telemetry_yields_no_segment() {
+        // Turn 1, nothing reported yet → the bar stays silent.
+        assert!(cache_status_segment(&health(None, None, 0, 1)).is_none());
+    }
+
+    #[test]
+    fn strong_cache_is_info_severity() {
+        let seg =
+            cache_status_segment(&health(Some(87), Some(80), 5000, 4)).expect("segment present");
+        assert_eq!(seg.label, "cache");
+        assert_eq!(seg.value, "87%");
+        assert_eq!(seg.severity, Severity::Info);
+    }
+
+    #[test]
+    fn warming_cache_is_neutral_severity() {
+        let seg =
+            cache_status_segment(&health(Some(70), Some(65), 2000, 3)).expect("segment present");
+        assert_eq!(seg.value, "70%");
+        assert_eq!(seg.severity, Severity::Neutral);
+    }
+
+    #[test]
+    fn cold_cache_is_warning_severity() {
+        let seg =
+            cache_status_segment(&health(Some(20), Some(25), 500, 5)).expect("segment present");
+        assert_eq!(seg.value, "20%");
+        assert_eq!(seg.severity, Severity::Warning);
+    }
+
+    #[test]
+    fn recent_rate_is_preferred_over_lifetime() {
+        // recent diverges from lifetime; the segment must reflect recent
+        // (the current prefix warmth), not the blended average.
+        let seg =
+            cache_status_segment(&health(Some(90), Some(40), 9000, 6)).expect("segment present");
+        assert_eq!(seg.value, "90%");
+        assert_eq!(seg.severity, Severity::Info);
+    }
+
+    #[test]
+    fn falls_back_to_lifetime_when_recent_absent() {
+        let seg = cache_status_segment(&health(None, Some(82), 4000, 5)).expect("segment present");
+        assert_eq!(seg.value, "82%");
+        assert_eq!(seg.severity, Severity::Info);
     }
 }

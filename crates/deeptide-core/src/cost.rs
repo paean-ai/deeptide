@@ -381,3 +381,59 @@ fn default_pricing_table() -> [(&'static str, ModelPricing); 5] {
         ),
     ]
 }
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+
+    #[test]
+    fn cached_reads_are_priced_at_the_cheaper_rate_not_the_input_rate() {
+        // deepseek-chat: input $0.14/M, cache_read $0.04/M. A turn with 1M
+        // cached-read tokens must cost the cache rate, NOT the input rate —
+        // and the two must differ (proving the cheaper tier is applied).
+        let tracker = CostTracker::new();
+        tracker.record(TurnUsage::new(1, "deepseek-chat", 0, 0, 0, 1_000_000, 0));
+        let cache_cost = tracker.summary().total_cost_usd;
+        assert!(
+            (cache_cost - 0.04).abs() < 1e-9,
+            "cache read cost: {cache_cost}"
+        );
+
+        let tracker2 = CostTracker::new();
+        tracker2.record(TurnUsage::new(1, "deepseek-chat", 1_000_000, 0, 0, 0, 0));
+        let input_cost = tracker2.summary().total_cost_usd;
+        assert!((input_cost - 0.14).abs() < 1e-9, "input cost: {input_cost}");
+
+        assert!(
+            cache_cost < input_cost,
+            "cached reads ({cache_cost}) must be cheaper than uncached input ({input_cost})"
+        );
+    }
+
+    #[test]
+    fn split_input_and_cache_read_costs_sum_per_tier() {
+        // The parsers now hand us DISJOINT input vs cache_read counts (each
+        // token priced once). 100 uncached + 900 cached (of a 1000-token
+        // prompt) → 100*0.14/M + 900*0.04/M.
+        let tracker = CostTracker::new();
+        tracker.record(TurnUsage::new(1, "deepseek-chat", 100, 0, 0, 900, 0));
+        let cost = tracker.summary().total_cost_usd;
+        let expected = 100.0 * (0.14 / 1_000_000.0) + 900.0 * (0.04 / 1_000_000.0);
+        assert!(
+            (cost - expected).abs() < 1e-12,
+            "got {cost}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn cache_health_hit_rate_reflects_reads() {
+        let tracker = CostTracker::new();
+        // Turn 1 creates the cache; turn 2 reads most of it.
+        tracker.record(TurnUsage::new(1, "deepseek-chat", 1000, 50, 0, 0, 0));
+        tracker.record(TurnUsage::new(2, "deepseek-chat", 100, 50, 0, 900, 0));
+        let health = tracker.summary().cache_health();
+        // Lifetime: read 900 / (input 1100 + read 900) = 45%.
+        assert_eq!(health.hit_rate_percent, Some(45));
+        assert_eq!(health.total_read_tokens, 900);
+    }
+}

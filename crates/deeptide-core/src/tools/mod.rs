@@ -3,7 +3,8 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Mutex, OnceLock, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -66,14 +67,45 @@ impl ToolResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// NOTE: deliberately not `PartialEq`/`Eq` — the `interrupt` flag below is an
+// `Arc<AtomicBool>`, which has no meaningful value equality, and nothing in
+// the tree compares `ToolContext` values. `Debug`/`Clone` stay; cloning the
+// `Arc` shares the same cancellation flag with every tool, which is exactly
+// what we want.
+#[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     pub cwd: PathBuf,
+    /// Cooperative cancellation flag. When flipped to `true` mid-turn (by the
+    /// CLI's Ctrl-C handler), long-running tools — the Bash/Monitor poll loops
+    /// in particular — observe it on their next tick, kill the child process,
+    /// and return early instead of blocking for the full timeout. `None` (the
+    /// default) means "no cancellation wired up", so library embeds and tests
+    /// behave exactly as before.
+    pub interrupt: Option<Arc<AtomicBool>>,
 }
 
 impl ToolContext {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
-        Self { cwd: cwd.into() }
+        Self {
+            cwd: cwd.into(),
+            interrupt: None,
+        }
+    }
+
+    /// Attach a cooperative cancellation flag (shared with the agent loop and
+    /// the CLI's interrupt handler). The shell-execution poll loops check it
+    /// every tick.
+    pub fn with_interrupt(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.interrupt = Some(flag);
+        self
+    }
+
+    /// `true` when an interrupt has been requested for the current turn. Cheap
+    /// relaxed load; safe to call in tight poll loops.
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupt
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
     }
 
     pub fn resolve_path(&self, path: &str) -> PathBuf {
@@ -4372,9 +4404,18 @@ fn execute_shell_command(command: &str, context: &ToolContext, timeout: Duration
 
     let started = Instant::now();
     let mut timed_out = false;
+    let mut interrupted = false;
     loop {
         match child.try_wait() {
             Ok(Some(_status)) => break,
+            // Cooperative cancel: a Ctrl-C mid-turn flips the shared flag.
+            // Kill the child and bail instead of blocking for the full
+            // timeout (up to 10 minutes for e.g. a Chrome PDF print).
+            Ok(None) if context.is_interrupted() => {
+                interrupted = true;
+                let _ = child.kill();
+                break;
+            }
             Ok(None) if started.elapsed() >= timeout => {
                 timed_out = true;
                 let _ = child.kill();
@@ -4391,6 +4432,10 @@ fn execute_shell_command(command: &str, context: &ToolContext, timeout: Duration
             return ToolResult::error(format!("Failed to collect command output: {error}"));
         }
     };
+
+    if interrupted {
+        return ToolResult::error("Command cancelled by user (Ctrl-C).");
+    }
 
     render_command_output(
         command,
@@ -4484,6 +4529,14 @@ fn monitor_shell_command(
             let _ = child.kill();
             exit_code = child.wait().ok().and_then(|status| status.code());
             break;
+        }
+
+        // Cooperative cancel: a Ctrl-C mid-turn kills the child and stops
+        // monitoring instead of waiting out the configured timeout.
+        if context.is_interrupted() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return ToolResult::error("Command cancelled by user (Ctrl-C).");
         }
 
         match child.try_wait() {
