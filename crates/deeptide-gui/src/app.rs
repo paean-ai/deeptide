@@ -1,0 +1,244 @@
+//! The egui application: a streaming chat transcript over a [`Conversation`].
+//!
+//! Immediate-mode: state lives in `App`, and each frame we (1) drain any events
+//! the worker produced and fold them into the transcript, then (2) render. The
+//! worker calls `ctx.request_repaint()` on every event, so streaming feels live
+//! without polling.
+
+use eframe::egui;
+
+use crate::conversation::Conversation;
+use crate::events::{TerminalKind, UiEvent};
+
+/// One rendered item in the transcript.
+enum Bubble {
+    User(String),
+    Assistant(String),
+    Tool {
+        tool: String,
+        content: String,
+        is_error: bool,
+    },
+    Status(String),
+}
+
+pub struct App {
+    conversation: Conversation,
+    transcript: Vec<Bubble>,
+    input: String,
+    /// True while a turn is in flight (disables send, enables stop).
+    running: bool,
+    /// Index of the assistant bubble currently being streamed into, if any.
+    streaming: Option<usize>,
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self {
+            conversation: Conversation::spawn(cc.egui_ctx.clone()),
+            transcript: Vec::new(),
+            input: String::new(),
+            running: false,
+            streaming: None,
+        }
+    }
+
+    /// Fold every pending worker event into the transcript.
+    fn drain_events(&mut self) {
+        while let Ok(event) = self.conversation.from_worker.try_recv() {
+            match event {
+                UiEvent::AssistantDelta(delta) => {
+                    let idx = match self.streaming {
+                        Some(i) => i,
+                        None => {
+                            self.transcript.push(Bubble::Assistant(String::new()));
+                            let i = self.transcript.len() - 1;
+                            self.streaming = Some(i);
+                            i
+                        }
+                    };
+                    if let Some(Bubble::Assistant(text)) = self.transcript.get_mut(idx) {
+                        text.push_str(&delta);
+                    }
+                }
+                UiEvent::ThinkingDelta(_) => {
+                    // Reasoning rendering arrives in a later phase; ignore for MVP.
+                }
+                UiEvent::Assistant(full) => {
+                    // Authoritative assistant text. If we were streaming deltas,
+                    // finalize that bubble; otherwise add a fresh one.
+                    match self.streaming.take() {
+                        Some(i) => {
+                            if let Some(Bubble::Assistant(text)) = self.transcript.get_mut(i) {
+                                *text = full;
+                            }
+                        }
+                        None => self.transcript.push(Bubble::Assistant(full)),
+                    }
+                }
+                UiEvent::ToolResult {
+                    tool,
+                    content,
+                    is_error,
+                } => self.transcript.push(Bubble::Tool {
+                    tool,
+                    content,
+                    is_error,
+                }),
+                UiEvent::ToolBatch { label, failed } => {
+                    let suffix = if failed > 0 {
+                        format!(" ({failed} failed)")
+                    } else {
+                        String::new()
+                    };
+                    self.transcript
+                        .push(Bubble::Status(format!("{label}{suffix}")));
+                }
+                UiEvent::Terminal(kind) => {
+                    self.running = false;
+                    self.streaming = None;
+                    if let Some(note) = terminal_note(&kind) {
+                        self.transcript.push(Bubble::Status(note));
+                    }
+                }
+                UiEvent::Error(message) => {
+                    self.running = false;
+                    self.streaming = None;
+                    self.transcript.push(Bubble::Status(format!("⚠ {message}")));
+                }
+            }
+        }
+    }
+
+    fn submit(&mut self) {
+        let text = self.input.trim().to_owned();
+        if text.is_empty() || self.running {
+            return;
+        }
+        self.transcript.push(Bubble::User(text.clone()));
+        self.conversation.send_prompt(text);
+        self.input.clear();
+        self.running = true;
+    }
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.drain_events();
+
+        egui::Panel::top("header").show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Deeptide");
+                ui.label(
+                    egui::RichText::new("native preview")
+                        .small()
+                        .color(egui::Color32::GRAY),
+                );
+            });
+        });
+
+        egui::Panel::bottom("composer").show_inside(ui, |ui| {
+            ui.add_space(4.0);
+            let send_now = ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
+                && ui.memory(|m| m.has_focus(egui::Id::new("prompt")));
+            ui.horizontal(|ui| {
+                let field = egui::TextEdit::multiline(&mut self.input)
+                    .id(egui::Id::new("prompt"))
+                    .desired_rows(2)
+                    .desired_width(ui.available_width() - 120.0)
+                    .hint_text("Ask Deeptide…  (Enter to send, Shift+Enter for newline)");
+                ui.add(field);
+                ui.vertical(|ui| {
+                    let can_send = !self.running && !self.input.trim().is_empty();
+                    if ui
+                        .add_enabled(can_send, egui::Button::new("Send"))
+                        .clicked()
+                    {
+                        self.submit();
+                    }
+                    if ui
+                        .add_enabled(self.running, egui::Button::new("Stop"))
+                        .clicked()
+                    {
+                        self.conversation.interrupt();
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            if send_now {
+                self.submit();
+            }
+        });
+
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for bubble in &self.transcript {
+                        render_bubble(ui, bubble);
+                        ui.add_space(8.0);
+                    }
+                    if self.running {
+                        ui.label(egui::RichText::new("…").color(egui::Color32::GRAY));
+                    }
+                });
+        });
+    }
+}
+
+fn render_bubble(ui: &mut egui::Ui, bubble: &Bubble) {
+    match bubble {
+        Bubble::User(text) => {
+            ui.label(
+                egui::RichText::new("You")
+                    .strong()
+                    .color(egui::Color32::LIGHT_BLUE),
+            );
+            ui.label(text);
+        }
+        Bubble::Assistant(text) => {
+            ui.label(
+                egui::RichText::new("Deeptide")
+                    .strong()
+                    .color(egui::Color32::LIGHT_GREEN),
+            );
+            // Markdown rendering arrives in a later phase; plain text for now.
+            ui.label(text);
+        }
+        Bubble::Tool {
+            tool,
+            content,
+            is_error,
+        } => {
+            let header = if *is_error {
+                egui::RichText::new(format!("✗ {tool}")).color(egui::Color32::LIGHT_RED)
+            } else {
+                egui::RichText::new(format!("✓ {tool}")).color(egui::Color32::GRAY)
+            };
+            egui::CollapsingHeader::new(header)
+                .id_salt(("tool", ui.next_auto_id()))
+                .show(ui, |ui| {
+                    ui.monospace(content);
+                });
+        }
+        Bubble::Status(text) => {
+            ui.label(
+                egui::RichText::new(text)
+                    .italics()
+                    .color(egui::Color32::GRAY),
+            );
+        }
+    }
+}
+
+fn terminal_note(kind: &TerminalKind) -> Option<String> {
+    match kind {
+        // A clean completion needs no banner — the assistant text is the result.
+        TerminalKind::Complete => None,
+        TerminalKind::MaxTurns(cap) => Some(format!("hit the {cap}-turn cap")),
+        TerminalKind::ModelError(error) => Some(format!("model error: {error}")),
+        TerminalKind::Blocked => Some("context window full".to_owned()),
+        TerminalKind::Interrupted => Some("interrupted".to_owned()),
+    }
+}

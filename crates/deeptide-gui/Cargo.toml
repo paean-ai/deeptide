@@ -1,0 +1,21 @@
+[package]
+name = "deeptide-gui"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Native desktop GUI for Deeptide — embeds deeptide-core, shares CLI config + sessions."
+
+[dependencies]
+deeptide-core = { path = "../deeptide-core" }
+eframe = "0.34"
+crossbeam-channel = "0.5"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "deeptide-gui"
+path = "src/main.rs"
