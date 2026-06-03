@@ -885,6 +885,7 @@ dependencies = [
  "deeptide-core",
  "deeptide-host",
  "eframe",
+ "time",
 ]
 
 [[package]]

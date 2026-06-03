@@ -45,8 +45,23 @@ pub enum UiEvent {
     },
     /// The turn ended.
     Terminal(TerminalKind),
+    /// The conversation was persisted (the worker saved it to the shared
+    /// `SessionStore`); the UI should refresh its session sidebar.
+    SessionsChanged,
+    /// A resumed session's prior transcript, for the UI to render before the
+    /// user continues it.
+    Hydrate(Vec<HydratedBubble>),
     /// A worker-side failure (e.g. a panic caught around `run()`).
     Error(String),
+}
+
+/// One message restored from a saved session, for hydrating the transcript on
+/// resume. Only user/assistant text is rebuilt (a readable history); tool
+/// details aren't replayed.
+#[derive(Debug, Clone)]
+pub struct HydratedBubble {
+    pub is_user: bool,
+    pub text: String,
 }
 
 /// How a turn ended — mirrors `deeptide_core::AgentTerminalEvent`.

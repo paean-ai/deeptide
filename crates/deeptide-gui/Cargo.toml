@@ -13,6 +13,7 @@ deeptide-core = { path = "../deeptide-core" }
 deeptide-host = { path = "../deeptide-host" }
 eframe = "0.34"
 crossbeam-channel = "0.5"
+time = { workspace = true, features = ["formatting"] }
 
 [lints]
 workspace = true

@@ -22,11 +22,12 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use deeptide_core::{
     AgentEventCallback, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AskOutcome,
-    PermissionAskCallback, StreamingEvent, StreamingHandler, ToolCall,
+    ConversationMessage, MessageRole, PermissionAskCallback, SessionStore, StreamingEvent,
+    StreamingHandler, ToolCall, new_session_id,
 };
 use eframe::egui;
 
-use crate::events::{TerminalKind, UiEvent, WorkerMsg};
+use crate::events::{HydratedBubble, TerminalKind, UiEvent, WorkerMsg};
 
 /// Pending tool-approval rendezvous: maps a request id to the channel the
 /// blocked `ask_callback` is waiting on. The UI inserts a reply via
@@ -46,9 +47,20 @@ pub struct Conversation {
 }
 
 impl Conversation {
-    /// Spawn the worker thread. `ctx` is cloned so the worker can wake the UI on
-    /// each event (egui's `Context` is `Send + Sync + Clone`).
+    /// Spawn a fresh conversation. `ctx` is cloned so the worker can wake the UI
+    /// on each event (egui's `Context` is `Send + Sync + Clone`).
     pub fn spawn(ctx: egui::Context) -> Self {
+        Self::spawn_inner(ctx, None)
+    }
+
+    /// Spawn a conversation that resumes `session_id`: the worker loads the prior
+    /// transcript from the shared store, restores it into the loop, and emits a
+    /// `Hydrate` event so the UI shows the history before the user continues.
+    pub fn spawn_resume(ctx: egui::Context, session_id: String) -> Self {
+        Self::spawn_inner(ctx, Some(session_id))
+    }
+
+    fn spawn_inner(ctx: egui::Context, resume: Option<String>) -> Self {
         let (to_worker, worker_rx) = unbounded::<WorkerMsg>();
         let (worker_tx, from_worker) = unbounded::<UiEvent>();
         let interrupt = Arc::new(AtomicBool::new(false));
@@ -64,6 +76,7 @@ impl Conversation {
                     ctx,
                     interrupt_for_worker,
                     pending_for_worker,
+                    resume,
                 )
             })
             .expect("spawn conversation worker thread");
@@ -99,12 +112,14 @@ impl Conversation {
 /// The worker thread body. Builds the loop once (so message history persists
 /// across turns), then blocks on the inbound channel until a prompt arrives or
 /// the UI drops the sender (channel closed → loop ends → thread exits).
+#[allow(clippy::too_many_arguments)] // worker wiring; each arg is a distinct concern
 fn worker_loop(
     rx: Receiver<WorkerMsg>,
     tx: Sender<UiEvent>,
     ctx: egui::Context,
     interrupt: Arc<AtomicBool>,
     pending: PendingPermissions,
+    resume: Option<String>,
 ) {
     // Live structured-event sink: map each core event to a UI event, send it,
     // and wake the UI. Synchronous and cheap (just a channel send + repaint).
@@ -204,11 +219,32 @@ fn worker_loop(
         }
     });
 
+    let model_name = configured.model.clone();
     let mut agent = AgentLoop::new(configured.backend)
         .with_model(configured.model)
         .with_event_callback(event_cb)
         .with_ask_callback(ask_cb)
         .with_interrupt_flag(Arc::clone(&interrupt));
+
+    // One session id + start time for this conversation. After each turn we
+    // persist to the SHARED store (the same JSONL the CLI reads), so a GUI
+    // session is `deeptide --resume`-able and vice-versa. Resuming reuses the
+    // existing id so we continue the same file.
+    let started_at = now_rfc3339();
+    let session_id = match resume {
+        Some(id) => {
+            // Load the prior transcript, restore it into the loop, and hand the
+            // UI a hydrated history to render before the user continues.
+            if let Ok(messages) = SessionStore::load(&cwd, &id) {
+                let bubbles = hydrate(&messages);
+                agent.restore_messages(messages);
+                let _ = tx.send(UiEvent::Hydrate(bubbles));
+                ctx.request_repaint();
+            }
+            id
+        }
+        None => new_session_id(),
+    };
 
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -224,11 +260,27 @@ fn worker_loop(
                     let _ = tx.send(UiEvent::Error(
                         "the agent turn panicked and was recovered".to_owned(),
                     ));
-                    ctx.request_repaint();
                 }
+                SessionStore::save(
+                    &cwd,
+                    &session_id,
+                    &model_name,
+                    &started_at,
+                    agent.messages(),
+                );
+                let _ = tx.send(UiEvent::SessionsChanged);
+                ctx.request_repaint();
             }
         }
     }
+}
+
+/// The current UTC time as an RFC-3339 string — the `started_at` the
+/// `SessionStore` meta line records (matches the REPL's format).
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 /// Translate a core `AgentLoopEvent` to a `UiEvent`. `User`/`Compaction` are
@@ -292,4 +344,21 @@ fn cleanup_pending(pending: &PendingPermissions, req_id: &str) {
     if let Ok(mut map) = pending.lock() {
         map.remove(req_id);
     }
+}
+
+/// Rebuild a readable transcript from a restored session: the user/assistant
+/// text turns (tool calls/results are not replayed as cards in history).
+fn hydrate(messages: &[ConversationMessage]) -> Vec<HydratedBubble> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            if message.content.trim().is_empty() {
+                return None;
+            }
+            Some(HydratedBubble {
+                is_user: message.role == MessageRole::User,
+                text: message.content.clone(),
+            })
+        })
+        .collect()
 }

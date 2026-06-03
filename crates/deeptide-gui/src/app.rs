@@ -5,7 +5,9 @@
 //! worker calls `ctx.request_repaint()` on every event, so streaming feels live
 //! without polling.
 
-use deeptide_core::AskOutcome;
+use std::path::PathBuf;
+
+use deeptide_core::{AskOutcome, SessionEntry, SessionStore};
 use eframe::egui;
 
 use crate::conversation::Conversation;
@@ -44,10 +46,16 @@ pub struct App {
     thinking: Option<usize>,
     /// Tool approvals awaiting the user's decision.
     pending: Vec<PendingPermission>,
+    /// Working directory whose sessions the sidebar lists (shared with the CLI).
+    cwd: PathBuf,
+    /// Past sessions for `cwd`, newest first — refreshed when a turn saves.
+    sessions: Vec<SessionEntry>,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let sessions = SessionStore::list(&cwd);
         Self {
             conversation: Conversation::spawn(cc.egui_ctx.clone()),
             transcript: Vec::new(),
@@ -56,6 +64,8 @@ impl App {
             streaming: None,
             thinking: None,
             pending: Vec::new(),
+            cwd,
+            sessions,
         }
     }
 
@@ -143,6 +153,22 @@ impl App {
                         self.transcript.push(Bubble::Status(note));
                     }
                 }
+                UiEvent::SessionsChanged => {
+                    self.sessions = SessionStore::list(&self.cwd);
+                }
+                UiEvent::Hydrate(bubbles) => {
+                    // A resumed session's history replaces the current transcript.
+                    self.transcript = bubbles
+                        .into_iter()
+                        .map(|bubble| {
+                            if bubble.is_user {
+                                Bubble::User(bubble.text)
+                            } else {
+                                Bubble::Assistant(bubble.text)
+                            }
+                        })
+                        .collect();
+                }
                 UiEvent::Error(message) => {
                     self.running = false;
                     self.streaming = None;
@@ -163,6 +189,18 @@ impl App {
         self.input.clear();
         self.running = true;
     }
+
+    /// Replace the live conversation with one resumed from `session_id`. The new
+    /// worker loads the prior transcript and emits a `Hydrate` event to repopulate
+    /// the (now-cleared) UI state.
+    fn resume(&mut self, ctx: egui::Context, session_id: String) {
+        self.conversation = Conversation::spawn_resume(ctx, session_id);
+        self.transcript.clear();
+        self.streaming = None;
+        self.thinking = None;
+        self.pending.clear();
+        self.running = false;
+    }
 }
 
 impl eframe::App for App {
@@ -179,6 +217,63 @@ impl eframe::App for App {
                 );
             });
         });
+
+        let mut resume_request: Option<String> = None;
+        egui::Panel::left("sessions")
+            .resizable(true)
+            .default_size(220.0)
+            .show_inside(ui, |ui| {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Sessions").strong());
+                ui.label(
+                    egui::RichText::new("shared with the CLI · click to resume")
+                        .small()
+                        .color(egui::Color32::GRAY),
+                );
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if self.sessions.is_empty() {
+                            ui.label(
+                                egui::RichText::new("no saved sessions yet")
+                                    .italics()
+                                    .color(egui::Color32::GRAY),
+                            );
+                        }
+                        for session in &self.sessions {
+                            let preview = if session.preview.is_empty() {
+                                "(empty)"
+                            } else {
+                                session.preview.as_str()
+                            };
+                            ui.add_space(4.0);
+                            let clicked = ui
+                                .add(
+                                    egui::Label::new(egui::RichText::new(preview).strong())
+                                        .sense(egui::Sense::click())
+                                        .truncate(),
+                                )
+                                .on_hover_text("Resume this session")
+                                .clicked();
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} · {} msgs",
+                                    session.model, session.message_count
+                                ))
+                                .small()
+                                .color(egui::Color32::GRAY),
+                            );
+                            if clicked {
+                                resume_request = Some(session.session_id.clone());
+                            }
+                            ui.separator();
+                        }
+                    });
+            });
+        if let Some(session_id) = resume_request {
+            self.resume(ui.ctx().clone(), session_id);
+        }
 
         egui::Panel::bottom("composer").show_inside(ui, |ui| {
             ui.add_space(4.0);
