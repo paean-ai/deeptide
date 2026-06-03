@@ -148,7 +148,10 @@ fn structured_value(key: &str, text: &str) -> Option<String> {
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
-    value.chars().take(limit).collect()
+    // Display-facing tool-result summary lines: cap by terminal display width
+    // (not char count) so a CJK summary doesn't over- or under-fill its column.
+    // No ellipsis — these lines are already terse.
+    crate::width::clamp_to_width(value, limit)
 }
 
 fn format_bytes_short(bytes: usize) -> String {

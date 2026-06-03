@@ -4,7 +4,8 @@
   "description": "DeepTide CLI — Rust implementation. Cross-platform native binary. Sibling to the `deeptide` (TypeScript/Bun) package; install either side-by-side without conflict.",
   "type": "module",
   "bin": {
-    "deeptide-rs": "./bin.js"
+    "deeptide-rs": "./bin.js",
+    "tider": "./bin.js"
   },
   "scripts": {
     "postinstall": "node install.js",

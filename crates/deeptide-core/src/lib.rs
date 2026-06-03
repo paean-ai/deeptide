@@ -10,6 +10,7 @@ pub mod context_window;
 pub mod cost;
 pub mod diff_preview;
 pub mod embedded_protocol;
+pub mod gemini;
 pub mod hooks;
 pub mod import;
 pub mod markdown;
@@ -18,6 +19,7 @@ pub mod memory_capture;
 pub mod memory_hygiene;
 pub mod memory_rank;
 pub mod message_queue;
+pub mod openai;
 pub mod permissions;
 pub mod project_toolchain;
 pub mod prompt;
@@ -28,6 +30,8 @@ pub mod sensitive_file;
 pub mod session;
 pub mod streaming;
 pub mod suggestions;
+pub mod syntax;
+pub mod theme;
 pub mod tool_batch_labeler;
 pub mod tool_result_summary;
 pub mod tool_usage;
@@ -35,13 +39,17 @@ pub mod tools;
 pub mod tps;
 pub mod tui;
 pub mod width;
+pub mod word_diff;
 
 pub use agent_loop::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
     AgentUsage, AskOutcome, ConversationMessage, LocalEchoBackend, MessageRole,
     PermissionAskCallback, ToolCall, ToolProgressCallback, ToolProgressEvent, ToolResultBlock,
 };
-pub use api::{AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ThinkingConfig, ToolChoice};
+pub use api::{
+    AnthropicAuthMode, AnthropicBackend, AnthropicConfig, ThinkingConfig, ToolChoice, ToolSchema,
+    tool_schema_catalog,
+};
 pub use at_references::{
     AtExpansionOptions, AtReference, AttachedFile, ExpansionResult, ExpansionStatus, ImageKind,
     expand_at_references, parse_at_references,
@@ -68,9 +76,11 @@ pub use cost::{
     known_models,
 };
 pub use diff_preview::{DiffPreview, DiffPreviewOptions, render_tool_call_diff};
+pub use gemini::{DEFAULT_GEMINI_BASE_URL, GeminiBackend, GeminiConfig};
 pub use hooks::{HookEngine, HookEvent, HookOutcome};
 pub use markdown::{MarkdownRenderOptions, MarkdownRenderer, StreamingMarkdownRenderer};
 pub use message_queue::{MessageQueue, QueueMode};
+pub use openai::{OpenAiBackend, OpenAiConfig};
 pub use permissions::{
     PermissionDecision, PermissionManager, PermissionMode, PermissionRules, Rule, RuleResult,
     ToolInput,
@@ -91,7 +101,7 @@ pub use safety_guard::{
 pub use session::{SessionEntry, SessionStore, new_session_id};
 pub use streaming::{
     STREAM_RETRY_SIGNAL_PREFIX, StreamError, StreamRetryNotice, StreamingEvent, StreamingHandler,
-    parse_stream_retry_signal, parse_streaming_response,
+    parse_openai_stream, parse_stream_retry_signal, parse_streaming_response,
 };
 pub use tool_batch_labeler::{ToolBatchFailureClassifier, ToolBatchItem, ToolBatchLabeler};
 pub use tool_result_summary::ToolResultSummaryFormatter;

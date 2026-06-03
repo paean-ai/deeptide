@@ -11,9 +11,12 @@ description = "Cross-platform Rust CLI port for Deeptide."
 [dependencies]
 clap.workspace = true
 deeptide-core = { path = "../deeptide-core" }
-rustyline.workspace = true
 serde_json.workspace = true
 terminal_size.workspace = true
+# `local-offset` lets us resolve the user's local UTC offset once at
+# startup (while single-threaded) so the per-turn "finished at" footer
+# shows wall-clock local time rather than UTC.
+time = { workspace = true, features = ["local-offset"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

@@ -418,13 +418,10 @@ fn locate_session_file(cwd: &Path, session_id: &str) -> Result<PathBuf, String> 
 
 fn truncate_chars(s: &str, max: usize) -> String {
     let s = s.replace('\n', " ");
-    let mut chars = s.chars();
-    let head: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        format!("{head}...")
-    } else {
-        head
-    }
+    // Session/checkpoint preview lines: budget by display width so a CJK
+    // preview is cut on the right column boundary (the ellipsis differs from
+    // the previous `...`, but the listings are display-only).
+    crate::width::truncate_to_width(&s, max)
 }
 
 #[cfg(test)]

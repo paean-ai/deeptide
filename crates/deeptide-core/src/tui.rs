@@ -748,7 +748,7 @@ pub fn render_spinner_line_with_phase(
     elapsed_secs: u64,
     phase: Option<&str>,
 ) -> String {
-    render_spinner_line_rich(tick, elapsed_secs, phase, 0)
+    render_spinner_line_rich(tick, elapsed_secs, phase, 0, 0)
 }
 
 /// Richest spinner form. Adds estimated received-token throughput
@@ -781,6 +781,7 @@ pub fn render_spinner_line_rich(
     tick: usize,
     elapsed_secs: u64,
     phase: Option<&str>,
+    prompt_tokens: usize,
     tokens_received: usize,
 ) -> String {
     let frame = spinner_frame(tick);
@@ -788,15 +789,36 @@ pub fn render_spinner_line_rich(
     let trimmed_phase = phase.map(str::trim).filter(|s| !s.is_empty());
 
     // Build the stats block content. We collect into a Vec because
-    // future additions (cache hit ratio, upload-side throughput,
-    // model temperature, etc.) plug in cleanly as more
-    // `parts.push(...)` calls.
+    // future additions (cache hit ratio, model temperature, etc.) plug
+    // in cleanly as more `parts.push(...)` calls.
     let mut parts: Vec<String> = Vec::new();
     if elapsed_secs > 0 {
         parts.push(format_elapsed(elapsed_secs));
     }
-    if tokens_received > 0 {
-        parts.push(format!("↓ {} tokens", format_token_count(tokens_received)));
+    // Dynamic up/down token transfer. `↑` is the prompt/context size
+    // uploaded this turn (known the moment the model echoes its input
+    // count); `↓` is output received so far. Showing both gives a live
+    // sense of "how much context I sent" vs "how much has come back".
+    // The two are grouped under one `tokens` suffix to stay compact.
+    match (prompt_tokens, tokens_received) {
+        (0, 0) => {}
+        (up, 0) => parts.push(format!("↑ {} tokens", format_token_count(up))),
+        (0, down) => parts.push(format!("↓ {} tokens", format_token_count(down))),
+        (up, down) => parts.push(format!(
+            "↑ {} ↓ {} tokens",
+            format_token_count(up),
+            format_token_count(down)
+        )),
+    }
+    // Output throughput — a live "is it actually moving" pulse next to the
+    // raw count. Gated on >= 1s elapsed AND enough received tokens that the
+    // rate isn't dominated by rounding, so an early burst doesn't flash a
+    // jumpy "120/s" that immediately settles to something calmer.
+    if elapsed_secs >= 1 && tokens_received >= 20 {
+        let rate = tokens_received as u64 / elapsed_secs;
+        if rate > 0 {
+            parts.push(format!("{}/s", format_token_count(rate as usize)));
+        }
     }
     let stats = if parts.is_empty() {
         String::new()
@@ -1337,7 +1359,7 @@ mod tests {
     fn render_spinner_line_rich_pure_thinking_no_stats() {
         // < 1 second, no tokens received → keep the trailing
         // ellipsis so the line doesn't look frozen.
-        let line = render_spinner_line_rich(0, 0, None, 0);
+        let line = render_spinner_line_rich(0, 0, None, 0, 0);
         assert!(line.contains("…"), "expected trailing ellipsis: {line}");
         assert!(
             !line.contains("("),
@@ -1347,7 +1369,7 @@ mod tests {
 
     #[test]
     fn render_spinner_line_rich_shows_elapsed_only_when_zero_tokens() {
-        let line = render_spinner_line_rich(0, 349, None, 0);
+        let line = render_spinner_line_rich(0, 349, None, 0, 0);
         assert!(line.contains("5m 49s"), "expected nice elapsed: {line}");
         assert!(
             !line.contains("tokens"),
@@ -1357,7 +1379,7 @@ mod tests {
 
     #[test]
     fn render_spinner_line_rich_shows_elapsed_and_tokens_side_by_side() {
-        let line = render_spinner_line_rich(0, 349, None, 28_600);
+        let line = render_spinner_line_rich(0, 349, None, 0, 28_600);
         assert!(line.contains("5m 49s"), "expected elapsed: {line}");
         assert!(
             line.contains("↓ 28.6k tokens"),
@@ -1370,8 +1392,55 @@ mod tests {
     }
 
     #[test]
+    fn render_spinner_line_rich_shows_up_and_down_transfer_together() {
+        // Dynamic up/down: once the model echoes its prompt size, the
+        // spinner shows ↑ uploaded context AND ↓ output received under one
+        // compact `tokens` suffix.
+        let line = render_spinner_line_rich(0, 12, None, 18_400, 256);
+        assert!(line.contains("12s"), "elapsed: {line}");
+        assert!(
+            line.contains("↑ 18.4k ↓ 256 tokens"),
+            "expected combined up/down transfer: {line}"
+        );
+    }
+
+    #[test]
+    fn render_spinner_line_rich_shows_output_throughput_rate() {
+        // 1200 tokens over 10s → a 120/s pulse alongside the raw count.
+        let line = render_spinner_line_rich(0, 10, None, 0, 1200);
+        assert!(line.contains("↓ 1.2k tokens"), "raw count: {line}");
+        assert!(line.contains("120/s"), "throughput pulse: {line}");
+    }
+
+    #[test]
+    fn render_spinner_line_rich_hides_throughput_on_tiny_samples() {
+        // < 20 tokens received → no rate (avoids a jumpy early "5/s").
+        let line = render_spinner_line_rich(0, 3, None, 0, 12);
+        assert!(
+            line.contains("↓ 12 tokens"),
+            "raw count still shown: {line}"
+        );
+        assert!(
+            !line.contains("/s"),
+            "no throughput on a tiny sample: {line}"
+        );
+    }
+
+    #[test]
+    fn render_spinner_line_rich_shows_upload_only_before_first_output() {
+        // Prompt size is known at message-start, before any output token
+        // arrives → show ↑ alone (not a bare `↓ 0`).
+        let line = render_spinner_line_rich(0, 2, None, 9_700, 0);
+        assert!(
+            line.contains("↑ 9.7k tokens"),
+            "upload-only segment: {line}"
+        );
+        assert!(!line.contains("↓"), "no down arrow yet: {line}");
+    }
+
+    #[test]
     fn render_spinner_line_rich_combines_tool_phase_with_stats() {
-        let line = render_spinner_line_rich(0, 3, Some("Bash(npm test)"), 1200);
+        let line = render_spinner_line_rich(0, 3, Some("Bash(npm test)"), 0, 1200);
         assert!(line.contains("Bash(npm test)"), "tool phase: {line}");
         assert!(line.contains("3s"), "elapsed: {line}");
         assert!(line.contains("↓ 1.2k tokens"), "tokens: {line}");
@@ -1386,7 +1455,7 @@ mod tests {
         // received a single byte yet (model in deep think). Show
         // elapsed, hide token segment so the line doesn't go
         // `(5s · ↓ 0 tokens)` which reads as "broken".
-        let line = render_spinner_line_rich(0, 5, None, 0);
+        let line = render_spinner_line_rich(0, 5, None, 0, 0);
         assert!(line.contains("5s"), "elapsed present: {line}");
         assert!(
             !line.contains("tokens"),

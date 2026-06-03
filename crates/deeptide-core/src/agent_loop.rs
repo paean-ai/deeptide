@@ -5,6 +5,7 @@ use crate::{
 };
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRole {
@@ -215,6 +216,12 @@ pub enum AgentTerminalEvent {
     /// The transcript exceeded the model's hard context limit even after
     /// compaction, so the run was stopped rather than issuing a doomed request.
     Blocked,
+    /// The user cancelled the turn mid-flight (Ctrl-C). The loop stops at the
+    /// next safe boundary — between steps, after a cancelled model stream, or
+    /// after the current tool batch (remaining tools in the batch get
+    /// synthetic "cancelled" results so every `tool_use` keeps a matching
+    /// `tool_result` and the session stays resumable).
+    Interrupted,
 }
 
 pub trait AgentBackend: Send {
@@ -353,6 +360,11 @@ pub struct AgentLoop {
     /// Per-tool observability counters. Updated on every dispatch in
     /// [`AgentLoop::execute_tool_call`] so `/usage` has live data.
     tool_usage: crate::tool_usage::ToolUsageTracker,
+    /// Cooperative cancellation flag, shared with the CLI's Ctrl-C handler and
+    /// (via `tool_context`) every running tool. `None` = no cancellation wired
+    /// up (the default for library embeds and `--print` mode). Checked between
+    /// steps, after a cancelled model stream, and around each tool call.
+    interrupt: Option<Arc<AtomicBool>>,
 }
 
 impl AgentLoop {
@@ -384,7 +396,25 @@ impl AgentLoop {
             tool_progress_callback: None,
             thinking_override: None,
             tool_usage: crate::tool_usage::ToolUsageTracker::new(),
+            interrupt: None,
         }
+    }
+
+    /// Attach a cooperative cancellation flag. The same `Arc` is shared with
+    /// the tool context (so running shell/monitor commands observe it) and is
+    /// checked by [`AgentLoop::run`] between steps and around each tool call.
+    /// The CLI sets this from its Ctrl-C handler.
+    pub fn with_interrupt_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.tool_context.interrupt = Some(Arc::clone(&flag));
+        self.interrupt = Some(flag);
+        self
+    }
+
+    /// `true` when a cancellation has been requested for the current turn.
+    fn is_interrupted(&self) -> bool {
+        self.interrupt
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
     }
 
     /// Read-only access to the per-tool observability counters. Used by
@@ -676,6 +706,13 @@ impl AgentLoop {
                 return events;
             }
 
+            // Cancellation requested between steps (e.g. Ctrl-C while we were
+            // about to issue the next request). Stop before spending a turn.
+            if self.is_interrupted() {
+                events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::Interrupted));
+                return events;
+            }
+
             self.current_run_step += 1;
             let request = AgentRequest {
                 messages: self.messages.clone(),
@@ -717,7 +754,22 @@ impl AgentLoop {
                     let total_tools = response.tool_calls.len();
                     let mut tool_results = Vec::with_capacity(total_tools);
                     let mut failure_summaries = Vec::new();
+                    // Set once a cancellation is observed mid-batch. Remaining
+                    // tools are NOT executed — but they still get a synthetic
+                    // "cancelled" tool_result below so every `tool_use` block
+                    // has a matching `tool_result` (Anthropic rejects a
+                    // transcript where one doesn't), keeping the session
+                    // resumable after the interrupt.
+                    let mut interrupted = false;
                     for (idx, tool_call) in response.tool_calls.into_iter().enumerate() {
+                        if interrupted || self.is_interrupted() {
+                            interrupted = true;
+                            let content = String::from("Cancelled by user (Ctrl-C).");
+                            failure_summaries
+                                .push(ToolBatchFailureClassifier::classify(&content, true));
+                            tool_results.push((tool_call, content, true));
+                            continue;
+                        }
                         // Fire the "tool starting" hook BEFORE we
                         // execute. The CLI uses this to swap the
                         // spinner / pinned-row hint from a generic
@@ -753,6 +805,12 @@ impl AgentLoop {
                                 .push(ToolBatchFailureClassifier::classify(&content, is_error));
                         }
                         tool_results.push((tool_call, content, is_error));
+                        // The tool may have been cancelled mid-run (its poll
+                        // loop observed the flag and killed the child). Stop
+                        // executing the rest of the batch.
+                        if self.is_interrupted() {
+                            interrupted = true;
+                        }
                     }
 
                     let tool_calls = tool_results
@@ -804,8 +862,24 @@ impl AgentLoop {
                         self.messages
                             .push(ConversationMessage::tool_results(result_blocks));
                     }
+
+                    // The transcript is now valid (every tool_use has a
+                    // matching tool_result, including the synthetic cancelled
+                    // ones). Stop here rather than issuing another request.
+                    if interrupted {
+                        events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::Interrupted));
+                        return events;
+                    }
                 }
                 Err(error) => {
+                    // A cancelled stream surfaces here as a transport error.
+                    // Report it as an interruption (not a model error) so the
+                    // UI shows "Interrupted by user" rather than a scary
+                    // connection-failure line.
+                    if self.is_interrupted() {
+                        events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::Interrupted));
+                        return events;
+                    }
                     events.push(AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(
                         error,
                     )));

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -237,10 +239,23 @@ pub struct AnthropicBackend {
     /// backend can be cheaply cloned into sub-agent factories while keeping
     /// every sub-agent pointed at the same output stream.
     streaming_handler: Option<StreamingHandler>,
+    /// Cooperative cancellation flag, shared with the agent loop / CLI Ctrl-C
+    /// handler. Threaded into [`parse_streaming_response`] so an in-flight SSE
+    /// stream can be dropped mid-generation. `None` = no cancellation wired up.
+    interrupt: Option<Arc<AtomicBool>>,
 }
 
 impl AnthropicBackend {
     pub fn new(config: AnthropicConfig) -> Result<Self, String> {
+        // Cancellation note: this reqwest build has no per-read timeout on the
+        // blocking client, so we can't wake a blocked SSE read on a timer.
+        // Instead, the parser checks the interrupt flag *between* SSE events
+        // (see `parse_streaming_response`). During active token generation,
+        // events arrive continuously, so a Ctrl-C is observed within one event
+        // (tens of ms). The only non-instant window is the model's pre-first-
+        // token "thinking" pause, where the read blocks with no bytes; that
+        // cancellation lands as soon as the first token arrives. Tools and the
+        // between-step checks cancel immediately regardless.
         let client = Client::builder()
             .timeout(Duration::from_secs(300))
             .build()
@@ -249,7 +264,15 @@ impl AnthropicBackend {
             config,
             client,
             streaming_handler: None,
+            interrupt: None,
         })
+    }
+
+    /// Attach the cooperative cancellation flag so an in-flight streaming
+    /// request can be aborted mid-generation by a Ctrl-C.
+    pub fn with_interrupt_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.interrupt = Some(flag);
+        self
     }
 
     pub fn config(&self) -> &AnthropicConfig {
@@ -513,12 +536,17 @@ impl AnthropicBackend {
             // parser consumes chunk-by-chunk — no need to buffer the whole
             // payload up front, so live deltas flow to the handler as the
             // model produces them.
-            parse_streaming_response(response, self.streaming_handler.as_ref(), started.elapsed())
-                .map_err(|stream_err| ApiFailure {
-                    status: status.as_u16(),
-                    transient_truncation: stream_err.is_transient_retry(),
-                    message: stream_err.to_string(),
-                })
+            parse_streaming_response(
+                response,
+                self.streaming_handler.as_ref(),
+                started.elapsed(),
+                self.interrupt.as_deref(),
+            )
+            .map_err(|stream_err| ApiFailure {
+                status: status.as_u16(),
+                transient_truncation: stream_err.is_transient_retry(),
+                message: stream_err.to_string(),
+            })
         } else {
             let text = response.text().map_err(|error| ApiFailure {
                 status: status.as_u16(),
@@ -616,18 +644,37 @@ impl WireToolChoice {
 enum WireContentBlock {
     Text {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<WireCacheControl>,
     },
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<WireCacheControl>,
     },
     ToolResult {
         tool_use_id: String,
         content: String,
         #[serde(skip_serializing_if = "is_false")]
         is_error: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<WireCacheControl>,
     },
+}
+
+impl WireContentBlock {
+    /// Mutable handle to this block's cache marker slot, regardless of variant.
+    /// Used to stamp the rolling conversation cache breakpoint on the tail
+    /// block without caring what kind of block it is.
+    fn cache_control_slot(&mut self) -> &mut Option<WireCacheControl> {
+        match self {
+            WireContentBlock::Text { cache_control, .. } => cache_control,
+            WireContentBlock::ToolUse { cache_control, .. } => cache_control,
+            WireContentBlock::ToolResult { cache_control, .. } => cache_control,
+        }
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -702,10 +749,32 @@ fn build_messages_request<'a>(
             }]
         });
 
+    let mut wire_messages: Vec<WireMessage> = messages.iter().map(wire_message_from).collect();
+
+    // Rolling conversation cache breakpoint. The system prompt and tool schemas
+    // already carry static breakpoints above; the conversation itself grows
+    // every turn and — without a marker — Anthropic would reprocess the entire
+    // history uncached on each request. Stamping one ephemeral marker on the
+    // LAST block of the LAST message makes this turn WRITE a cache of the whole
+    // prefix; the next turn (which shares that prefix verbatim, since the
+    // history only ever appends) gets a cache READ for everything up to here.
+    //
+    // Cache READS use the longest matching previously-cached prefix regardless
+    // of where the *current* breakpoint sits, so a single tail marker per turn
+    // is the canonical incremental pattern — and keeps us at 3 of Anthropic's
+    // 4 allowed breakpoints (tools + system + conversation).
+    if enable_prompt_caching
+        && let Some(last_block) = wire_messages
+            .last_mut()
+            .and_then(|message| message.content.last_mut())
+    {
+        *last_block.cache_control_slot() = Some(WireCacheControl::ephemeral());
+    }
+
     MessagesRequest {
         model,
         max_tokens,
-        messages: messages.iter().map(wire_message_from).collect(),
+        messages: wire_messages,
         tools,
         stream: false,
         system,
@@ -741,6 +810,7 @@ fn wire_message_from(message: &ConversationMessage) -> WireMessage {
     if !message.content.is_empty() {
         blocks.push(WireContentBlock::Text {
             text: message.content.clone(),
+            cache_control: None,
         });
     }
 
@@ -752,6 +822,7 @@ fn wire_message_from(message: &ConversationMessage) -> WireMessage {
             id: tool_call.id.clone(),
             name: tool_call.name.clone(),
             input: tool_call.input.clone(),
+            cache_control: None,
         });
     }
 
@@ -770,6 +841,7 @@ fn wire_message_from(message: &ConversationMessage) -> WireMessage {
     if blocks.is_empty() {
         blocks.push(WireContentBlock::Text {
             text: " ".to_owned(),
+            cache_control: None,
         });
     }
 
@@ -784,6 +856,7 @@ fn tool_result_block(block: &ToolResultBlock) -> WireContentBlock {
         tool_use_id: block.tool_use_id.clone(),
         content: block.content.clone(),
         is_error: block.is_error,
+        cache_control: None,
     }
 }
 
@@ -1712,6 +1785,42 @@ fn tool_schemas() -> Vec<WireTool> {
     ]
 }
 
+/// Protocol-neutral view of one tool's schema: its name, human description,
+/// and JSON-Schema input contract. The Anthropic wire layer ([`WireTool`])
+/// and any other protocol backend (OpenAI function-calling, Gemini
+/// `functionDeclarations`, …) all derive their own envelope from this, so the
+/// ~900-line [`tool_schemas`] table stays the single source of truth for what
+/// the agent can do.
+#[derive(Debug, Clone)]
+pub struct ToolSchema {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub input_schema: serde_json::Value,
+}
+
+/// The full built-in tool catalog as protocol-neutral [`ToolSchema`]s, in
+/// declaration order. Non-Anthropic backends call this instead of
+/// re-declaring tools, so adding a tool in one place lights it up across every
+/// protocol.
+pub fn tool_schema_catalog() -> Vec<ToolSchema> {
+    tool_schemas()
+        .into_iter()
+        .map(|tool| ToolSchema {
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.input_schema,
+        })
+        .collect()
+}
+
+/// Format an HTTP error body into a user-facing message. Shared with
+/// non-Anthropic backends because the JSON error shapes (`{error:{message,
+/// type}}`, `{message}`, `{detail}`, `{errors:[…]}`) and the auth / rate-limit
+/// / overload hints are provider-agnostic enough to reuse verbatim.
+pub(crate) fn classify_api_error(status: u16, body: &str, retry_after: Option<&str>) -> String {
+    classify_error(status, body, retry_after)
+}
+
 fn messages_url(base_url: &str) -> String {
     format!("{}/v1/messages", base_url.trim_end_matches('/'))
 }
@@ -2451,11 +2560,13 @@ mod tests {
         assert_eq!(wire.content.len(), 2);
 
         match &wire.content[0] {
-            WireContentBlock::Text { text } => assert_eq!(text, "I will inspect the file."),
+            WireContentBlock::Text { text, .. } => assert_eq!(text, "I will inspect the file."),
             other => panic!("expected leading text block, got {other:?}"),
         }
         match &wire.content[1] {
-            WireContentBlock::ToolUse { id, name, input } => {
+            WireContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 assert_eq!(id, "toolu_1");
                 assert_eq!(name, "Read");
                 assert_eq!(input["file_path"], "README.md");
@@ -2508,6 +2619,7 @@ mod tests {
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } => {
                 assert_eq!(tool_use_id, "toolu_1");
                 assert_eq!(content, "alpha\n");
@@ -2525,6 +2637,7 @@ mod tests {
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } => {
                 assert_eq!(tool_use_id, "toolu_2");
                 assert_eq!(content, "boom");
@@ -2545,7 +2658,7 @@ mod tests {
         let wire = request.messages.first().expect("assistant message");
         assert_eq!(wire.content.len(), 1);
         match &wire.content[0] {
-            WireContentBlock::Text { text } => assert_eq!(text, " "),
+            WireContentBlock::Text { text, .. } => assert_eq!(text, " "),
             other => panic!("expected fallback text block, got {other:?}"),
         }
     }
@@ -2629,6 +2742,71 @@ mod tests {
         assert!(request.tools.iter().all(|t| t.cache_control.is_none()));
         let system = request.system.as_ref().expect("system block emitted");
         assert!(system.iter().all(|block| block.cache_control.is_none()));
+        // The conversation tail must also stay unmarked when caching is off.
+        let tail = request.messages.last().expect("a message");
+        assert!(
+            tail.content.iter().all(|b| {
+                serde_json::to_value(b).expect("serialise block")["cache_control"].is_null()
+            }),
+            "no message block may carry a breakpoint with caching disabled"
+        );
+    }
+
+    #[test]
+    fn prompt_caching_stamps_one_rolling_breakpoint_on_the_conversation_tail() {
+        // A realistic multi-turn slice: user → assistant(tool_use) → user(tool_result).
+        // The rolling conversation breakpoint must land on exactly ONE block —
+        // the LAST block of the LAST message — so each turn writes a cache the
+        // next turn reads. Earlier blocks/messages must stay unmarked (they're
+        // covered by the read of the previous turn's cache).
+        let messages = vec![
+            ConversationMessage::user("read the file"),
+            ConversationMessage::assistant_with_tool_calls(
+                "",
+                vec![ToolCall::new(
+                    "toolu_1",
+                    "Read",
+                    serde_json::json!({"file_path": "a.txt"}),
+                )],
+            ),
+            ConversationMessage::tool_results(vec![ToolResultBlock::new("toolu_1", "data", false)]),
+        ];
+        let request =
+            build_messages_request("m", &messages, 100, Some("sys"), &ToolChoice::Auto, true);
+
+        // Count every message content block that carries a breakpoint.
+        let marked: usize = request
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| {
+                !serde_json::to_value(b).expect("serialise block")["cache_control"].is_null()
+            })
+            .count();
+        assert_eq!(marked, 1, "exactly one rolling conversation breakpoint");
+
+        // ...and it is specifically the final block of the final message.
+        let last_msg = request.messages.last().expect("tail message");
+        let last_block = last_msg.content.last().expect("tail block");
+        let serialised = serde_json::to_value(last_block).expect("serialise");
+        assert_eq!(
+            serialised["cache_control"]["type"], "ephemeral",
+            "tail block must hold the ephemeral marker: {serialised}"
+        );
+
+        // Total breakpoints across the whole request stay within Anthropic's 4:
+        // tools(1) + system(1) + conversation(1) = 3.
+        let tool_marks = request
+            .tools
+            .iter()
+            .filter(|t| t.cache_control.is_some())
+            .count();
+        let system_marks = request
+            .system
+            .as_ref()
+            .map(|s| s.iter().filter(|b| b.cache_control.is_some()).count())
+            .unwrap_or(0);
+        assert_eq!(tool_marks + system_marks + marked, 3, "<= 4 breakpoints");
     }
 
     #[test]

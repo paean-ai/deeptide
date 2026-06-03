@@ -206,6 +206,16 @@ pub struct ConfigData {
     #[serde(rename = "fast_mode", skip_serializing_if = "Option::is_none")]
     pub fast_mode: Option<bool>,
 
+    /// Run the end-of-session memory-consolidation pass on exit (default
+    /// `true` when unset). Set to `false` to skip the model round-trip on
+    /// `/exit` / Ctrl-D for snappier exits; `--no-session-capture`
+    /// overrides this per-invocation.
+    #[serde(
+        rename = "session_end_capture",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_end_capture: Option<bool>,
+
     /// Model retried once when the primary model is transiently overloaded.
     #[serde(rename = "fallback_model", skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
@@ -264,6 +274,7 @@ impl ConfigData {
             no_color: other.no_color.or(self.no_color),
             debug: other.debug.or(self.debug),
             fast_mode: other.fast_mode.or(self.fast_mode),
+            session_end_capture: other.session_end_capture.or(self.session_end_capture),
             fallback_model: other.fallback_model.or(self.fallback_model),
             thinking: other.thinking.or(self.thinking),
             effort: other.effort.or(self.effort),
@@ -412,6 +423,19 @@ impl ConfigStore {
         match settings_file {
             Some(path) => base.merge(Self::read_file(path)),
             None => base,
+        }
+    }
+
+    /// Load configuration in *isolation*: ignore the global/project/local
+    /// scopes entirely and use only the explicit settings file (or built-in
+    /// defaults when none is given). Backs the `--isolated` flag, which makes
+    /// per-invocation config reproducible for testing alternate
+    /// keys/endpoints without interference from a developer's persistent
+    /// `settings.json`.
+    pub fn load_isolated(settings_file: Option<&Path>) -> ConfigData {
+        match settings_file {
+            Some(path) => Self::read_file(path),
+            None => ConfigData::default(),
         }
     }
 
@@ -718,6 +742,32 @@ mod tests {
     }
 
     #[test]
+    fn load_isolated_uses_only_the_settings_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let global_dir = temp.path().join("global");
+        std::fs::create_dir_all(&global_dir).expect("global dir");
+        // Pin a global settings.json that would normally contribute values.
+        std::fs::write(
+            global_dir.join("settings.json"),
+            r#"{"model":"from-global","max_turns":99}"#,
+        )
+        .expect("write global");
+        let _guard = TideConfigDirGuard::pin(&global_dir);
+
+        // No settings file → pure defaults, global is ignored.
+        let isolated = ConfigStore::load_isolated(None);
+        assert!(isolated.model.is_none());
+        assert!(isolated.max_turns.is_none());
+
+        // With a settings file → only that file's values, still ignoring global.
+        let settings = temp.path().join("iso.json");
+        std::fs::write(&settings, r#"{"model":"iso-only"}"#).expect("write settings");
+        let isolated = ConfigStore::load_isolated(Some(&settings));
+        assert_eq!(isolated.model.as_deref(), Some("iso-only"));
+        assert!(isolated.max_turns.is_none());
+    }
+
+    #[test]
     fn config_data_merge_other_wins() {
         let base = ConfigData {
             model: Some(String::from("model-a")),
@@ -1009,6 +1059,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(base.merge(overlay).fast_mode, Some(false));
+    }
+
+    #[test]
+    fn config_data_parses_and_merges_session_end_capture() {
+        let data: ConfigData =
+            serde_json::from_str(r#"{"session_end_capture": false}"#).expect("parse");
+        assert_eq!(data.session_end_capture, Some(false));
+
+        // Overlay wins on merge, matching every other Option field.
+        let base = ConfigData {
+            session_end_capture: Some(true),
+            ..Default::default()
+        };
+        let overlay = ConfigData {
+            session_end_capture: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(base.merge(overlay).session_end_capture, Some(false));
     }
 
     #[test]

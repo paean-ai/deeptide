@@ -36,6 +36,12 @@ const MIN_ROWS: u16 = 8;
 /// segment without truncation that would look broken.
 const MIN_COLS: u16 = 24;
 
+/// Minimum number of conversation rows the dynamic input editor must
+/// leave visible above its (growing) input area. Caps how tall a
+/// multi-line draft's footer can get before the editor scrolls within
+/// its own region instead of eating the whole screen.
+const MIN_CONVERSATION_ROWS: u16 = 3;
+
 /// Default number of rows the pinned footer reserves at the bottom of
 /// the terminal. Layout (for a 24-row terminal):
 ///
@@ -135,6 +141,115 @@ impl AnchoredStatusBar {
     /// Width available for the bar text, after subtracting any future padding.
     pub fn cols(&self) -> usize {
         self.cols as usize
+    }
+
+    /// Total terminal height in rows (1-based bottom row index).
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    /// Re-probe the terminal size, updating cached dims. Returns `true`
+    /// when the size changed (so a caller mid-edit can re-layout). Used
+    /// by the custom editor's read loop, which doesn't go through
+    /// `repaint`'s resize path.
+    pub fn sync_size(&mut self) -> bool {
+        self.detect_resize()
+    }
+
+    /// Restore the scroll region to a static `footer_rows`-tall footer
+    /// (the streaming-phase layout), clear the footer band, and park the
+    /// cursor at the bottom of the scroll region so the caller's next
+    /// prints scroll above the status bar. Called by the custom editor's
+    /// read loop on the way out so the rest of the REPL sees the same
+    /// terminal state it did under rustyline.
+    pub fn reset_region_to_footer(&mut self, footer_rows: u16, lock: &std::sync::Mutex<()>) {
+        self.footer_rows = footer_rows.max(1);
+        let input_rows = self.footer_rows.saturating_sub(1);
+        let scroll_bottom = self.scroll_region_bottom();
+        if let Ok(_guard) = lock.lock() {
+            let mut out = io::stdout();
+            let _ = out.write_all(set_region_seq(self.rows, input_rows).as_bytes());
+            // Clear the footer band (everything below the scroll region
+            // except the status row, which keeps its painted content).
+            let mut row = scroll_bottom.saturating_add(1).max(1);
+            while row < self.rows {
+                let _ = out.write_all(format!("\x1b[{row};1H\x1b[2K").as_bytes());
+                row += 1;
+            }
+            let _ = out.write_all(format!("\x1b[{scroll_bottom};1H").as_bytes());
+            let _ = out.flush();
+        }
+    }
+
+    /// Maximum number of rows the custom prompt editor may claim for its
+    /// input area, leaving [`MIN_CONVERSATION_ROWS`] of conversation
+    /// visible above the footer plus one row for the status bar.
+    pub fn max_input_rows(&self) -> u16 {
+        self.rows.saturating_sub(MIN_CONVERSATION_ROWS + 1).max(1)
+    }
+
+    /// Resize the DECSTBM scroll region so the bottom `input_rows + 1`
+    /// rows (the editor's input area plus the status bar) sit outside it.
+    /// Returns the clamped geometry — the caller paints its content
+    /// starting at [`InputRegion::top_row`].
+    ///
+    /// Unlike [`engage_terminal`], this emits **no** screen-clear, so it
+    /// can run on every keystroke that changes the draft height without
+    /// flicker. It also keeps `footer_rows` in sync so the existing
+    /// `repaint` / `recover_to_scroll_region` arithmetic stays correct if
+    /// the caller falls back to them.
+    ///
+    /// [`engage_terminal`]: AnchoredStatusBar::engage_terminal
+    pub fn set_input_region(
+        &mut self,
+        input_rows: u16,
+        lock: &std::sync::Mutex<()>,
+    ) -> InputRegion {
+        let clamped = input_rows.clamp(1, self.max_input_rows());
+        self.footer_rows = clamped + 1;
+        if let Ok(_guard) = lock.lock() {
+            let mut out = io::stdout();
+            let _ = out.write_all(set_region_seq(self.rows, clamped).as_bytes());
+            let _ = out.flush();
+        }
+        InputRegion {
+            top_row: self.rows.saturating_sub(clamped).max(1),
+            input_rows: clamped,
+        }
+    }
+
+    /// Paint the custom editor's visual rows. `content` is one string per
+    /// input row (already width-laid-out by the editor); the caret is
+    /// placed at `(region.top_row + caret_row, caret_col + 1)`.
+    /// `clear_from` is the topmost row to wipe before painting — pass the
+    /// previous frame's `top_row` so a draft that just shrank doesn't
+    /// leave stale rows behind.
+    ///
+    /// Autowrap (DECAWM) is disabled across the paint so a content row at
+    /// exactly `cols` columns can't trigger a spurious terminal wrap into
+    /// the status bar.
+    pub fn paint_input_region(
+        &self,
+        region: InputRegion,
+        content: &[String],
+        caret_row: usize,
+        caret_col: usize,
+        clear_from: u16,
+        lock: &std::sync::Mutex<()>,
+    ) {
+        if let Ok(_guard) = lock.lock() {
+            let seq = render_input_frame_seq(
+                self.rows,
+                region.top_row,
+                clear_from,
+                content,
+                caret_row,
+                caret_col,
+            );
+            let mut out = io::stdout();
+            let _ = out.write_all(seq.as_bytes());
+            let _ = out.flush();
+        }
     }
 
     /// Number of rows reserved at the bottom (input + status, etc.).
@@ -360,6 +475,69 @@ fn install_panic_recovery(rows: u16) {
     });
 }
 
+/// Clamped geometry of the dynamic input area, returned by
+/// [`AnchoredStatusBar::set_input_region`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputRegion {
+    /// 1-based row where the editor's first (top) visual row is painted.
+    pub top_row: u16,
+    /// Number of rows the editor may use (after clamping).
+    pub input_rows: u16,
+}
+
+/// Build the DECSTBM sequence that reserves the bottom `input_rows + 1`
+/// rows (input area + status bar) outside the scroll region. Wrapped in
+/// DECSC/DECRC so the cursor survives the region change (DECSTBM homes
+/// the cursor on some terminals). Deliberately emits no clear so it can
+/// run on every height change without flicker.
+fn set_region_seq(rows: u16, input_rows: u16) -> String {
+    let bottom = rows.saturating_sub(input_rows + 1).max(1);
+    format!("\x1b7\x1b[1;{bottom}r\x1b8")
+}
+
+/// Build the full per-frame paint for the custom editor: disable
+/// autowrap, clear the footer band from `clear_from` to `rows - 1`, write
+/// each `content` row starting at `top_row`, restore autowrap, and place
+/// the caret. Pure so the exact byte stream is unit-testable.
+fn render_input_frame_seq(
+    rows: u16,
+    top_row: u16,
+    clear_from: u16,
+    content: &[String],
+    caret_row: usize,
+    caret_col: usize,
+) -> String {
+    let top_row = top_row.max(1);
+    let clear_from = clear_from.max(1).min(top_row);
+    let status_row = rows.max(1);
+    let mut out = String::new();
+    // Disable autowrap so a row that fills the last column can't push the
+    // cursor onto the status row.
+    out.push_str("\x1b[?7l");
+    // Wipe the whole footer band (everything below the scroll region
+    // except the status row itself), so a shrunk draft leaves nothing
+    // stale behind.
+    let mut row = clear_from;
+    while row < status_row {
+        out.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+        row += 1;
+    }
+    // Paint the content rows.
+    for (i, line) in content.iter().enumerate() {
+        let r = top_row.saturating_add(i as u16);
+        if r >= status_row {
+            break;
+        }
+        out.push_str(&format!("\x1b[{r};1H\x1b[2K{line}"));
+    }
+    out.push_str("\x1b[?7h");
+    // Place the caret at its logical position within the input area.
+    let caret_r = top_row.saturating_add(caret_row as u16).min(status_row);
+    let caret_c = (caret_col as u16).saturating_add(1).max(1);
+    out.push_str(&format!("\x1b[{caret_r};{caret_c}H"));
+    out
+}
+
 /// Build the ANSI sequence that engages the scroll region `[1..=rows -
 /// footer_rows]` and clears every reserved footer row so the pinned
 /// area starts visually empty.
@@ -535,18 +713,6 @@ pub fn colorize(text: &str, sgr: &str, color: bool) -> String {
     }
 }
 
-/// Wrap `text` in a rustyline-safe SGR pair. Rustyline needs invisible escape
-/// sequences delimited by `\x01...\x02` so the line editor counts only the
-/// visible glyphs when positioning the cursor. Using `colorize` for the
-/// rustyline prompt would mis-place the cursor after every keystroke.
-pub fn rustyline_safe(text: &str, sgr: &str, color: bool) -> String {
-    if color {
-        format!("\x01\x1b[{sgr}m\x02{text}\x01\x1b[0m\x02")
-    } else {
-        text.to_owned()
-    }
-}
-
 /// SGR codes used elsewhere in the CLI. Centralised so the palette stays
 /// consistent across the prompt, spinner, role prefixes, and status bar.
 pub mod palette {
@@ -717,28 +883,6 @@ mod tests {
     }
 
     #[test]
-    fn rustyline_safe_wraps_escapes_in_zero_width_markers() {
-        // `\x01` and `\x02` tell rustyline "the bytes between these are
-        // invisible" so cursor positioning is computed from the glyphs only.
-        let out = rustyline_safe("deeptide> ", "1;36", true);
-        assert!(
-            out.starts_with("\x01\x1b[1;36m\x02"),
-            "expected `\\x01` + SGR + `\\x02` prefix: {out:?}"
-        );
-        assert!(
-            out.ends_with("\x01\x1b[0m\x02"),
-            "expected `\\x01` + reset + `\\x02` suffix: {out:?}"
-        );
-        // The visible glyphs are sandwiched between the markers, unchanged.
-        assert!(out.contains("\x02deeptide> \x01"));
-    }
-
-    #[test]
-    fn rustyline_safe_is_a_noop_when_color_is_off_so_prompt_width_is_exact() {
-        assert_eq!(rustyline_safe("> ", "1;36", false), "> ");
-    }
-
-    #[test]
     fn jump_and_clear_seq_places_cursor_at_row_one_column_and_erases_line() {
         let seq = jump_and_clear_seq(23);
         // Sequence: CUP to row 23 column 1, then EL2 (erase whole line).
@@ -786,6 +930,72 @@ mod tests {
         assert!(
             seq.contains("\x1b[1;1H"),
             "expected row clamped to 1: {seq:?}"
+        );
+    }
+
+    #[test]
+    fn set_region_seq_reserves_input_plus_status_rows() {
+        // rows=24, input_rows=3 → footer of 4 → scroll region bottom 20.
+        let seq = set_region_seq(24, 3);
+        assert_eq!(seq, "\x1b7\x1b[1;20r\x1b8");
+    }
+
+    #[test]
+    fn set_region_seq_clamps_bottom_to_one_on_tiny_terminal() {
+        // rows=2, input_rows=5 → bottom underflows → clamps to 1.
+        let seq = set_region_seq(2, 5);
+        assert!(
+            seq.contains("\x1b[1;1r"),
+            "expected clamped region: {seq:?}"
+        );
+    }
+
+    #[test]
+    fn render_input_frame_disables_autowrap_paints_rows_and_places_caret() {
+        let content = vec!["> hello".to_owned(), "world".to_owned()];
+        // rows=24, top_row=22 (2 input rows + status at 24), caret on row
+        // 1 col 5 → absolute (23, 6).
+        let seq = render_input_frame_seq(24, 22, 22, &content, 1, 5);
+        assert!(seq.starts_with("\x1b[?7l"), "autowrap off first: {seq:?}");
+        assert!(seq.contains("\x1b[22;1H\x1b[2K> hello"), "row0: {seq:?}");
+        assert!(seq.contains("\x1b[23;1H\x1b[2Kworld"), "row1: {seq:?}");
+        assert!(seq.contains("\x1b[?7h"), "autowrap restored: {seq:?}");
+        assert!(seq.ends_with("\x1b[23;6H"), "caret last: {seq:?}");
+    }
+
+    #[test]
+    fn render_input_frame_clears_shrunk_rows_above_top() {
+        // Previous frame used top_row 20; new frame top_row 22. The band
+        // 20..=23 must all be cleared so the old rows 20/21 don't linger.
+        let content = vec!["> x".to_owned()];
+        let seq = render_input_frame_seq(24, 22, 20, &content, 0, 3);
+        for row in [20u16, 21, 22, 23] {
+            assert!(
+                seq.contains(&format!("\x1b[{row};1H\x1b[2K")),
+                "must clear row {row}: {seq:?}"
+            );
+        }
+        // The status row (24) must NOT be cleared by this builder.
+        assert!(
+            !seq.contains("\x1b[24;1H\x1b[2K"),
+            "status row untouched: {seq:?}"
+        );
+    }
+
+    #[test]
+    fn render_input_frame_never_paints_onto_status_row() {
+        // More content rows than fit above the status row: the overflow
+        // is dropped rather than scribbling on the bar.
+        let content = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        // top_row 23, status row 24 → only one content row ("a") fits.
+        let seq = render_input_frame_seq(24, 23, 23, &content, 0, 1);
+        assert!(
+            seq.contains("\x1b[23;1H\x1b[2Ka"),
+            "first row painted: {seq:?}"
+        );
+        assert!(
+            !seq.contains('b'),
+            "overflow row b must be dropped: {seq:?}"
         );
     }
 

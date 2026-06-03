@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use clap::{ArgAction, Parser, ValueEnum};
 use deeptide_core::config::ConfigStore;
-use deeptide_core::embedded_protocol::{EmbeddedProtocol, EmbeddedProtocolSpec};
+use deeptide_core::embedded_protocol::{
+    EmbeddedProtocol, EmbeddedProtocolSpec, PermissionResponse,
+};
 use deeptide_core::permissions::PermissionMode;
 use deeptide_core::{
     AgentBackend, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AnthropicBackend, AnthropicConfig,
@@ -17,30 +19,57 @@ use deeptide_core::{
     StreamingEvent, StreamingHandler, StreamingMarkdownRenderer, SystemMessage, ThinkingConfig,
     ToolCall, tui,
 };
-use rustyline::completion::{Completer, Pair};
-use rustyline::error::ReadlineError;
-use rustyline::highlight::{CmdKind, Highlighter};
-use rustyline::hint::Hinter;
-use rustyline::validate::{ValidationContext, ValidationResult, Validator};
-use rustyline::{
-    Cmd, ConditionalEventHandler, Context, Editor, Event, EventContext, EventHandler, Helper,
-    KeyCode, KeyEvent, Modifiers, RepeatCount,
-};
+/// A single completion candidate produced by the slash-command / `@path`
+/// / argument completers. `replacement` is the text spliced into the
+/// buffer by the custom [`prompt_editor`] (which owns candidate-list
+/// rendering, so no separate display string is needed). Formerly
+/// `rustyline::completion::Pair`.
+#[derive(Debug, Clone)]
+struct Pair {
+    replacement: String,
+}
 
 mod chrome;
+mod line_edit;
 mod picker;
+mod prompt_editor;
+mod provider;
 mod queue_editor;
 mod queue_input;
 mod status_bar;
 
-const DEFAULT_MODEL: &str = "deepseek-v4-pro";
+const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 struct ConfiguredBackend {
     backend: Box<dyn AgentBackend>,
     model: String,
     is_configured: bool,
-    subagent_config: Option<AnthropicConfig>,
+    subagent_config: Option<SubagentConfig>,
+}
+
+/// Protocol-tagged backend config used to spawn sub-agents (the `Agent` tool)
+/// with the SAME protocol and endpoint as the main loop. Without this, a
+/// session pointed at DeepSeek/ollama would silently spawn sub-agents against
+/// Anthropic. The variant mirrors whichever backend the main loop is using.
+#[derive(Clone)]
+enum SubagentConfig {
+    Anthropic(AnthropicConfig),
+    OpenAi(deeptide_core::OpenAiConfig),
+    Gemini(deeptide_core::GeminiConfig),
+}
+
+impl SubagentConfig {
+    /// Borrow the Anthropic config when this session speaks the Anthropic
+    /// protocol. Used by tests that assert on Anthropic-specific fields
+    /// (thinking budget, etc.); returns `None` for other protocols.
+    #[cfg(test)]
+    fn as_anthropic(&self) -> Option<&AnthropicConfig> {
+        match self {
+            SubagentConfig::Anthropic(config) => Some(config),
+            SubagentConfig::OpenAi(_) | SubagentConfig::Gemini(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
@@ -94,34 +123,129 @@ const VERSION_LONG: &str = concat!(
     env!("DEEPTIDE_RUSTC"),
 );
 
+/// Worked examples appended to the bottom of `--help`. They focus on the
+/// headless / scripted surface so the binary is self-documenting when wired
+/// into other tools or used non-interactively.
+const HEADLESS_EXAMPLES: &str = concat!(
+    "Examples:\n",
+    "  # Interactive REPL (default)\n",
+    "  deeptide\n",
+    "\n",
+    "  # Headless one-shot: print the answer as plain text and exit\n",
+    "  deeptide --print -p \"explain src/main.rs\"\n",
+    "\n",
+    "  # Pipe the prompt in; emit a single JSON result object\n",
+    "  echo \"summarise the staged diff\" | deeptide --print --output-format json\n",
+    "\n",
+    "  # Stream structured events (NDJSON) for live consumption\n",
+    "  deeptide --print --output-format stream-json -p \"refactor the parser\"\n",
+    "\n",
+    "  # Combine a prompt with piped file contents\n",
+    "  deeptide --print --read-stdin -p \"review this patch\" < change.diff\n",
+    "\n",
+    "  # Full autonomy with a restricted toolset (good for CI)\n",
+    "  deeptide --print -y --allowed-tools Read,Edit,Bash -p \"fix the failing test\"\n",
+    "\n",
+    "  # Resume a saved session headlessly\n",
+    "  deeptide --print -r <session-id> -p \"continue\"\n",
+    "\n",
+    "  # Embedded NDJSON protocol, driven by a host application\n",
+    "  deeptide --embedded\n",
+);
+
 #[derive(Debug, Parser)]
 #[command(
     name = "deeptide-rs",
     version = VERSION_SHORT,
     long_version = VERSION_LONG,
-    about = "Cross-platform Rust implementation of the Deeptide CLI.",
-    long_about = "Cross-platform Rust implementation of the Deeptide CLI.\n\nThis workspace is under active parity development against the Swift Deeptide app. The current Rust increment establishes slash-command, permission, and embedded protocol parity slices."
+    about = "Agentic coding CLI. Interactive REPL by default; headless with --print or --embedded.",
+    long_about = "Deeptide is an agentic coding assistant. Run it with no arguments for an \
+interactive REPL, or drive it non-interactively as a scriptable CLI.\n\
+\n\
+Execution modes:\n\
+  - Interactive REPL  Default when no headless flag is set and stdin is a terminal.\n\
+  - Headless one-shot  --print (alias --no-tui): run a single prompt, print the result,\n\
+                       and exit. Pick the wire format with --output-format\n\
+                       (text | json | stream-json). The prompt comes from --prompt/-p, or\n\
+                       from stdin when omitted (echo \"...\" | deeptide --print).\n\
+  - Embedded protocol  --embedded: line-delimited JSON (NDJSON) over stdin/stdout for host\n\
+                       apps that drive the agent programmatically.\n\
+\n\
+Compatibility:\n\
+  The headless surface is wire-compatible with the Swift Deeptide app and zero-cli: the same\n\
+  --print / --output-format / --input-format / --embedded contract and stream-json event\n\
+  shapes, so existing `tide --print` scripts work unchanged. On-device local-model flags\n\
+  (-L/--local and friends) are macOS-only and handled by the `tide local` launcher, not this\n\
+  binary; everything else in the headless contract is supported here.",
+    after_long_help = HEADLESS_EXAMPLES,
 )]
 struct Cli {
-    #[arg(short = 'p', long, value_name = "TEXT")]
+    #[arg(
+        short = 'p',
+        long,
+        value_name = "TEXT",
+        help_heading = "Headless & scripting",
+        help = "Prompt to run. In --print mode, the prompt is read from stdin when this is omitted."
+    )]
     prompt: Option<String>,
 
-    #[arg(long = "print", action = ArgAction::SetTrue)]
+    #[arg(
+        long = "print",
+        visible_alias = "no-tui",
+        action = ArgAction::SetTrue,
+        help_heading = "Headless & scripting",
+        help = "Non-interactive one-shot: run the prompt, print the result, and exit (no REPL)."
+    )]
     print_mode: bool,
 
-    #[arg(long, value_enum, default_value_t = InputFormat::Text)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = InputFormat::Text,
+        help_heading = "Headless & scripting",
+        help = "Prompt input format for --print: text, or stream-json (NDJSON messages on stdin)."
+    )]
     input_format: InputFormat,
 
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help_heading = "Headless & scripting",
+        help = "Result format for --print: text (default), json (one result object), or stream-json (NDJSON events)."
+    )]
     output_format: OutputFormat,
 
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help_heading = "Headless & scripting",
+        help = "Run the Clide/DeepClide embedded NDJSON protocol over stdin/stdout (implies --print and stream-json in/out)."
+    )]
     embedded: bool,
 
-    #[arg(long)]
+    #[arg(
+        long = "read-stdin",
+        action = ArgAction::SetTrue,
+        help_heading = "Headless & scripting",
+        help = "Read stdin and append it to --prompt. Lets you combine a fixed instruction with piped content."
+    )]
+    read_stdin: bool,
+
+    #[arg(
+        long,
+        value_name = "ID",
+        help_heading = "Headless & scripting",
+        help = "Session id to use for embedded or scripted runs."
+    )]
     session_id: Option<String>,
 
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "DIR",
+        help_heading = "Headless & scripting",
+        help = "Working directory for the run (changes into it before starting)."
+    )]
     cwd: Option<PathBuf>,
 
     #[arg(
@@ -130,6 +254,14 @@ struct Cli {
         help = "Permission mode: default, accept-edits, plan, bypass."
     )]
     permission_mode: String,
+
+    #[arg(
+        long,
+        env = "DEEPTIDE_THEME",
+        default_value = "dark",
+        help = "Colour theme for syntax highlighting: dark, light, high-contrast."
+    )]
+    theme: String,
 
     #[arg(long, env = "DEEPTIDE_MODEL", default_value = DEFAULT_MODEL)]
     model: String,
@@ -147,6 +279,20 @@ struct Cli {
         help = "Active provider profile from settings.json `providers`. Falls back to TIDE_PROFILE, then the config's active_profile."
     )]
     profile: Option<String>,
+
+    #[arg(
+        long,
+        env = "DEEPTIDE_PROVIDER",
+        value_name = "NAME",
+        help = "Model provider preset: anthropic, openai, deepseek, moonshot, zhipu, openrouter, groq, ollama, lmstudio, vllm, mlx — or any name for a custom OpenAI-compatible endpoint. Selects the wire protocol and default base-url/model; explicit --base-url/--model/--api-key still win. See --list-providers."
+    )]
+    provider: Option<String>,
+
+    #[arg(
+        long = "list-providers",
+        help = "List the built-in provider presets (protocol + default endpoint/model) and exit."
+    )]
+    list_providers: bool,
 
     #[arg(
         long = "fallback-model",
@@ -174,6 +320,7 @@ struct Cli {
 
     #[arg(
         long,
+        visible_alias = "max-tokens",
         default_value_t = 65_536,
         env = "DEEPTIDE_MAX_OUTPUT_TOKENS",
         help = "Maximum tokens the model may produce per turn. 64K matches the practical output \
@@ -297,6 +444,14 @@ struct Cli {
     resume: Option<String>,
 
     #[arg(
+        short = 'n',
+        long = "name",
+        value_name = "NAME",
+        help = "Session display name. Sets the terminal window title for this interactive session."
+    )]
+    name: Option<String>,
+
+    #[arg(
         long = "list-sessions",
         action = ArgAction::SetTrue,
         help = "List saved sessions for this directory and exit (no API key required)."
@@ -371,6 +526,14 @@ struct Cli {
     settings: Option<PathBuf>,
 
     #[arg(
+        long = "isolated",
+        env = "DEEPTIDE_ISOLATED",
+        action = ArgAction::SetTrue,
+        help = "Ignore the global/project/local settings.json scopes; use only --settings (or built-in defaults). Makes per-invocation config reproducible for testing alternate keys/endpoints."
+    )]
+    isolated: bool,
+
+    #[arg(
         long = "add-dir",
         value_name = "PATH",
         action = ArgAction::Append,
@@ -386,7 +549,39 @@ fn main() {
     }
 }
 
+/// Local UTC offset, snapshotted once at startup. `OnceLock` because we
+/// only ever set it from the single-threaded entry point and read it
+/// from the (later, multithreaded) REPL loop.
+static LOCAL_UTC_OFFSET: OnceLock<time::UtcOffset> = OnceLock::new();
+
+/// Snapshot the local UTC offset while the process is still
+/// single-threaded. Falls back to UTC if the platform can't resolve a
+/// local offset. Idempotent — only the first call wins.
+fn capture_local_offset() {
+    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    let _ = LOCAL_UTC_OFFSET.set(offset);
+}
+
+/// Current wall-clock time in the user's local zone, using the offset
+/// captured at startup by [`capture_local_offset`]. Safe to call from
+/// any thread.
+fn local_now() -> time::OffsetDateTime {
+    let offset = LOCAL_UTC_OFFSET
+        .get()
+        .copied()
+        .unwrap_or(time::UtcOffset::UTC);
+    time::OffsetDateTime::now_utc().to_offset(offset)
+}
+
 fn run(mut cli: Cli) -> Result<(), String> {
+    // Resolve the local UTC offset now, at the single-threaded entry
+    // point. `time::UtcOffset::current_local_offset()` deliberately
+    // refuses to compute an offset once the process is multithreaded
+    // (the spinner / queue-editor threads we spawn per turn would trip
+    // it), so we snapshot it here and reuse the cached value for the
+    // rest of the session via `local_now`.
+    capture_local_offset();
+
     normalize_embedded_mode(&mut cli);
 
     if let Some(cwd) = cli.cwd.as_ref() {
@@ -413,24 +608,40 @@ fn run(mut cli: Cli) -> Result<(), String> {
         return Ok(());
     }
 
+    // --list-providers: print the built-in provider presets (protocol +
+    // default endpoint/model) so users can discover `--provider` values
+    // without reading docs.
+    if cli.list_providers {
+        println!("{}", format_provider_list());
+        return Ok(());
+    }
+
     // --doctor is a no-network, no-API-key diagnostic that surfaces the
     // configuration the CLI would use on a real run plus environment
     // health checks. Designed to be the first thing a user runs when
-    // something doesn't behave the way they expect.
+    // something doesn't behave the way they expect. Resolve settings.json
+    // (incl. an explicit --settings file) and provider fallbacks *first* so
+    // the [model]/[auth] sections report the effective values a real run
+    // would use — this is what makes `--doctor --settings X` (or --profile)
+    // a reliable way to test alternate api keys/endpoints from the CLI.
     if cli.doctor {
+        let cfg = load_config(&cli, &cwd);
+        cfg.apply_env();
+        apply_config_fallbacks(&mut cli, &cfg);
         println!("{}", run_doctor(&cli, &cwd));
         return Ok(());
     }
 
     // Load settings.json (global ← project ← local), plus an explicit
     // --settings file on top, then apply as fallbacks. Explicit CLI flags and
-    // environment variables always take precedence.
+    // environment variables always take precedence. With --isolated the
+    // file scopes are skipped entirely (see `load_config`).
     if let Some(path) = cli.settings.as_ref()
         && !path.exists()
     {
         return Err(format!("--settings file not found: {}", path.display()));
     }
-    let cfg = ConfigStore::load_with_override(&cwd, cli.settings.as_deref());
+    let cfg = load_config(&cli, &cwd);
     cfg.apply_env();
     apply_config_fallbacks(&mut cli, &cfg);
 
@@ -446,11 +657,28 @@ fn run(mut cli: Cli) -> Result<(), String> {
 
     validate_formats(&cli)?;
 
+    // Install the colour theme process-wide before any rendering. Done once,
+    // here, so the syntax highlighter (and future themed consumers) read a
+    // stable palette for the whole run. Unknown names fail fast with the valid
+    // set rather than silently falling back.
+    match deeptide_core::theme::by_name(&cli.theme) {
+        Some(theme) => {
+            let _ = deeptide_core::theme::set_active(theme);
+        }
+        None => {
+            return Err(format!(
+                "invalid theme: {} (choose one of: {})",
+                cli.theme,
+                deeptide_core::theme::theme_names().join(", ")
+            ));
+        }
+    }
+
     // Lifecycle hooks (settings.json `hooks`) fire around the agent loop in
     // both interactive and print modes; PreToolUse hooks can block a tool.
     let hooks = deeptide_core::HookEngine::new(cfg.hooks.clone().unwrap_or_default(), &cwd);
 
-    if !cli.print_mode && cli.input_format == InputFormat::Text {
+    if !cli.print_mode && !cli.read_stdin && cli.input_format == InputFormat::Text {
         // Per-model pricing overrides from settings.json, converted to the
         // per-token rates the cost tracker consumes. Only the interactive REPL
         // surfaces cost (`/cost`, status line), so print mode skips this.
@@ -460,11 +688,31 @@ fn run(mut cli: Cli) -> Result<(), String> {
 
     let stdin = read_stdin_if_needed(&cli)?;
     let prompt = collect_prompt(&cli, stdin.as_deref())?;
-    emit_output(&cli, &prompt, permission_mode, &cwd, hooks)
+    let permission_responses = collect_permission_responses(&cli, stdin.as_deref());
+    emit_output(
+        &cli,
+        &prompt,
+        permission_mode,
+        &cwd,
+        hooks,
+        permission_responses,
+    )
 }
 
 /// Apply `settings.json` values as fallbacks for CLI fields that were not
 /// explicitly set by the user.  CLI flags and env vars always win.
+/// Resolve the merged configuration for this run. Normally this is
+/// `global ← project ← local ← --settings`, but `--isolated` skips the
+/// persistent scopes and uses only the explicit `--settings` file (or
+/// built-in defaults), so a single invocation is fully reproducible.
+fn load_config(cli: &Cli, cwd: &Path) -> deeptide_core::ConfigData {
+    if cli.isolated {
+        ConfigStore::load_isolated(cli.settings.as_deref())
+    } else {
+        ConfigStore::load_with_override(cwd, cli.settings.as_deref())
+    }
+}
+
 fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
     // Resolve the active provider profile. The profile name comes from
     // --profile (or DEEPTIDE_PROFILE via clap), then TIDE_PROFILE, then the
@@ -555,6 +803,12 @@ fn apply_config_fallbacks(cli: &mut Cli, cfg: &deeptide_core::ConfigData) {
     if let Some(true) = cfg.fast_mode {
         cli.fast = true;
     }
+    // settings.json `session_end_capture: false` opts out of the
+    // end-of-session consolidation pass, unless the user already passed
+    // the flag (in which case it's a no-op) or left it enabled.
+    if let Some(false) = cfg.session_end_capture {
+        cli.no_session_capture = true;
+    }
 }
 
 /// Whether ANSI color output should be emitted. Color is disabled by the
@@ -608,22 +862,23 @@ fn collect_prompt(cli: &Cli, stdin: Option<&str>) -> Result<String, String> {
             Ok(prompt)
         }
         InputFormat::Text => {
-            if let Some(prompt) = cli.prompt.as_ref() {
-                return Ok(prompt.clone());
-            }
+            let piped = stdin.map(str::trim).filter(|chunk| !chunk.is_empty());
 
-            if cli.print_mode {
-                let prompt = stdin.unwrap_or_default();
-                if prompt.trim().is_empty() {
-                    return Err(
-                        "no prompt provided and stdin is empty; use --prompt or pipe input"
-                            .to_owned(),
-                    );
-                }
-                return Ok(prompt.trim().to_owned());
+            match (cli.prompt.as_deref(), piped) {
+                // `--read-stdin` appends piped content after the fixed prompt.
+                (Some(prompt), Some(extra)) if cli.read_stdin => Ok(format!("{prompt}\n\n{extra}")),
+                (Some(prompt), _) => Ok(prompt.to_owned()),
+                // No `--prompt`: in any non-interactive path the prompt is the
+                // piped stdin.
+                (None, Some(extra)) => Ok(extra.to_owned()),
+                (None, None) if cli.print_mode || cli.read_stdin => Err(
+                    "no prompt provided and stdin is empty; use --prompt or pipe input".to_owned(),
+                ),
+                (None, None) => Err(
+                    "interactive REPL mode requires a terminal; use --print or --embedded"
+                        .to_owned(),
+                ),
             }
-
-            Err("interactive REPL mode requires a terminal; use --print or --embedded".to_owned())
         }
     }
 }
@@ -633,7 +888,6 @@ fn collect_prompt(cli: &Cli, stdin: Option<&str>) -> Result<String, String> {
 struct ReplHelper {
     commands: Vec<CommandCompletionSource>,
     models: Vec<String>,
-    use_color: bool,
 }
 
 /// Static argument-completion table for slash commands whose first argument
@@ -703,7 +957,7 @@ const FIXED_ARG_SUGGESTIONS: &[(&[&str], &[&str])] = &[
 ];
 
 impl ReplHelper {
-    fn new(commands: Vec<CommandCompletionSource>, use_color: bool) -> Self {
+    fn new(commands: Vec<CommandCompletionSource>) -> Self {
         // Argument completion for `/model <name>`: the built-in catalog plus the
         // two shorthand aliases the command accepts.
         let mut models = vec![String::from("flash"), String::from("pro")];
@@ -712,11 +966,7 @@ impl ReplHelper {
                 .into_iter()
                 .map(|model| model.name.to_owned()),
         );
-        Self {
-            commands,
-            models,
-            use_color,
-        }
+        Self { commands, models }
     }
 
     /// Walk the dynamic argument-completion specs (model, help) and the
@@ -830,10 +1080,7 @@ fn at_path_completion(line: &str, pos: usize) -> Option<(usize, Vec<Pair>)> {
             }
             let pairs = candidates
                 .into_iter()
-                .map(|(repl, display)| Pair {
-                    display,
-                    replacement: repl,
-                })
+                .map(|(repl, _display)| Pair { replacement: repl })
                 .collect();
             return Some((at_pos + 1, pairs));
         }
@@ -1043,7 +1290,6 @@ fn pairs_from_values(token_start: usize, values: &[String]) -> (usize, Vec<Pair>
     let pairs = values
         .iter()
         .map(|value| Pair {
-            display: value.clone(),
             replacement: value.clone(),
         })
         .collect();
@@ -1236,130 +1482,46 @@ fn multi_command_palette_hint(prefix_hits: &[&CommandCompletionCandidate]) -> St
     }
 }
 
-impl Helper for ReplHelper {}
-
-impl Highlighter for ReplHelper {
-    fn highlight_hint<'h>(&self, hint: &'h str) -> std::borrow::Cow<'h, str> {
-        if self.use_color {
-            // ANSI dim + faint-grey (24-bit-safe SGR pair: 2;90). Keeps the
-            // ghost text visibly distinct from the user's typed input on
-            // both light and dark terminal themes.
-            std::borrow::Cow::Owned(format!("\x1b[2;90m{hint}\x1b[0m"))
-        } else {
-            std::borrow::Cow::Borrowed(hint)
-        }
-    }
-
-    /// Force rustyline to do a *full* line refresh on every cursor move
-    /// (←, →, Home, End, …) instead of writing a delta-only
-    /// `\x1b[D` / `\x1b[C` CUB/CUF sequence.
-    ///
-    /// Why this is a workaround, not a hack
-    /// ====================================
-    ///
-    /// In some terminal emulators — Clide / SwiftTerm on macOS is the
-    /// reported case — a bare `\x1b[D` written via `write(2)` *after*
-    /// the model has been streaming for a while doesn't visibly move
-    /// the caret. The terminal's internal cursor advances logically,
-    /// but the next render frame doesn't draw it at the new column
-    /// (only after the user types a fresh character, which triggers
-    /// a redraw that catches the cursor up).
-    ///
-    /// The exact root cause is outside `deeptide-rs` (a bare
-    /// `rustyline` probe reproduces the bug; Codex / Cursor / Claude
-    /// Code don't because they ship their own raw-mode line editor).
-    /// But rustyline's `Highlighter::highlight_char` provides a
-    /// surgical escape valve: returning `true` for `CmdKind::MoveCursor`
-    /// flips the editor from "emit delta cursor-move ANSI" to "emit
-    /// full prompt + line + cursor-position refresh", which forces a
-    /// redraw the terminal always honours.
-    ///
-    /// Tradeoff: writing the whole line on every arrow keystroke
-    /// costs O(line_length) bytes per move vs O(1). For typical chat
-    /// prompts (a few dozen chars) this is invisible; long pasted
-    /// blocks may see a flicker but that's still strictly better
-    /// than an invisible caret.
-    ///
-    /// Other kinds (`Other`, `ForcedRefresh`) deliberately fall
-    /// through to the default `false` so we don't accidentally cause
-    /// double-refreshes on, e.g., a backspace which already triggers
-    /// a full redraw via the normal edit pipeline.
-    fn highlight_char(&self, _line: &str, _pos: usize, kind: CmdKind) -> bool {
-        matches!(kind, CmdKind::MoveCursor)
-    }
-}
-
-impl Validator for ReplHelper {
-    fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
-        // Allow multi-line continuation when the line ends with a backslash.
-        // The user types `hello \<Enter>` and rustyline asks for more input.
-        if ctx.input().trim_end().ends_with('\\') {
-            Ok(ValidationResult::Incomplete)
-        } else {
-            Ok(ValidationResult::Valid(None))
-        }
-    }
-    fn validate_while_typing(&self) -> bool {
-        false
-    }
-}
-
-impl Hinter for ReplHelper {
-    type Hint = String;
-    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        self.compute_hint(line, pos)
-    }
-}
-
-impl Completer for ReplHelper {
-    type Candidate = Pair;
-
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        _ctx: &Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        // `@`-file completion takes priority over slash-command name
-        // matching: if the cursor is currently in an `@<partial-path>`
-        // token, we list matching files instead. Without this short-
-        // circuit, an `@` in the middle of a long sentence would still
-        // get slash-command suggestions even though the user is
-        // obviously typing a file reference.
-        if let Some(pairs) = at_path_completion(line, pos) {
-            return Ok(pairs);
-        }
-
-        let Some(result) = CompletionEngine::command_completions(line, pos, &self.commands, 8)
-        else {
-            // No command-name match: walk the broader argument-completion
-            // table (model, help <cmd>, permission flags, cost actions,
-            // provider sub-verbs, etc.).
-            if let Some(pairs) = self.arg_completion(line, pos) {
-                return Ok(pairs);
-            }
-            return Ok((pos, vec![]));
+/// Completion provider for the custom raw-mode [`prompt_editor`]. Mirrors
+/// the rustyline [`Completer::complete`] resolution order — `@path` first,
+/// then slash-command names, then the argument-completion table — but
+/// returns plain replacement strings (the editor owns the
+/// longest-common-prefix insert and the candidate listing).
+fn editor_completion(
+    helper: &ReplHelper,
+    line: &str,
+    pos: usize,
+) -> prompt_editor::CompletionResult {
+    if let Some((start, pairs)) = at_path_completion(line, pos) {
+        return prompt_editor::CompletionResult {
+            start,
+            candidates: pairs.into_iter().map(|p| p.replacement).collect(),
         };
-
-        let pairs = result
-            .candidates
-            .iter()
-            .map(|c| {
-                let repl = c.replacement();
-                let display = if self.use_color {
-                    format!("{repl:<26}\x1b[90m {}\x1b[0m", c.description)
-                } else {
-                    format!("{repl:<26} {}", c.description)
-                };
-                Pair {
-                    display,
-                    replacement: repl,
-                }
-            })
-            .collect();
-
-        Ok((result.token_start, pairs))
     }
+    if let Some(result) = CompletionEngine::command_completions(line, pos, &helper.commands, 64) {
+        let candidates = result.candidates.iter().map(|c| c.replacement()).collect();
+        return prompt_editor::CompletionResult {
+            start: result.token_start,
+            candidates,
+        };
+    }
+    if let Some((start, pairs)) = helper.arg_completion(line, pos) {
+        return prompt_editor::CompletionResult {
+            start,
+            candidates: pairs.into_iter().map(|p| p.replacement).collect(),
+        };
+    }
+    prompt_editor::CompletionResult {
+        start: pos,
+        candidates: Vec::new(),
+    }
+}
+
+/// Inline ghost-text hint for the custom prompt editor. Delegates to the
+/// shared [`compute_hint`] so the slash-command tail / palette and the
+/// `@path` palette behave identically to the rustyline hinter.
+fn editor_hint(helper: &ReplHelper, line: &str, pos: usize) -> Option<String> {
+    helper.compute_hint(line, pos)
 }
 
 /// Path to the persistent readline history file.
@@ -1391,6 +1553,19 @@ fn run_interactive(
 ) -> Result<(), String> {
     let mut stdout = io::stdout();
 
+    // Set the terminal window/icon title from --name/-n (OSC 0). Best-effort:
+    // terminals that don't understand the sequence ignore it. Mirrors the
+    // Swift app's `--name`, which also titles the session.
+    if let Some(name) = cli
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let _ = write!(stdout, "\x1b]0;{name}\x07");
+        let _ = stdout.flush();
+    }
+
     // SessionStart fires once when the interactive session begins; SessionEnd
     // fires on every exit path via the RAII guard below (normal exit, /exit,
     // Ctrl+D, or an error return). The Swift implementation models these events
@@ -1406,6 +1581,9 @@ fn run_interactive(
     // print from `ReplEvent::Output`.
     let use_color = use_color(cli);
     let did_stream: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    // Tracks whether we've printed the one-time "thinking" header for a
+    // reasoning model's chain-of-thought this turn (DeepSeek-reasoner et al.).
+    let did_think: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // Activity spinner coordination. While a turn runs synchronously (model
     // thinking + tool execution), a background thread animates a spinner so the
@@ -1418,6 +1596,7 @@ fn run_interactive(
     let spinner_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
     let did_stream_handler = Arc::clone(&did_stream);
+    let did_think_handler = Arc::clone(&did_think);
     let spinner_stop_handler = Arc::clone(&spinner_stop);
     let output_started_handler = Arc::clone(&output_started);
     let spinner_lock_handler = Arc::clone(&spinner_lock);
@@ -1460,6 +1639,17 @@ fn run_interactive(
     let raw_editor_active: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let raw_editor_active_for_handler = Arc::clone(&raw_editor_active);
 
+    // Cooperative cancellation flag for the current turn. Shared four ways:
+    //   * the agent loop (between-step / post-tool checks),
+    //   * the tool context (shell/monitor poll loops kill their child),
+    //   * the streaming backend (aborts an in-flight SSE read),
+    //   * the raw-mode queue editor pump, which flips it on an empty-draft
+    //     Ctrl-C during a turn.
+    // Reset to `false` at the start of every turn so a previous cancellation
+    // never bleeds into the next one. Ctrl-C cancels the turn (single press);
+    // exiting the REPL is the double-press gesture at the idle prompt.
+    let turn_interrupt: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
     // Suspend/ack pair for the raw-mode queue editor. Set from the
     // permission-prompt path (and any other site that needs
     // exclusive cooked-mode stdin) to make the pump release raw
@@ -1496,6 +1686,15 @@ fn run_interactive(
     // are wrong for tokens too, but in a consistent direction.
     let stream_chars_received: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let stream_chars_handler = Arc::clone(&stream_chars_received);
+
+    // Uploaded-context token count for the spinner's `↑` segment. Set once per
+    // turn from the model's `message_start` echo (Anthropic reports the prompt
+    // size — input + cache — the moment the stream opens), so the user sees how
+    // much context this turn shipped, alongside the `↓` output that follows.
+    // Stays 0 for protocols that don't report input until completion (OpenAI),
+    // in which case the spinner simply shows `↓` only — no phantom `↑ 0`.
+    let prompt_tokens_total: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let prompt_tokens_handler = Arc::clone(&prompt_tokens_total);
 
     // Shared "current tool name / preview" state. Two writers:
     //   * the streaming handler sets it to `Preparing <name>` on
@@ -1534,6 +1733,19 @@ fn run_interactive(
     let live_tool_args: Arc<Mutex<Option<LiveToolArgsTicker>>> = Arc::new(Mutex::new(None));
     let live_tool_args_handler = Arc::clone(&live_tool_args);
     let live_tool_args_lock_for_handler = Arc::clone(&spinner_lock);
+
+    // Execution-phase ticker wiring for `tool_progress_callback`. The
+    // streaming handler above only animates while the model *streams tool
+    // args*; once `BlockStop` fires the args are in and the tool actually
+    // runs — which for a shell / Chrome PDF print can be minutes of total
+    // silence after the main spinner died on the first streamed token.
+    // These clones let the callback print a live "▶ <tool>" line and drive
+    // a heartbeat ticker during that execution window.
+    let did_stream_for_callback = Arc::clone(&did_stream);
+    let spinner_lock_for_callback = Arc::clone(&spinner_lock);
+    let stream_chars_for_callback = Arc::clone(&stream_chars_received);
+    let live_tool_args_for_callback = Arc::clone(&live_tool_args);
+    let use_color_for_callback = use_color;
     let live_tool_args_chars_for_handler = Arc::clone(&stream_chars_received);
     let live_tool_args_use_color = use_color;
 
@@ -1553,6 +1765,13 @@ fn run_interactive(
                     output_started_handler.store(true, Ordering::Relaxed);
                     let mut out = io::stdout();
                     if first {
+                        // If a reasoning model streamed "thinking" text just
+                        // above, terminate that dim block with a newline first —
+                        // otherwise the spinner-line erase below would wipe the
+                        // last (non-newline-terminated) line of reasoning.
+                        if did_think_handler.load(Ordering::Relaxed) {
+                            let _ = out.write_all(b"\x1b[0m\n");
+                        }
                         // Erase the spinner line before the first streamed
                         // token, then drop in the assistant role header so
                         // the streaming output reads as a labelled block.
@@ -1632,7 +1851,7 @@ fn run_interactive(
                     let lock_for_thread = Arc::clone(&live_tool_args_lock_for_handler);
                     let chars_for_thread = Arc::clone(&live_tool_args_chars_for_handler);
                     let baseline = live_tool_args_chars_for_handler.load(Ordering::Relaxed);
-                    let name_for_thread = name.clone();
+                    let phase_for_thread = format!("Preparing {name}");
                     let color = live_tool_args_use_color;
                     let done_for_thread = Arc::clone(&tools_done_for_handler);
                     let handle = thread::spawn(move || {
@@ -1641,7 +1860,7 @@ fn run_interactive(
                             &lock_for_thread,
                             &chars_for_thread,
                             baseline,
-                            &name_for_thread,
+                            &phase_for_thread,
                             Instant::now(),
                             color,
                             &done_for_thread,
@@ -1720,6 +1939,55 @@ fn run_interactive(
                     );
                 }
             }
+            StreamingEvent::MessageStart {
+                input_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                ..
+            } => {
+                // Record the uploaded-context size for the spinner's `↑`
+                // segment. Sum the full prompt the turn shipped: fresh input +
+                // cache-read + cache-creation tokens (all count as "uploaded
+                // context", just priced differently). Reported immediately by
+                // Anthropic at stream open.
+                prompt_tokens_handler.store(
+                    input_tokens + cache_read_tokens + cache_creation_tokens,
+                    Ordering::Relaxed,
+                );
+            }
+            StreamingEvent::ThinkingDelta { delta } => {
+                // Reasoning-model chain-of-thought (DeepSeek-reasoner et al.),
+                // shown dimmed and ABOVE the answer so it reads as the model
+                // "thinking out loud" before responding. Rendered as raw dim
+                // text — deliberately NOT through the markdown renderer, whose
+                // line-buffered state belongs to the answer stream that follows.
+                // Each delta is wrapped in its own dim run (and closed) so no
+                // open SGR leaks into the answer's TextDelta that comes next.
+                stream_chars_handler.fetch_add(delta.chars().count(), Ordering::Relaxed);
+                let first = !did_think_handler.swap(true, Ordering::Relaxed);
+                if let Ok(_guard) = spinner_lock_handler.lock() {
+                    spinner_stop_handler.store(true, Ordering::Relaxed);
+                    output_started_handler.store(true, Ordering::Relaxed);
+                    let mut out = io::stdout();
+                    if first {
+                        let _ = out.write_all(b"\r\x1b[2K");
+                        let header = if use_color_for_retry {
+                            "\x1b[2m\x1b[3m\u{1f4ad} thinking\x1b[0m\n"
+                        } else {
+                            "\u{1f4ad} thinking\n"
+                        };
+                        let _ = out.write_all(header.as_bytes());
+                    }
+                    if use_color_for_retry {
+                        let _ = out.write_all(b"\x1b[2m");
+                        let _ = out.write_all(delta.as_bytes());
+                        let _ = out.write_all(b"\x1b[0m");
+                    } else {
+                        let _ = out.write_all(delta.as_bytes());
+                    }
+                    let _ = out.flush();
+                }
+            }
             _ => {}
         }
 
@@ -1740,7 +2008,11 @@ fn run_interactive(
         }
     });
 
-    let configured = configured_backend_with_handler(cli, Some(streaming_handler))?;
+    let configured = configured_backend_with_handler(
+        cli,
+        Some(streaming_handler),
+        Some(Arc::clone(&turn_interrupt)),
+    )?;
     let is_configured = configured.is_configured;
     let (allowed_tools, disallowed_tools) = parse_tool_restrictions(
         cli.allowed_tools.as_deref(),
@@ -1834,7 +2106,12 @@ fn run_interactive(
     // The `Finished` arm below clears it for the symmetric exit.
     let tool_progress_callback: deeptide_core::ToolProgressCallback = Arc::new(
         move |event: &deeptide_core::ToolProgressEvent| match event {
-            deeptide_core::ToolProgressEvent::Started { preview, name, .. } => {
+            deeptide_core::ToolProgressEvent::Started {
+                preview,
+                name,
+                index,
+                ..
+            } => {
                 // Prefer the rich preview; fall back to the bare
                 // tool name when the input was opaque (custom MCP
                 // tool with no string fields, etc.). Never leave
@@ -1846,11 +2123,78 @@ fn run_interactive(
                 } else {
                     preview.clone()
                 };
+                // (1) Drive the *main* spinner's activity label. It's only
+                //     alive when no preamble text streamed this turn; when
+                //     it is, this flips "Crunching…" → "Running <tool>".
                 if let Ok(mut phase) = current_tool_phase_for_callback.lock() {
-                    *phase = Some(label);
+                    *phase = Some(format!("Running {label}"));
+                }
+                // (2) Drop a persistent "▶ <tool>" line into the scroll
+                //     region the moment the tool starts. Without this the
+                //     user sees no tool calls at all until `submit()`
+                //     returns at end-of-turn and the whole batch of result
+                //     lines prints at once — which on a long turn reads as
+                //     "stuck, nothing happening". Held under `spinner_lock`
+                //     so it can't interleave with a spinner frame.
+                if let Ok(_guard) = spinner_lock_for_callback.lock() {
+                    let mut out = io::stdout();
+                    let _ = write!(
+                        out,
+                        "\r\x1b[2K{}\n",
+                        render_tool_start_line(&label, use_color_for_callback)
+                    );
+                    let _ = out.flush();
+                }
+                // (3) If the main spinner already died (text streamed before
+                //     the tool batch), nothing animates during the tool's
+                //     *execution* — a shell / Chrome PDF run can sit silent
+                //     for minutes. Spawn a heartbeat ticker so the UI keeps
+                //     a live "⠹ Running <tool> · Ns" pulse. When the main
+                //     spinner is still alive it already provides the pulse,
+                //     so we don't stack a second animator on the same line.
+                if did_stream_for_callback.load(Ordering::Relaxed) {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let stop_for_thread = Arc::clone(&stop);
+                    let lock_for_thread = Arc::clone(&spinner_lock_for_callback);
+                    let chars_for_thread = Arc::clone(&stream_chars_for_callback);
+                    let baseline = stream_chars_for_callback.load(Ordering::Relaxed);
+                    let phase_for_thread = format!("Running {label}");
+                    let color = use_color_for_callback;
+                    let done_for_thread = Arc::clone(&tools_done_for_callback);
+                    let handle = thread::spawn(move || {
+                        run_tool_args_ticker(
+                            &stop_for_thread,
+                            &lock_for_thread,
+                            &chars_for_thread,
+                            baseline,
+                            &phase_for_thread,
+                            Instant::now(),
+                            color,
+                            &done_for_thread,
+                        );
+                    });
+                    if let Ok(mut slot) = live_tool_args_for_callback.lock() {
+                        // Defensive: tear down any leftover ticker before
+                        // replacing so a thread can never leak (the stream's
+                        // BlockStop should already have cleared the slot).
+                        if let Some(old) = slot.take() {
+                            old.stop.store(true, Ordering::Relaxed);
+                            if let Some(h) = old.handle {
+                                let _ = h.join();
+                            }
+                        }
+                        *slot = Some(LiveToolArgsTicker {
+                            stop,
+                            handle: Some(handle),
+                            block_index: *index,
+                        });
+                    }
                 }
             }
             deeptide_core::ToolProgressEvent::Finished { .. } => {
+                // Stop the execution heartbeat (its exit wipes its own
+                // animated line) before updating the progress label.
+                drain_live_tool_args(&live_tool_args_for_callback);
                 // Count the completed tool and keep a running "N done" label in
                 // the phase, so between tools the spinner shows progress instead
                 // of reverting to a bare "Working".
@@ -1863,6 +2207,7 @@ fn run_interactive(
     );
 
     let mut repl = ReplSession::new(configured.backend)
+        .with_interrupt_flag(Arc::clone(&turn_interrupt))
         .with_model(configured.model)
         .with_version(format!("deeptide-rs {VERSION_LONG}"))
         .with_permission_mode(permission_mode)
@@ -1891,31 +2236,21 @@ fn run_interactive(
     // forward-compatible if future code wants to pre-seed the queue.
     let _ = queue_slot.set(repl.message_queue_handle());
 
-    let rl_config = rustyline::config::Config::builder()
-        .history_ignore_space(true)
-        .completion_type(rustyline::config::CompletionType::List)
-        .build();
-    let helper = ReplHelper::new(repl.command_sources(), use_color);
-    let mut rl: Editor<ReplHelper, rustyline::history::DefaultHistory> =
-        Editor::with_config(rl_config).map_err(|error| error.to_string())?;
-    rl.set_helper(Some(helper));
+    // Completion / hint provider for the custom raw-mode prompt editor.
+    // Holds the REPL's command + model tables; the read loop borrows it
+    // each turn to drive Tab completion and the inline ghost-text hint.
+    // (Shift+Tab mode-cycling is now handled inside the editor, which
+    // surfaces `PromptOutcome::ModeCycle` instead of rustyline's
+    // interrupt-binding hack.)
+    let editor_helper = ReplHelper::new(repl.command_sources());
 
-    // Shift+Tab: cycle the session permission mode. The conditional handler
-    // sets `pending_mode_cycle` and asks rustyline to interrupt readline so
-    // the REPL loop can observe the flag and react with visible feedback.
-    let pending_mode_cycle: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    rl.bind_sequence(
-        Event::KeySeq(vec![KeyEvent(KeyCode::BackTab, Modifiers::NONE)]),
-        EventHandler::Conditional(Box::new(ShiftTabCycleHandler {
-            pending: Arc::clone(&pending_mode_cycle),
-        })),
-    );
-
+    // Persistent, multi-line-safe command history — replaces rustyline's
+    // `load_history` / `add_history_entry` / `save_history`.
     let history_path = history_file_path();
-    if let Some(ref path) = history_path {
-        // Non-fatal if the file doesn't exist yet
-        let _ = rl.load_history(path);
-    }
+    let mut history = match history_path.as_ref() {
+        Some(path) => prompt_editor::History::load(path),
+        None => prompt_editor::History::new(),
+    };
 
     // Rich welcome banner: three styled lines that summarise model,
     // mode, cwd, auth state, plus the key shortcuts. Replaces the
@@ -2003,18 +2338,19 @@ fn run_interactive(
         None
     };
 
-    // Pre-rendered styled prompt. Computed once: the raw `repl.prompt()`
-    // value is stable for the lifetime of the session, and rustyline needs
-    // `\x01...\x02` markers around invisible escape sequences so cursor
-    // positioning stays correct (see status_bar::rustyline_safe).
+    // Pre-rendered styled prompt for the custom editor. Computed once:
+    // the raw `repl.prompt()` value is stable for the session. The editor
+    // owns the cursor and measures width via `deeptide_core::width` (which
+    // strips ANSI), so we use a plain SGR wrapper here rather than the
+    // rustyline `\x01...\x02` invisible-marker form.
     let raw_prompt = repl.prompt();
-    let styled_prompt = if let Some(stripped) = raw_prompt.strip_suffix(' ') {
+    let editor_prompt = if let Some(stripped) = raw_prompt.strip_suffix(' ') {
         format!(
             "{} ",
-            status_bar::rustyline_safe(stripped, status_bar::palette::PROMPT, use_color)
+            status_bar::colorize(stripped, status_bar::palette::PROMPT, use_color)
         )
     } else {
-        status_bar::rustyline_safe(&raw_prompt, status_bar::palette::PROMPT, use_color)
+        status_bar::colorize(&raw_prompt, status_bar::palette::PROMPT, use_color)
     };
 
     // Auth indicator state. `is_configured` (computed from
@@ -2033,73 +2369,20 @@ fn run_interactive(
     // `QueueMode`.
     let mut pending_queued_input: Option<String> = None;
 
-    // Ctrl+C double-tap to exit. A first Interrupt at the idle prompt echoes
-    // `^C` plus a hint; a second within `CTRL_C_DOUBLE_TAP_WINDOW` falls
-    // through into the same finalize-and-exit path as Ctrl+D / `/exit`, so
-    // `/help`'s "exit when idle" is no longer aspirational. Any successful
-    // readline resets the timer so a stale tap from minutes ago can't pair
-    // with a fresh one.
-    const CTRL_C_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(1500);
-    let mut last_interrupt_at: Option<Instant> = None;
+    // Tracks the last time the user pressed Ctrl-C *at the idle prompt* (empty
+    // draft). The first press warns; a second within `CTRL_C_EXIT_WINDOW`
+    // exits — the Codex / Claude Code "press Ctrl-C again to exit" guard
+    // against quitting on a stray keystroke. (Cancelling a *running* turn is a
+    // single press, handled by the raw-mode editor pump, which doesn't reach
+    // this idle path.)
+    let mut last_idle_ctrl_c: Option<Instant> = None;
+    const CTRL_C_EXIT_WINDOW: Duration = Duration::from_millis(1500);
 
-    // Shared end-of-session flow for Ctrl+D and Ctrl+C double-tap. Kept as a
-    // closure (rather than a free function) so it can borrow all the spinner /
-    // streaming Arcs and `use_color` without a 9-argument signature. Captures
-    // are by shared reference; mutation lives behind the Arcs' interior
-    // mutability, so this is `Fn` and callable from any match arm.
-    let finalize_and_render = |stdout: &mut io::Stdout,
-                               repl: &mut ReplSession|
-     -> Result<(), String> {
-        writeln!(stdout).map_err(|error| error.to_string())?;
-
-        // The pass runs an agent round-trip; animate the same spinner as
-        // a normal turn so it isn't a silent hang. (No-op without color;
-        // the 150ms grace means it never flashes when there's no pass.)
-        did_stream.store(false, Ordering::Relaxed);
-        output_started.store(false, Ordering::Relaxed);
-        spinner_stop.store(false, Ordering::Relaxed);
-        stream_chars_received.store(0, Ordering::Relaxed);
-        let spinner_handle = if use_color {
-            let stop = Arc::clone(&spinner_stop);
-            let started = Arc::clone(&output_started);
-            let lock = Arc::clone(&spinner_lock);
-            let phase = Arc::clone(&current_tool_phase);
-            let chars = Arc::clone(&stream_chars_received);
-            Some(thread::spawn(move || {
-                run_spinner(&stop, &started, &lock, true, &phase, &chars)
-            }))
-        } else {
-            None
-        };
-
-        let events = repl.finalize_session();
-
-        // Mirror the regular turn's defensive ticker drain
-        // (see comment in the main submit path). Cheap when
-        // there's nothing to drain — just an Arc lock.
-        drain_live_tool_args(&live_tool_args);
-
-        spinner_stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = spinner_handle {
-            let _ = handle.join();
-        }
-
-        for event in events {
-            if let ReplEvent::Output(text) = event {
-                if did_stream.swap(false, Ordering::Relaxed) {
-                    writeln!(stdout).map_err(|error| error.to_string())?;
-                } else {
-                    writeln!(
-                        stdout,
-                        "{}",
-                        tui::render_output_panel(&text, terminal_width().unwrap_or(100), use_color,)
-                    )
-                    .map_err(|error| error.to_string())?;
-                }
-            }
-        }
-        Ok(())
-    };
+    // Completion + inline-hint providers for the custom editor, borrowing
+    // `editor_helper` for the lifetime of the loop. Built once so each
+    // turn's `read_prompt` can hand them straight to the editor.
+    let comp = |line: &str, pos: usize| editor_completion(&editor_helper, line, pos);
+    let hintf = |line: &str, pos: usize| editor_hint(&editor_helper, line, pos);
 
     loop {
         // Paint the status bar (anchored at row N, OR inline above the
@@ -2140,7 +2423,7 @@ fn run_interactive(
         // feature feel automatic: the user typed during turn N, the queue
         // auto-fires turn N+1 with that content. Skip the status-bar repaint
         // loop body's `rl.readline` and synthesize an `Ok(line)` instead.
-        let readline = match pending_queued_input.take() {
+        let outcome = match pending_queued_input.take() {
             Some(queued) => {
                 writeln!(
                     stdout,
@@ -2148,17 +2431,33 @@ fn run_interactive(
                     render_queue_dispatch_notice(&queued, use_color)
                 )
                 .map_err(|error| error.to_string())?;
-                Ok(queued)
+                prompt_editor::PromptOutcome::Line(queued)
             }
-            None => rl.readline(&styled_prompt),
+            None => {
+                let cfg = prompt_editor::PromptConfig {
+                    prompt: &editor_prompt,
+                    use_color,
+                    history: history.entries(),
+                    completion: &comp,
+                    hint: &hintf,
+                };
+                // The custom raw-mode editor owns the cursor + dynamic
+                // footer when the anchored status bar is engaged and color
+                // is on; otherwise fall back to a cooked single-line read.
+                match anchored.as_mut() {
+                    Some(bar) if use_color && bar.footer_rows() >= 2 => {
+                        prompt_editor::read_prompt(bar, &spinner_lock, &cfg)
+                    }
+                    _ => prompt_editor::read_prompt_cooked(&cfg),
+                }
+            }
         };
-        match readline {
-            Ok(line) => {
-                // Any successful input (typed, queued, or empty) cancels a
-                // pending Ctrl+C double-tap so the user can't accidentally
-                // exit by tapping Ctrl+C, typing for a while, then tapping it
-                // again as a real interrupt.
-                last_interrupt_at = None;
+        match outcome {
+            prompt_editor::PromptOutcome::Line(line) => {
+                // Any successful input cancels a pending Ctrl-C double-tap so a
+                // stale first tap from minutes ago can't pair with a fresh one
+                // and accidentally quit (matches #132's idle-exit guard).
+                last_idle_ctrl_c = None;
                 let trimmed = line.trim().to_owned();
                 if trimmed.is_empty() {
                     continue;
@@ -2174,9 +2473,7 @@ fn run_interactive(
                     continue;
                 }
 
-                if let Err(err) = rl.add_history_entry(content.as_str()) {
-                    let _ = err;
-                }
+                history.add(&content);
 
                 // After rustyline returned, the cursor is wherever
                 // the user's Enter left it — possibly below the input
@@ -2235,6 +2532,11 @@ fn run_interactive(
                 let invokes_agent = !content.starts_with('/')
                     || deeptide_core::slash_command_invokes_agent(&content);
 
+                // `/exit` / `/quit` / `/q` (and Ctrl-D) now quit immediately
+                // — they no longer run the model-backed memory consolidation
+                // pass that used to make exiting hang for minutes. So there's
+                // no "consolidating memory" spinner to arm here.
+
                 // Paint a dim ghost prompt at the input row so the
                 // bottom of the screen never reads "empty" while the
                 // agent is thinking. The next loop iteration's
@@ -2257,8 +2559,13 @@ fn run_interactive(
 
                 // Reset per-turn streaming + spinner state.
                 did_stream.store(false, Ordering::Relaxed);
+                did_think.store(false, Ordering::Relaxed);
                 output_started.store(false, Ordering::Relaxed);
                 spinner_stop.store(false, Ordering::Relaxed);
+                // Clear any cancellation left from a previous turn so a stale
+                // Ctrl-C never aborts this fresh one before it starts. The
+                // raw-editor pump (re)sets it on an empty-draft Ctrl-C.
+                turn_interrupt.store(false, Ordering::Relaxed);
 
                 // Spin up the raw-mode queue editor thread so the
                 // user can type follow-ups straight into the pinned
@@ -2306,6 +2613,7 @@ fn run_interactive(
                                 suspend: Arc::clone(&editor_suspend),
                                 suspended: Arc::clone(&editor_suspended),
                                 mode_cycle: Arc::clone(&editor_mode_cycle),
+                                interrupt: Arc::clone(&turn_interrupt),
                             };
                             // Flip the suppression flag BEFORE spawning
                             // so the streaming handler's first tick sees
@@ -2337,6 +2645,7 @@ fn run_interactive(
                 // start adding to it as soon as the first
                 // `TextDelta` / `ToolUseInputDelta` arrives.
                 stream_chars_received.store(0, Ordering::Relaxed);
+                prompt_tokens_total.store(0, Ordering::Relaxed);
                 tools_done.store(0, Ordering::Relaxed);
                 let spinner_handle = if invokes_agent && use_color {
                     let stop = Arc::clone(&spinner_stop);
@@ -2344,13 +2653,18 @@ fn run_interactive(
                     let lock = Arc::clone(&spinner_lock);
                     let phase = Arc::clone(&current_tool_phase);
                     let chars = Arc::clone(&stream_chars_received);
+                    let prompt = Arc::clone(&prompt_tokens_total);
                     Some(thread::spawn(move || {
-                        run_spinner(&stop, &started, &lock, true, &phase, &chars)
+                        run_spinner(&stop, &started, &lock, true, &phase, &chars, &prompt)
                     }))
                 } else {
                     None
                 };
 
+                // Stamp the turn start so we can report how long the
+                // agent worked once it finishes. Monotonic `Instant` so
+                // it's immune to wall-clock adjustments mid-turn.
+                let turn_started = Instant::now();
                 let events = repl.submit(&content);
 
                 // Defensive: tear down any live tool-args ticker
@@ -2456,11 +2770,23 @@ fn run_interactive(
                         }
                         ReplEvent::Exit => {
                             if let Some(ref path) = history_path {
-                                save_history(&mut rl, path);
+                                history.save(path);
                             }
                             return Ok(());
                         }
                     }
+                }
+
+                // Per-turn timing footer: how long the agent worked plus
+                // the local wall-clock time it finished, so long-running
+                // tasks are easy to review after the fact. Gated on
+                // `invokes_agent` so local-only slash commands (/help,
+                // /status, …) — whose work is instantaneous — don't get a
+                // noisy "worked for 0s" line.
+                if invokes_agent {
+                    let footer =
+                        chrome::render_turn_timing(turn_started.elapsed(), local_now(), use_color);
+                    writeln!(stdout, "{footer}").map_err(|error| error.to_string())?;
                 }
 
                 // The turn has finished. If the user typed any messages
@@ -2471,136 +2797,61 @@ fn run_interactive(
                 // configured mode (single = pop head, batch = join all).
                 pending_queued_input = repl.drain_next_queued_prompt();
             }
-            Err(ReadlineError::Interrupted) => {
-                // Shift+Tab piggy-backs on rustyline's Interrupt command to
-                // break out of readline cleanly. If the cycle handler set the
-                // flag, this isn't a real Ctrl+C — it's the user asking to
-                // rotate the permission mode.
-                if pending_mode_cycle.swap(false, Ordering::Relaxed) {
-                    // Clear any pending double-tap timer too: a mode cycle is
-                    // a deliberate non-exit action and should not be paired
-                    // with an earlier `^C` to close the REPL.
-                    last_interrupt_at = None;
-                    let next = next_permission_mode(repl.agent_loop().permission_mode());
-                    repl.set_permission_mode(next);
-                    let label = next.label();
-                    let line = if use_color {
-                        format!("  → mode \x1b[1m{label}\x1b[0m")
-                    } else {
-                        format!("  → mode {label}")
-                    };
-                    writeln!(stdout, "{line}").map_err(|error| error.to_string())?;
-                    continue;
-                }
-                // Real Ctrl+C at the idle prompt. First tap echoes `^C` plus a
-                // hint and arms the double-tap timer; second tap within
-                // `CTRL_C_DOUBLE_TAP_WINDOW` falls through to the same
-                // finalize-and-exit path as Ctrl+D / `/exit`.
-                let now = Instant::now();
-                let is_double_tap = last_interrupt_at
-                    .is_some_and(|t| now.duration_since(t) < CTRL_C_DOUBLE_TAP_WINDOW);
-                if !is_double_tap {
-                    last_interrupt_at = Some(now);
-                    // Same scroll-region recovery as the `Ok(line)` arm: when
-                    // the anchored footer is active, readline returns with the
-                    // cursor still inside the reserved input row, so a naive
-                    // `writeln!` would land in the footer and get clobbered by
-                    // the next repaint. Skip silently when not anchored.
-                    if let Some(bar) = anchored.as_mut()
-                        && bar.footer_rows() >= 2
-                    {
-                        bar.recover_to_scroll_region(&bar_styled, &spinner_lock);
-                    }
-                    writeln!(stdout, "^C (press Ctrl+C again or /exit to quit)")
-                        .map_err(|error| error.to_string())?;
-                    continue;
-                }
-                // Double-tap → exit. Echo a final `^C` so the second press has
-                // a visible acknowledgement (the user might not realise the
-                // first was registered), then run the shared end-of-session
-                // consolidation pass and break out of the REPL loop.
-                if let Some(bar) = anchored.as_mut()
-                    && bar.footer_rows() >= 2
-                {
-                    bar.recover_to_scroll_region(&bar_styled, &spinner_lock);
-                }
-                writeln!(stdout, "^C").map_err(|error| error.to_string())?;
-                finalize_and_render(&mut stdout, &mut repl)?;
-                break;
-            }
-            Err(ReadlineError::Eof) => {
-                // Ctrl+D on empty line — the most common way to leave the REPL.
-                // Run the same end-of-session consolidation pass as a typed
-                // `/exit` so durable facts are captured here too. Without this,
-                // capture only fired on the literal `/exit` command and silently
-                // skipped every Ctrl-D exit. `finalize_session` emits Output
-                // events only (it never returns Exit), so we render and break.
-                if let Some(bar) = anchored.as_mut()
-                    && bar.footer_rows() >= 2
-                {
-                    bar.recover_to_scroll_region(&bar_styled, &spinner_lock);
-                }
-                finalize_and_render(&mut stdout, &mut repl)?;
-                break;
-            }
-            Err(error) => {
-                // Non-fatal recovery for transient rustyline failures.
-                // The previous behaviour was `return Err(...)`, which
-                // killed the REPL — losing the entire conversation,
-                // any queued messages, and any in-progress tool state
-                // — on a single stdin hiccup. In practice the kinds
-                // of errors we see here (`Io(InvalidData)` from an
-                // orphaned UTF-8 continuation byte, `Errno(EINTR)`,
-                // `WindowResize` on platforms where rustyline
-                // surfaces it as an Err, etc.) are all benign and
-                // self-correcting once we present a fresh prompt.
-                //
-                // We:
-                //   1. Surface a dim warning so the user knows we
-                //      noticed (and isn't left wondering why their
-                //      keystrokes disappeared).
-                //   2. Drain any orphan bytes still sitting in stdin
-                //      — that's almost always the root cause of an
-                //      `InvalidData`, and not draining means the
-                //      *next* readline trips the same error.
-                //   3. Save history so even if a follow-up failure
-                //      *does* escape we don't lose the user's
-                //      typed lines.
-                //   4. `continue` back to the prompt.
-                //
-                // If the failure is genuinely persistent (e.g. stdin
-                // closed forever), rustyline will keep returning the
-                // same error and the next iteration's `readline()`
-                // will hit it again — we'll keep printing the
-                // warning, which is annoying but recoverable.
-                // `Ctrl-D` still works because `Eof` is matched
-                // above this arm.
-                let detail = error.to_string();
-                let drained = queue_input::drain_pending_stdin_bytes();
-                let warn = if drained == 0 {
-                    format!("  input recovered ({detail})")
-                } else {
-                    format!(
-                        "  input recovered ({detail}; discarded {drained} stray byte{plural})",
-                        plural = if drained == 1 { "" } else { "s" }
-                    )
-                };
+            prompt_editor::PromptOutcome::ModeCycle => {
+                // Shift+Tab inside the editor rotates the session
+                // permission mode: Default → AcceptEdits → Plan → Bypass →
+                // Default. (Previously piggy-backed on rustyline's
+                // interrupt binding; the custom editor surfaces it as a
+                // dedicated outcome instead.)
+                // A deliberate mode switch also clears the Ctrl-C double-tap
+                // timer so it can't pair with a later tap to exit.
+                last_idle_ctrl_c = None;
+                let next = next_permission_mode(repl.agent_loop().permission_mode());
+                repl.set_permission_mode(next);
+                let label = next.label();
                 let line = if use_color {
-                    format!("\x1b[2m{warn}\x1b[0m")
+                    format!("  → mode \x1b[1m{label}\x1b[0m")
                 } else {
-                    warn
+                    format!("  → mode {label}")
                 };
-                let _ = writeln!(stdout, "{line}");
-                if let Some(ref path) = history_path {
-                    save_history(&mut rl, path);
-                }
+                writeln!(stdout, "{line}").map_err(|error| error.to_string())?;
                 continue;
+            }
+            prompt_editor::PromptOutcome::Interrupted => {
+                // Ctrl+C on an empty draft at the idle prompt. Double-press to
+                // exit: the first press warns, a second within the window
+                // quits. (A non-empty draft is cleared inside the editor and
+                // never reaches here; cancelling a running turn is a single
+                // press handled by the raw-mode pump.)
+                let now = Instant::now();
+                let double = last_idle_ctrl_c
+                    .is_some_and(|prev| now.duration_since(prev) <= CTRL_C_EXIT_WINDOW);
+                if double {
+                    writeln!(stdout, "^C").map_err(|error| error.to_string())?;
+                    break;
+                }
+                last_idle_ctrl_c = Some(now);
+                writeln!(stdout, "^C  (press Ctrl-C again to exit)")
+                    .map_err(|error| error.to_string())?;
+                continue;
+            }
+            prompt_editor::PromptOutcome::Eof => {
+                // Ctrl+D on an empty line — exit immediately, exactly like a
+                // typed `/exit`. We deliberately do NOT run the
+                // end-of-session memory consolidation pass here: it drove a
+                // model round-trip (a full agent loop, no timeout) that made
+                // quitting hang for many seconds — sometimes appearing never
+                // to return. Durable facts are still captured by the
+                // scheduled dream loop *during* the session and can be forced
+                // any time with `/dream`.
+                writeln!(stdout).map_err(|error| error.to_string())?;
+                break;
             }
         }
     }
 
     if let Some(ref path) = history_path {
-        save_history(&mut rl, path);
+        history.save(path);
     }
     Ok(())
 }
@@ -2668,23 +2919,27 @@ fn drain_live_tool_args(slot: &Mutex<Option<LiveToolArgsTicker>>) {
 }
 
 /// Animation loop for [`LiveToolArgsTicker`]. Mirrors `run_spinner`
-/// but draws under a separate stop flag and reports tokens **for
-/// this tool's args alone** (subtracting `baseline_chars` from the
-/// shared turn counter).
+/// but draws under a separate stop flag and reports tokens
+/// (subtracting `baseline_chars` from the shared turn counter, so the
+/// `↓ N tokens` panel is scoped to whatever started after the
+/// baseline snapshot). `phase` is the full activity label to render —
+/// `"Preparing Bash(…)"` while the model streams tool args, or
+/// `"Running Bash(…)"` while the tool itself executes.
 #[allow(clippy::too_many_arguments)] // internal progress-ticker helper; args are all distinct primitives
 fn run_tool_args_ticker(
     stop: &AtomicBool,
     lock: &Mutex<()>,
     stream_chars: &AtomicUsize,
     baseline_chars: usize,
-    tool_name: &str,
+    phase: &str,
     started_at: Instant,
     color: bool,
     tools_done: &AtomicUsize,
 ) {
-    // Match `run_spinner`'s 150 ms grace so a quick BlockStop never
-    // produces a flash. The model often emits the full tool_use in
-    // one SSE frame for short inputs (e.g. TodoWrite).
+    // Match `run_spinner`'s 150 ms grace so a quick BlockStop / fast
+    // tool never produces a flash. The model often emits the full
+    // tool_use in one SSE frame for short inputs (e.g. TodoWrite), and
+    // reads/greps finish in milliseconds.
     thread::sleep(Duration::from_millis(150));
     if stop.load(Ordering::Relaxed) {
         return;
@@ -2701,17 +2956,22 @@ fn run_tool_args_ticker(
             let scoped_chars = total_chars.saturating_sub(baseline_chars);
             let tokens_estimate = scoped_chars / 4;
             // Append a running "· N done" so a multi-tool turn shows cumulative
-            // progress, not just the current tool.
+            // progress, not just the current tool. `phase` is the pre-built
+            // activity label ("Preparing Bash(…)" / "Running Bash(…)"); we only
+            // tack the cumulative counter onto it here.
             let done = tools_done.load(Ordering::Relaxed);
-            let phase = if done > 0 {
-                format!("Preparing {tool_name} · {done} done")
+            let phase_label = if done > 0 {
+                format!("{phase} · {done} done")
             } else {
-                format!("Preparing {tool_name}")
+                phase.to_owned()
             };
             let raw = tui::render_spinner_line_rich(
                 tick,
                 started_at.elapsed().as_secs(),
-                Some(&phase),
+                Some(&phase_label),
+                // The tool-args panel is scoped to this tool's downloaded args;
+                // the uploaded-context (↑) figure belongs to the main spinner.
+                0,
                 tokens_estimate,
             );
             let line = status_bar::dim(&raw, color);
@@ -2741,6 +3001,7 @@ fn run_spinner(
     color: bool,
     phase: &Mutex<Option<String>>,
     stream_chars: &AtomicUsize,
+    prompt_tokens: &AtomicUsize,
 ) {
     // Grace period so an instant response never flashes a spinner.
     thread::sleep(Duration::from_millis(150));
@@ -2764,10 +3025,15 @@ fn run_spinner(
             // estimate for progress feedback, not billing.
             let chars = stream_chars.load(Ordering::Relaxed);
             let tokens_estimate = chars / 4;
+            // Uploaded-context size (↑), reported by the model at stream start
+            // (Anthropic `message_start`). Already a token count, not chars, so
+            // it is shown verbatim rather than divided by the chars heuristic.
+            let prompt = prompt_tokens.load(Ordering::Relaxed);
             let raw = tui::render_spinner_line_rich(
                 tick,
                 start.elapsed().as_secs(),
                 phase_snapshot.as_deref(),
+                prompt,
                 tokens_estimate,
             );
             let line = status_bar::dim(&raw, color);
@@ -2787,13 +3053,6 @@ fn run_spinner(
     }
 }
 
-fn save_history(rl: &mut Editor<ReplHelper, rustyline::history::DefaultHistory>, path: &PathBuf) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = rl.save_history(path);
-}
-
 fn terminal_width() -> Option<usize> {
     std::env::var("COLUMNS")
         .ok()
@@ -2807,6 +3066,7 @@ fn emit_output(
     permission_mode: PermissionMode,
     cwd: &Path,
     hooks: deeptide_core::HookEngine,
+    permission_responses: Vec<PermissionResponse>,
 ) -> Result<(), String> {
     match cli.output_format {
         OutputFormat::Text => {
@@ -2823,13 +3083,19 @@ fn emit_output(
         }
         OutputFormat::Json => {
             // Emit the result envelope (success or error) as a single JSON
-            // object so machine consumers always get a parseable result.
+            // object so machine consumers always get a parseable result —
+            // THEN propagate a non-zero exit on failure. A machine consumer
+            // parses the envelope (which carries the `error` field); a shell
+            // script checks `$?`. Printing the envelope first, erroring second,
+            // serves both: the JSON is always on stdout, and the exit code is
+            // 0 only when the run actually succeeded.
             let outcome = run_prompt(cli, prompt, permission_mode, cwd, hooks, None);
             let body = one_shot_result_json(&outcome, &cli.model);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&body).map_err(|error| error.to_string())?
             );
+            outcome.map(|_| ())?;
         }
         OutputFormat::StreamJson => {
             // Spec first, then assistant_delta events stream live during the
@@ -2841,25 +3107,60 @@ fn emit_output(
                     .map_err(|error| error.to_string())?
             );
             let delta_handler: StreamingHandler = Arc::new(|event: &StreamingEvent| {
-                if let StreamingEvent::TextDelta { delta, .. } = event {
+                let line = match event {
+                    StreamingEvent::TextDelta { delta, .. } => Some(assistant_delta_event(delta)),
+                    // Reasoning-model chain-of-thought (DeepSeek-reasoner et al.).
+                    // The spec advertises `thinking_delta`; surface it live so
+                    // headless consumers can show the model thinking, kept
+                    // separate from the answer `assistant_delta` stream.
+                    StreamingEvent::ThinkingDelta { delta } => Some(thinking_delta_event(delta)),
+                    _ => None,
+                };
+                if let Some(line) = line {
                     let mut out = io::stdout().lock();
-                    let _ = writeln!(out, "{}", assistant_delta_event(delta));
+                    let _ = writeln!(out, "{line}");
                     let _ = out.flush();
                 }
             });
-            let outcome = run_prompt(
+            // Forward tool batches / results / compaction as stream-json lines as
+            // they happen, so consumers see the agent's tool activity mid-run
+            // (previously the stream was only `assistant_delta` + final envelope).
+            let tool_sink = |event: &AgentLoopEvent| {
+                if let Some(line) = stream_json_event_line(event) {
+                    let mut out = io::stdout().lock();
+                    let _ = writeln!(out, "{line}");
+                    let _ = out.flush();
+                }
+            };
+            // Install the headless permission callback when this is the host
+            // protocol (`--embedded`) or the host pre-queued responses — so
+            // gated tools emit a `permission_request` and resolve from those
+            // responses rather than erroring. Plain `--print` stream-json with
+            // no responses keeps the prior behaviour (loop rules decide).
+            let ask_callback = if cli.embedded || !permission_responses.is_empty() {
+                Some(headless_ask_callback(permission_responses))
+            } else {
+                None
+            };
+            let outcome = run_prompt_with_events(
                 cli,
                 prompt,
                 permission_mode,
                 cwd,
                 hooks,
                 Some(delta_handler),
+                Some(&tool_sink),
+                ask_callback,
             );
             let body = one_shot_result_json(&outcome, &cli.model);
             println!(
                 "{}",
                 serde_json::to_string(&body).map_err(|error| error.to_string())?
             );
+            // Same exit-code contract as the Json path: the `result`/`error`
+            // envelope is always emitted, but the process exits non-zero when
+            // the run failed so automation can detect it via `$?`.
+            outcome.map(|_| ())?;
         }
     }
 
@@ -2896,7 +3197,35 @@ fn run_prompt(
     hooks: deeptide_core::HookEngine,
     streaming_handler: Option<StreamingHandler>,
 ) -> Result<PromptOutcome, String> {
-    let configured = configured_backend_with_handler(cli, streaming_handler)?;
+    run_prompt_with_events(
+        cli,
+        prompt,
+        permission_mode,
+        cwd,
+        hooks,
+        streaming_handler,
+        None,
+        None,
+    )
+}
+
+/// Like [`run_prompt`] but invokes `event_sink` (when given) for every
+/// `AgentLoopEvent` as it is consumed, so the stream-json output path can
+/// forward tool batches / tool results / compaction notices to stdout as they
+/// happen. The sink sees events in emission order, interleaved with the live
+/// `assistant_delta` stream the `streaming_handler` already emits.
+#[allow(clippy::too_many_arguments)] // one-shot run wiring; each arg is a distinct, named concern
+fn run_prompt_with_events(
+    cli: &Cli,
+    prompt: &str,
+    permission_mode: PermissionMode,
+    cwd: &Path,
+    hooks: deeptide_core::HookEngine,
+    streaming_handler: Option<StreamingHandler>,
+    event_sink: Option<&dyn Fn(&AgentLoopEvent)>,
+    ask_callback: Option<deeptide_core::PermissionAskCallback>,
+) -> Result<PromptOutcome, String> {
+    let configured = configured_backend_with_handler(cli, streaming_handler, None)?;
 
     // In one-shot (`--print`) mode the user can't see the interactive
     // "No API key configured" banner that REPL emits to stdout. The
@@ -2922,6 +3251,14 @@ fn run_prompt(
         .with_hooks(hooks)
         .with_tool_restrictions(allowed_tools, disallowed_tools)
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
+
+    // Headless permission handling: with a callback installed, gated tools emit
+    // a `permission_request` and are resolved from host-supplied responses
+    // instead of erroring out. Without one (the default), the loop's own
+    // permission rules apply as before.
+    if let Some(ask) = ask_callback {
+        loop_ = loop_.with_ask_callback(ask);
+    }
 
     // Give print mode the same project context (CLAUDE.md/TIDE.md/AGENTS.md +
     // memory) as the interactive REPL. An explicit --system-prompt flag still
@@ -2969,6 +3306,11 @@ fn run_prompt(
     let events = loop_.run(prompt);
     let mut assistant = None;
     for event in events {
+        // Forward each event to the sink (stream-json tool-event emitter) before
+        // we consume it, so consumers see tool batches / results in real order.
+        if let Some(sink) = event_sink {
+            sink(&event);
+        }
         match event {
             AgentLoopEvent::Assistant(message) => assistant = Some(message.content),
             AgentLoopEvent::Terminal(AgentTerminalEvent::ModelError(error)) => return Err(error),
@@ -2982,11 +3324,15 @@ fn run_prompt(
                     "context window full: transcript exceeds the model's limit even after compaction",
                 ));
             }
+            // Print mode is non-interactive — there is no Ctrl-C path that
+            // would set the interrupt flag, so `Interrupted` is unreachable
+            // here in practice; treat it as a benign no-op for exhaustiveness.
             AgentLoopEvent::User(_)
             | AgentLoopEvent::ToolBatchSummary { .. }
             | AgentLoopEvent::ToolResult { .. }
             | AgentLoopEvent::Compaction(_)
-            | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete) => {}
+            | AgentLoopEvent::Terminal(AgentTerminalEvent::Complete)
+            | AgentLoopEvent::Terminal(AgentTerminalEvent::Interrupted) => {}
         }
     }
 
@@ -3001,6 +3347,158 @@ fn run_prompt(
 /// `{"type":"assistant_delta","delta":...}` (JSON-escaped).
 fn assistant_delta_event(delta: &str) -> String {
     serde_json::json!({ "type": "assistant_delta", "delta": delta }).to_string()
+}
+
+/// Serialize a single `thinking_delta` stream-json event for reasoning-model
+/// chain-of-thought. Distinct `type` from `assistant_delta` so consumers can
+/// render the model's reasoning separately (dimmed, collapsible) from its
+/// answer. The spec advertises this output type.
+fn thinking_delta_event(delta: &str) -> String {
+    serde_json::json!({ "type": "thinking_delta", "delta": delta }).to_string()
+}
+
+/// Serialize the `permission_request` stream-json event a headless host sees
+/// when a permission-gated tool needs approval. Carries enough for the host to
+/// decide: the tool name, the `tool_use_id` (so a reply can be correlated), and
+/// the full input. The spec advertises this output type; it is emitted from the
+/// headless ask-callback below.
+fn permission_request_event(tool_call: &ToolCall) -> String {
+    serde_json::json!({
+        "type": "permission_request",
+        "tool_use_id": tool_call.id,
+        "tool": tool_call.name,
+        "input": tool_call.input,
+    })
+    .to_string()
+}
+
+/// Map a host-supplied [`PermissionResponse`] to the agent loop's [`AskOutcome`].
+/// `allowed=false` denies; `allowed && remember` whitelists the whole tool for
+/// the run (so a batch of same-tool calls isn't re-asked); plain `allowed`
+/// approves just this one. Pure so the mapping is unit-testable.
+fn headless_permission_outcome(response: &PermissionResponse, tool_name: &str) -> AskOutcome {
+    if !response.allowed {
+        return AskOutcome::Deny {
+            reason: String::from("denied by host (permission_response allowed=false)"),
+        };
+    }
+    if response.remember {
+        AskOutcome::AllowAllSession {
+            tool_name: tool_name.to_owned(),
+        }
+    } else {
+        AskOutcome::Allow
+    }
+}
+
+/// Decide a single gated tool call from a queue of pre-supplied responses,
+/// emitting the `permission_request` line via `emit` first (so the host's log
+/// records what was asked, correlated by `tool_use_id`). Pops the next response
+/// — matching `tool_use_id` when the host set one, else FIFO — and maps it; an
+/// empty queue denies with an actionable reason. Pure over `emit`/`queue` so the
+/// whole decision is testable without real stdout.
+fn decide_headless_permission(
+    tool_call: &ToolCall,
+    queue: &mut std::collections::VecDeque<PermissionResponse>,
+    emit: &mut dyn FnMut(&str),
+) -> AskOutcome {
+    emit(&permission_request_event(tool_call));
+
+    // Prefer a response the host explicitly addressed to this tool_use_id;
+    // otherwise take the next unaddressed one in order.
+    let idx = queue
+        .iter()
+        .position(|r| r.tool_use_id.as_deref() == Some(tool_call.id.as_str()))
+        .or_else(|| {
+            queue
+                .iter()
+                .position(|r| r.tool_use_id.is_none() || r.tool_use_id.as_deref() == Some(""))
+        });
+    match idx.and_then(|i| queue.remove(i)) {
+        Some(response) => headless_permission_outcome(&response, &tool_call.name),
+        None => AskOutcome::Deny {
+            reason: format!(
+                "no permission_response supplied for {} (tool_use_id {}); pre-queue a permission_response in the stream-json input, or run with --permission-mode accept-edits/bypass",
+                tool_call.name, tool_call.id
+            ),
+        },
+    }
+}
+
+/// Build the headless permission ask-callback: emits a `permission_request` per
+/// gated tool and resolves it from `responses` (the `permission_response`
+/// messages parsed from the stream-json input). Shared `Mutex` because the
+/// agent loop may invoke the callback from a worker thread.
+fn headless_ask_callback(
+    responses: Vec<PermissionResponse>,
+) -> deeptide_core::PermissionAskCallback {
+    let queue = Arc::new(Mutex::new(std::collections::VecDeque::from(responses)));
+    Arc::new(move |tool_call: &ToolCall| {
+        let mut emit = |line: &str| {
+            let mut out = io::stdout().lock();
+            let _ = writeln!(out, "{line}");
+            let _ = out.flush();
+        };
+        match queue.lock() {
+            Ok(mut q) => decide_headless_permission(tool_call, &mut q, &mut emit),
+            Err(_) => AskOutcome::Deny {
+                reason: String::from("permission queue poisoned"),
+            },
+        }
+    })
+}
+
+/// Extract any `permission_response` messages a host pre-queued in the
+/// stream-json stdin batch (empty for text input or when none were sent). These
+/// pre-authorise gated tools in headless runs — see [`headless_ask_callback`].
+fn collect_permission_responses(cli: &Cli, stdin: Option<&str>) -> Vec<PermissionResponse> {
+    if cli.input_format != InputFormat::StreamJson {
+        return Vec::new();
+    }
+    EmbeddedProtocol::parse(stdin.unwrap_or_default())
+        .map(|parsed| parsed.permission_responses)
+        .unwrap_or_default()
+}
+
+/// Encode an [`AgentLoopEvent`] as a stream-json line, or `None` for events the
+/// protocol doesn't surface (the live `assistant_delta` text already streams via
+/// the `streaming_handler`, so `Assistant`/`User`/terminal events are skipped
+/// here to avoid duplicating it). This is what fills the previously-empty middle
+/// of the stream-json output: consumers now see tool batches and results as the
+/// agent works, not just the final envelope.
+fn stream_json_event_line(event: &AgentLoopEvent) -> Option<String> {
+    let value = match event {
+        AgentLoopEvent::ToolBatchSummary {
+            label,
+            tool_calls,
+            failed_count,
+        } => serde_json::json!({
+            "type": "tool_batch",
+            "label": label,
+            "tools": tool_calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+            "failed_count": failed_count,
+        }),
+        AgentLoopEvent::ToolResult {
+            tool_call,
+            content,
+            is_error,
+        } => serde_json::json!({
+            "type": "tool_result",
+            "tool": tool_call.name,
+            "tool_use_id": tool_call.id,
+            "is_error": is_error,
+            "content": content,
+        }),
+        AgentLoopEvent::Compaction(report) => serde_json::json!({
+            "type": "compact",
+            "compressed_messages": report.compressed_messages,
+            "tokens_after": report.tokens_after,
+        }),
+        // Assistant text is already streamed as assistant_delta; user echoes and
+        // terminal markers don't need a separate line here.
+        _ => return None,
+    };
+    Some(value.to_string())
 }
 
 /// Build the one-shot result envelope, matching the Swift `OneShotJSONResult`
@@ -3038,7 +3536,7 @@ fn one_shot_result_json(outcome: &Result<PromptOutcome, String>, model: &str) ->
 /// `configured_backend_with_handler` directly with the appropriate handler.
 #[cfg(test)]
 fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
-    configured_backend_with_handler(cli, None)
+    configured_backend_with_handler(cli, None, None)
 }
 
 /// Build the configured backend, optionally installing a streaming handler.
@@ -3051,8 +3549,71 @@ fn configured_backend(cli: &Cli) -> Result<ConfiguredBackend, String> {
 fn configured_backend_with_handler(
     cli: &Cli,
     streaming_handler: Option<StreamingHandler>,
+    interrupt: Option<Arc<AtomicBool>>,
 ) -> Result<ConfiguredBackend, String> {
+    // Resolve the provider preset first: it decides the wire protocol and
+    // supplies default base-url/model that explicit flags/env still override.
+    // No `--provider` ⇒ the default Anthropic preset, preserving prior
+    // behaviour exactly.
+    let preset = provider::resolve_provider(cli.provider.as_deref().unwrap_or("anthropic"));
+
     let credential = effective_credential(cli);
+    // Keyless local engines (ollama, llama.cpp, mlx with `requires_key=false`)
+    // are usable with no credential. Cloud providers still require one — when
+    // absent we fall back to the local-echo backend exactly as before.
+    if credential.is_none() && preset.requires_key {
+        return Ok(ConfiguredBackend {
+            backend: Box::<LocalEchoBackend>::default(),
+            model: String::from("unconfigured"),
+            is_configured: false,
+            subagent_config: None,
+        });
+    }
+
+    let base_url = effective_base_url_for(cli, &preset);
+    let model = effective_model_for(cli, &preset);
+
+    match preset.protocol {
+        provider::Protocol::Anthropic => configure_anthropic_backend(
+            cli,
+            base_url,
+            model,
+            credential,
+            streaming_handler,
+            interrupt,
+        ),
+        provider::Protocol::OpenAi => configure_openai_backend(
+            cli,
+            base_url,
+            model,
+            credential,
+            streaming_handler,
+            interrupt,
+        ),
+        provider::Protocol::Gemini => configure_gemini_backend(
+            cli,
+            base_url,
+            model,
+            credential,
+            streaming_handler,
+            interrupt,
+        ),
+    }
+}
+
+/// Build the Anthropic-protocol backend (the original path, factored out so the
+/// dispatcher in [`configured_backend_with_handler`] reads cleanly).
+fn configure_anthropic_backend(
+    cli: &Cli,
+    base_url: String,
+    model: String,
+    credential: Option<CloudCredential>,
+    streaming_handler: Option<StreamingHandler>,
+    interrupt: Option<Arc<AtomicBool>>,
+) -> Result<ConfiguredBackend, String> {
+    // The Anthropic protocol always needs a credential; the keyless short-
+    // circuit above only applies to local OpenAI engines, so a missing
+    // credential here means the caller mis-set the provider — fall back to echo.
     let Some(credential) = credential else {
         return Ok(ConfiguredBackend {
             backend: Box::<LocalEchoBackend>::default(),
@@ -3061,9 +3622,6 @@ fn configured_backend_with_handler(
             subagent_config: None,
         });
     };
-
-    let base_url = effective_base_url(cli);
-    let model = effective_model(cli);
     let mut config = match credential {
         CloudCredential::ApiKey(api_key) => AnthropicConfig::new(base_url, api_key, model.clone()),
         CloudCredential::BearerToken(token) => {
@@ -3085,6 +3643,9 @@ fn configured_backend_with_handler(
         config = config.with_system_prompt(system_prompt);
     }
     let mut backend = AnthropicBackend::new(config.clone())?;
+    if let Some(flag) = interrupt {
+        backend = backend.with_interrupt_flag(flag);
+    }
     if let Some(handler) = streaming_handler {
         backend = backend.with_streaming_handler(handler);
     }
@@ -3092,7 +3653,91 @@ fn configured_backend_with_handler(
         backend: Box::new(backend),
         model,
         is_configured: true,
-        subagent_config: Some(config),
+        subagent_config: Some(SubagentConfig::Anthropic(config)),
+    })
+}
+
+/// Build the OpenAI-compatible backend (DeepSeek, ollama, LM Studio, vLLM,
+/// mlx, OpenAI, …). Streams when a handler is supplied AND `--stream`/REPL
+/// streaming is on, feeding `parse_openai_stream` so the TUI renders deltas
+/// token-by-token; otherwise runs buffered and the REPL's `did_stream`-false
+/// path prints the assembled panel.
+fn configure_openai_backend(
+    cli: &Cli,
+    base_url: String,
+    model: String,
+    credential: Option<CloudCredential>,
+    streaming_handler: Option<StreamingHandler>,
+    interrupt: Option<Arc<AtomicBool>>,
+) -> Result<ConfiguredBackend, String> {
+    // OpenAI servers authenticate with a bearer token; both credential forms
+    // collapse to the same string. A keyless local engine yields `None` → empty
+    // key → no Authorization header (see OpenAiBackend::try_model).
+    let api_key = match credential {
+        Some(CloudCredential::ApiKey(key)) | Some(CloudCredential::BearerToken(key)) => key,
+        None => String::new(),
+    };
+    let mut config = deeptide_core::OpenAiConfig::new(base_url, api_key, model.clone());
+    config.max_tokens = cli.max_output_tokens;
+    // Stream when the user asked (--stream) or the REPL installed a live
+    // handler. The backend only actually streams when BOTH this flag and a
+    // handler are present (see OpenAiBackend::streaming_active).
+    config.enable_streaming = cli.stream || streaming_handler.is_some();
+    config.fallback_model = cli.fallback_model.clone();
+    if let Some(system_prompt) = resolve_system_prompt(cli)? {
+        config = config.with_system_prompt(system_prompt);
+    }
+    let mut backend = deeptide_core::OpenAiBackend::new(config.clone())?;
+    if let Some(flag) = interrupt {
+        backend = backend.with_interrupt_flag(flag);
+    }
+    if let Some(handler) = streaming_handler {
+        backend = backend.with_streaming_handler(handler);
+    }
+    Ok(ConfiguredBackend {
+        backend: Box::new(backend),
+        model,
+        is_configured: true,
+        subagent_config: Some(SubagentConfig::OpenAi(config)),
+    })
+}
+
+/// Build the Gemini backend (`generateContent` / `streamGenerateContent`).
+/// Streams when a handler is installed AND streaming is on, feeding
+/// `parse_gemini_stream` so the TUI renders deltas uniformly; otherwise
+/// buffered. Auth is the `x-goog-api-key` header (both credential forms collapse
+/// to the same key string).
+fn configure_gemini_backend(
+    cli: &Cli,
+    base_url: String,
+    model: String,
+    credential: Option<CloudCredential>,
+    streaming_handler: Option<StreamingHandler>,
+    interrupt: Option<Arc<AtomicBool>>,
+) -> Result<ConfiguredBackend, String> {
+    let api_key = match credential {
+        Some(CloudCredential::ApiKey(key)) | Some(CloudCredential::BearerToken(key)) => key,
+        None => String::new(),
+    };
+    let mut config = deeptide_core::GeminiConfig::new(base_url, api_key, model.clone());
+    config.max_tokens = cli.max_output_tokens;
+    config.enable_streaming = cli.stream || streaming_handler.is_some();
+    config.fallback_model = cli.fallback_model.clone();
+    if let Some(system_prompt) = resolve_system_prompt(cli)? {
+        config = config.with_system_prompt(system_prompt);
+    }
+    let mut backend = deeptide_core::GeminiBackend::new(config.clone())?;
+    if let Some(flag) = interrupt {
+        backend = backend.with_interrupt_flag(flag);
+    }
+    if let Some(handler) = streaming_handler {
+        backend = backend.with_streaming_handler(handler);
+    }
+    Ok(ConfiguredBackend {
+        backend: Box::new(backend),
+        model,
+        is_configured: true,
+        subagent_config: Some(SubagentConfig::Gemini(config)),
     })
 }
 
@@ -3179,12 +3824,28 @@ fn run_doctor(cli: &Cli, cwd: &Path) -> String {
     lines.push(String::new());
 
     lines.push(String::from("[ config files ]"));
+    if cli.isolated {
+        lines.push(String::from(
+            "  isolated  : ON — global/project/local scopes ignored; using --settings only",
+        ));
+    }
     for (label, path) in [
         ("global ", ConfigStore::global_path()),
         ("project", ConfigStore::project_path(cwd)),
         ("local  ", ConfigStore::local_path(cwd)),
     ] {
-        let status = if path.exists() { "exists" } else { "missing" };
+        let exists = path.exists();
+        let status = if cli.isolated {
+            if exists {
+                "exists, IGNORED"
+            } else {
+                "missing, ignored"
+            }
+        } else if exists {
+            "exists"
+        } else {
+            "missing"
+        };
         lines.push(format!("  {label}  {}  [{status}]", path.display()));
     }
     match cli.settings.as_ref() {
@@ -3359,6 +4020,41 @@ fn which_on_path(binary: &str) -> Option<PathBuf> {
 /// per-million-token prices for input, output, cache-create, and
 /// cache-read (USD), plus a flag marking the default. Aligned by name
 /// so the table stays readable as the catalog grows.
+/// Render the `--list-providers` table: each built-in preset's id, protocol,
+/// default endpoint, default model, and whether a key is required. The custom
+/// fallback (any unknown name → OpenAI-compatible localhost) is documented in a
+/// trailing note rather than as a row.
+fn format_provider_list() -> String {
+    let ids = provider::known_provider_ids();
+    let id_width = ids.iter().map(|id| id.len()).max().unwrap_or(8).max(8);
+    let mut lines = vec![format!("Provider presets ({}):", ids.len())];
+    lines.push(format!(
+        "  {:<id_width$}  {:<9}  {:<8}  endpoint / model",
+        "name", "protocol", "auth"
+    ));
+    for id in ids {
+        let p = provider::resolve_provider(id);
+        let protocol = match p.protocol {
+            provider::Protocol::Anthropic => "anthropic",
+            provider::Protocol::OpenAi => "openai",
+            provider::Protocol::Gemini => "gemini",
+        };
+        let auth = if p.requires_key { "key" } else { "keyless" };
+        lines.push(format!(
+            "  {:<id_width$}  {protocol:<9}  {auth:<8}  {} · {}",
+            p.id, p.base_url, p.model
+        ));
+    }
+    lines.push(String::new());
+    lines.push(String::from(
+        "Any other --provider name → a custom OpenAI-compatible endpoint (default http://localhost:8000/v1).",
+    ));
+    lines.push(String::from(
+        "Explicit --base-url / --model / --api-key always override a preset's defaults.",
+    ));
+    lines.join("\n")
+}
+
 fn format_model_list(default_model: &str) -> String {
     let models = deeptide_core::known_models();
     if models.is_empty() {
@@ -3789,6 +4485,25 @@ fn render_system_message(message: &SystemMessage, use_color: bool, debug: bool) 
 /// INPUT (file path, command, URL, …) so the row is self-describing
 /// without expanding the body. Falls back gracefully to the old
 /// `name · summary` shape when `subject` is `None`.
+/// Render the live "▶ <tool>" line printed the instant a tool starts
+/// executing — before its result is known. Mirrors `render_tool_event`'s
+/// marker layout but uses a cyan ▶ so an in-flight call is visually
+/// distinct from the ✓/✗ result line that lands when the turn ends. The
+/// `label` is the pre-rendered input preview (e.g. `"Bash(chrome …)"`).
+fn render_tool_start_line(label: &str, use_color: bool) -> String {
+    if use_color {
+        // Cyan ▶ marker, dimmed preview so the marker stays the anchor.
+        format!("\x1b[36m▶\x1b[0m \x1b[2m{label}\x1b[0m")
+    } else {
+        format!("▶ {label}")
+    }
+}
+
+/// Render a tool-call event row: a ✓/✗ marker, the tool name, an
+/// optional **subject** — the single most useful field from the tool's
+/// INPUT (file path, command, URL, …) so the row is self-describing
+/// without expanding the body. Falls back gracefully to the old
+/// `name · summary` shape when `subject` is `None`.
 #[allow(clippy::too_many_arguments)]
 fn render_tool_event(
     name: &str,
@@ -3876,36 +4591,6 @@ fn next_permission_mode(current: PermissionMode) -> PermissionMode {
         PermissionMode::AcceptEdits => PermissionMode::Plan,
         PermissionMode::Plan => PermissionMode::Bypass,
         PermissionMode::Bypass => PermissionMode::Default,
-    }
-}
-
-/// Conditional readline handler that records "Shift+Tab was pressed" via an
-/// atomic flag and asks rustyline to interrupt the current readline session.
-///
-/// The interrupt is the cleanest way out of `rl.readline()` from inside a
-/// custom binding: it returns `ReadlineError::Interrupted` which our REPL
-/// already handles as a benign restart point. The REPL then observes the
-/// flag, cycles the permission mode, paints feedback, and presents a fresh
-/// prompt — losing any partial input the user had typed, but that's a fair
-/// trade for a binding that only fires on an explicit modifier keystroke.
-struct ShiftTabCycleHandler {
-    pending: Arc<AtomicBool>,
-}
-
-impl ConditionalEventHandler for ShiftTabCycleHandler {
-    fn handle(
-        &self,
-        _evt: &Event,
-        _n: RepeatCount,
-        _positive: bool,
-        _ctx: &EventContext<'_>,
-    ) -> Option<Cmd> {
-        self.pending.store(true, Ordering::Relaxed);
-        // Force rustyline to exit with `Interrupted` so the REPL loop can
-        // observe the flag and react. Without this rustyline would just sit
-        // in `readline()` and the mode switch would be invisible until the
-        // user pressed Enter on their own.
-        Some(Cmd::Interrupt)
     }
 }
 
@@ -4036,6 +4721,67 @@ fn parse_permission_response(raw: &str, tool_name: &str) -> AskOutcome {
 /// permission header, colourises `-`/`+` lines when the terminal
 /// supports it, and bookends the block with `───` rules so it's clearly
 /// delimited from the prompt the user types into below.
+/// If `lines[start]` begins a run of deletion lines (`-…`, excluding the `---`
+/// file header) immediately followed by an EQUAL-length run of insertion lines
+/// (`+…`, excluding `+++`), return `(deletions, insertions, index_past_block)`
+/// so the caller can pair them for word-level highlighting. Returns `None` for
+/// any other shape (unequal runs, a lone deletion, context lines), in which
+/// case the caller renders those lines individually.
+fn paired_change_block<'a>(
+    lines: &'a [&'a str],
+    start: usize,
+) -> Option<(&'a [&'a str], &'a [&'a str], usize)> {
+    let is_del = |l: &str| l.starts_with('-') && !l.starts_with("---");
+    let is_ins = |l: &str| l.starts_with('+') && !l.starts_with("+++");
+
+    if !lines.get(start).is_some_and(|l| is_del(l)) {
+        return None;
+    }
+    let mut del_end = start;
+    while lines.get(del_end).is_some_and(|l| is_del(l)) {
+        del_end += 1;
+    }
+    let mut ins_end = del_end;
+    while lines.get(ins_end).is_some_and(|l| is_ins(l)) {
+        ins_end += 1;
+    }
+    let dels = &lines[start..del_end];
+    let inss = &lines[del_end..ins_end];
+    // Only pair when the two runs line up 1:1 AND there's an insertion side —
+    // a pure deletion (no following `+`) has nothing to word-diff against.
+    if inss.is_empty() || dels.len() != inss.len() {
+        return None;
+    }
+    Some((dels, inss, ins_end))
+}
+
+/// Render one side of a word-diffed line: `marker` (`-`/`+`) + body, painted in
+/// `base_sgr` (red/green) with the CHANGED spans additionally bold + reverse-
+/// video so the actual edit pops while the common text stays calm. Each changed
+/// run toggles the emphasis on and back off, staying within the base colour.
+fn render_word_diff_line(
+    marker: char,
+    base_sgr: &str,
+    spans: &[deeptide_core::word_diff::Span],
+) -> String {
+    use deeptide_core::word_diff::Span;
+    let mut body = String::new();
+    for span in spans {
+        match span {
+            Span::Common(text) => body.push_str(text),
+            // Bold + reverse for the changed run, then clear just those two
+            // attributes (22 = not-bold, 27 = not-reverse) so we fall back to
+            // the line's base colour rather than a full reset.
+            Span::Changed(text) => {
+                body.push_str("\x1b[1m\x1b[7m");
+                body.push_str(text);
+                body.push_str("\x1b[27m\x1b[22m");
+            }
+        }
+    }
+    format!("  │ {base_sgr}{marker}{body}\x1b[0m")
+}
+
 fn render_diff_preview_block(preview: &deeptide_core::DiffPreview, use_color: bool) -> String {
     let mut out = String::new();
     let rule = if use_color {
@@ -4051,7 +4797,40 @@ fn render_diff_preview_block(preview: &deeptide_core::DiffPreview, use_color: bo
     } else {
         out.push_str(&format!("  {}\n", preview.summary));
     }
-    for line in preview.body.lines() {
+    // Diff +/- colours come from the active theme (default `dark` reproduces
+    // the prior hard-coded green/red, so existing snapshots are unchanged;
+    // `high-contrast` bolds them).
+    let diff = &deeptide_core::theme::active().diff;
+    let lines: Vec<&str> = preview.body.lines().collect();
+    let mut idx = 0;
+    while idx < lines.len() {
+        // Word-level highlighting: when a run of deletion lines is immediately
+        // followed by an equal-length run of insertion lines, the edit is an
+        // in-place rewrite — pair them positionally and brighten only the
+        // changed words on each side (the rest of the line stays calm), the
+        // `git --word-diff` / zero-cli experience. Any other shape falls
+        // through to the per-line styling below.
+        if use_color && let Some((dels, inss, next)) = paired_change_block(&lines, idx) {
+            // Compute each pair's word-level spans once, then emit all the
+            // deletions followed by all the insertions (unified-diff order).
+            let paired: Vec<_> = dels
+                .iter()
+                .zip(inss.iter())
+                .map(|(del, ins)| deeptide_core::word_diff::word_diff(&del[1..], &ins[1..]))
+                .collect();
+            for (old_spans, _new_spans) in &paired {
+                out.push_str(&render_word_diff_line('-', &diff.removed, old_spans));
+                out.push('\n');
+            }
+            for (_old_spans, new_spans) in &paired {
+                out.push_str(&render_word_diff_line('+', &diff.added, new_spans));
+                out.push('\n');
+            }
+            idx = next;
+            continue;
+        }
+
+        let line = lines[idx];
         let styled = if !use_color {
             format!("  │ {line}")
         } else if let Some(rest) = line.strip_prefix("$ ") {
@@ -4063,9 +4842,9 @@ fn render_diff_preview_block(preview: &deeptide_core::DiffPreview, use_color: bo
             // red prefix makes it impossible to miss when scanning.
             format!("  │ \x1b[1;31m⚠\x1b[0m  \x1b[31m{rest}\x1b[0m")
         } else if let Some(rest) = line.strip_prefix('+') {
-            format!("  │ \x1b[32m+{rest}\x1b[0m")
+            format!("  │ {}+{rest}\x1b[0m", diff.added)
         } else if let Some(rest) = line.strip_prefix('-') {
-            format!("  │ \x1b[31m-{rest}\x1b[0m")
+            format!("  │ {}-{rest}\x1b[0m", diff.removed)
         } else if line.starts_with("@@") {
             format!("  │ \x1b[36m{line}\x1b[0m")
         } else if line.starts_with("---") || line.starts_with("+++") {
@@ -4075,6 +4854,7 @@ fn render_diff_preview_block(preview: &deeptide_core::DiffPreview, use_color: bo
         };
         out.push_str(&styled);
         out.push('\n');
+        idx += 1;
     }
     out.push_str("  ");
     out.push_str(rule);
@@ -4178,17 +4958,33 @@ fn build_auth_segment(api_key_resolved: bool, paean_resolved: bool, tick: u64) -
 }
 
 fn subagent_backend_factory(
-    config: Option<AnthropicConfig>,
+    config: Option<SubagentConfig>,
 ) -> impl Fn(&str) -> Box<dyn AgentBackend> + Send + Sync + 'static {
-    move |model| {
-        let Some(mut config) = config.clone() else {
-            return Box::<LocalEchoBackend>::default();
-        };
-        config.model = model.to_owned();
-        match AnthropicBackend::new(config) {
-            Ok(backend) => Box::new(backend),
-            Err(_) => Box::<LocalEchoBackend>::default(),
+    move |model| match config.clone() {
+        // Spawn sub-agents on the SAME protocol/endpoint as the main loop, just
+        // re-pointed at the requested model.
+        Some(SubagentConfig::Anthropic(mut config)) => {
+            config.model = model.to_owned();
+            match AnthropicBackend::new(config) {
+                Ok(backend) => Box::new(backend),
+                Err(_) => Box::<LocalEchoBackend>::default(),
+            }
         }
+        Some(SubagentConfig::OpenAi(mut config)) => {
+            config.model = model.to_owned();
+            match deeptide_core::OpenAiBackend::new(config) {
+                Ok(backend) => Box::new(backend) as Box<dyn AgentBackend>,
+                Err(_) => Box::<LocalEchoBackend>::default(),
+            }
+        }
+        Some(SubagentConfig::Gemini(mut config)) => {
+            config.model = model.to_owned();
+            match deeptide_core::GeminiBackend::new(config) {
+                Ok(backend) => Box::new(backend) as Box<dyn AgentBackend>,
+                Err(_) => Box::<LocalEchoBackend>::default(),
+            }
+        }
+        None => Box::<LocalEchoBackend>::default(),
     }
 }
 
@@ -4199,6 +4995,34 @@ fn effective_base_url(cli: &Cli) -> String {
 
     env_first_non_empty(&["ZERO_CLI_BASE_URL", "ZERO_API_BASE", "ANTHROPIC_BASE_URL"])
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned())
+}
+
+/// Base-URL resolution with provider-preset fallback. Precedence (highest
+/// first): explicit `--base-url` → `*_BASE_URL` env → the preset's default →
+/// the global default. So `--provider deepseek` alone points at DeepSeek, but
+/// `--provider deepseek --base-url http://relay` still wins.
+fn effective_base_url_for(cli: &Cli, preset: &provider::ProviderPreset) -> String {
+    if cli.base_url != DEFAULT_BASE_URL {
+        return cli.base_url.clone();
+    }
+    if let Some(url) =
+        env_first_non_empty(&["ZERO_CLI_BASE_URL", "ZERO_API_BASE", "ANTHROPIC_BASE_URL"])
+    {
+        return url;
+    }
+    preset.base_url.clone()
+}
+
+/// Model resolution with provider-preset fallback. Precedence: explicit
+/// `--model` → `*_MODEL` env → the preset's default → the global default.
+fn effective_model_for(cli: &Cli, preset: &provider::ProviderPreset) -> String {
+    if cli.model != DEFAULT_MODEL {
+        return cli.model.clone();
+    }
+    if let Some(model) = env_first_non_empty(&["ZERO_CLI_MODEL", "ANTHROPIC_MODEL"]) {
+        return model;
+    }
+    preset.model.clone()
 }
 
 fn has_provider_base_url(cli: &Cli) -> bool {
@@ -4226,7 +5050,10 @@ fn env_first_non_empty(names: &[&str]) -> Option<String> {
 }
 
 fn read_stdin_if_needed(cli: &Cli) -> Result<Option<String>, String> {
-    if cli.input_format == InputFormat::StreamJson || cli.print_mode && cli.prompt.is_none() {
+    if cli.input_format == InputFormat::StreamJson
+        || cli.read_stdin
+        || (cli.print_mode && cli.prompt.is_none())
+    {
         return read_stdin().map(Some);
     }
 
@@ -4273,13 +5100,13 @@ mod tests {
 
     use super::{
         Cli, DEFAULT_BASE_URL, DEFAULT_MODEL, FIXED_ARG_SUGGESTIONS, FsCandidate, InputFormat,
-        LiveToolArgsTicker, OutputFormat, ReplHelper, VERSION_LONG, VERSION_SHORT,
+        LiveToolArgsTicker, OutputFormat, ReplHelper, SubagentConfig, VERSION_LONG, VERSION_SHORT,
         apply_config_fallbacks, at_path_completion, build_auth_segment, collect_prompt,
         compute_at_path_hint, compute_hint, configured_backend, drain_live_tool_args,
-        effective_base_url, effective_model, format_retry_notice_line, is_subsequence,
-        next_permission_mode, normalize_embedded_mode, paean_token_resolved,
-        parse_permission_response, render_system_message, summarize_tool_call_for_prompt,
-        truncate_inline, use_color, validate_formats,
+        editor_completion, editor_hint, effective_base_url, effective_model,
+        format_retry_notice_line, is_subsequence, next_permission_mode, normalize_embedded_mode,
+        paean_token_resolved, parse_permission_response, render_system_message,
+        summarize_tool_call_for_prompt, truncate_inline, use_color, validate_formats,
     };
     use clap::Parser;
     use deeptide_core::AskOutcome;
@@ -4298,13 +5125,17 @@ mod tests {
             input_format: InputFormat::Text,
             output_format: OutputFormat::Text,
             embedded: false,
+            read_stdin: false,
             session_id: None,
             cwd: None,
             permission_mode: "default".to_owned(),
-            model: "deepseek-v4-pro".to_owned(),
+            theme: "dark".to_owned(),
+            model: "deepseek-v4-flash".to_owned(),
             base_url: "https://api.anthropic.com".to_owned(),
             api_key: None,
             profile: None,
+            provider: None,
+            list_providers: false,
             fallback_model: None,
             thinking: None,
             effort: None,
@@ -4323,6 +5154,7 @@ mod tests {
             yolo: false,
             continue_session: false,
             resume: None,
+            name: None,
             list_sessions: false,
             import: None,
             import_session: None,
@@ -4333,6 +5165,7 @@ mod tests {
             no_session_capture: false,
             no_suggestions: false,
             settings: None,
+            isolated: false,
             add_dir: Vec::new(),
         }
     }
@@ -4635,10 +5468,12 @@ mod tests {
         cli.api_key = Some("k".to_owned());
         cli.thinking = Some("high".to_owned());
 
-        let config = configured_backend(&cli)
-            .expect("backend")
+        let configured = configured_backend(&cli).expect("backend");
+        let config = configured
             .subagent_config
-            .expect("config");
+            .as_ref()
+            .and_then(SubagentConfig::as_anthropic)
+            .expect("anthropic config");
         assert_eq!(config.thinking, Some(ThinkingConfig::high()));
     }
 
@@ -4650,10 +5485,12 @@ mod tests {
         cli.api_key = Some("k".to_owned());
         cli.effort = Some("low".to_owned());
 
-        let config = configured_backend(&cli)
-            .expect("backend")
+        let configured = configured_backend(&cli).expect("backend");
+        let config = configured
             .subagent_config
-            .expect("config");
+            .as_ref()
+            .and_then(SubagentConfig::as_anthropic)
+            .expect("anthropic config");
         assert_eq!(config.thinking, Some(ThinkingConfig::low()));
     }
 
@@ -4665,10 +5502,12 @@ mod tests {
         cli.api_key = Some("k".to_owned());
         cli.thinking = Some("auto".to_owned());
 
-        let config = configured_backend(&cli)
-            .expect("backend")
+        let configured = configured_backend(&cli).expect("backend");
+        let config = configured
             .subagent_config
-            .expect("config");
+            .as_ref()
+            .and_then(SubagentConfig::as_anthropic)
+            .expect("anthropic config");
         assert_eq!(config.thinking, None);
     }
 
@@ -4726,6 +5565,35 @@ mod tests {
     }
 
     #[test]
+    fn read_stdin_appends_piped_content_to_prompt() {
+        let mut cli = sample_cli();
+        cli.print_mode = true;
+        cli.read_stdin = true;
+        cli.prompt = Some("review this patch".to_owned());
+
+        let prompt = collect_prompt(&cli, Some("  diff --git a b\n"))
+            .unwrap_or_else(|error| panic!("read-stdin should append: {error}"));
+
+        assert_eq!(prompt, "review this patch\n\ndiff --git a b");
+    }
+
+    #[test]
+    fn no_tui_alias_enables_print_mode() {
+        let cli = Cli::try_parse_from(["deeptide", "--no-tui", "-p", "hello"])
+            .expect("--no-tui alias should parse");
+
+        assert!(cli.print_mode);
+    }
+
+    #[test]
+    fn max_tokens_alias_maps_to_max_output_tokens() {
+        let cli = Cli::try_parse_from(["deeptide", "--max-tokens", "1234", "--print", "-p", "hi"])
+            .expect("--max-tokens alias should parse");
+
+        assert_eq!(cli.max_output_tokens, 1234);
+    }
+
+    #[test]
     fn collects_prompt_from_stream_json_stdin() {
         let mut cli = sample_cli();
         cli.print_mode = true;
@@ -4764,7 +5632,11 @@ mod tests {
         let configured = configured_backend(&cli).expect("configured backend");
 
         assert!(configured.is_configured);
-        let subagent_config = configured.subagent_config.expect("subagent config");
+        let subagent_config = configured
+            .subagent_config
+            .as_ref()
+            .and_then(SubagentConfig::as_anthropic)
+            .expect("anthropic subagent config");
         assert_eq!(configured.model, "zero-model");
         assert_eq!(subagent_config.model, "zero-model");
         assert_eq!(subagent_config.base_url, "https://zero.example.test");
@@ -4787,7 +5659,11 @@ mod tests {
         let configured = configured_backend(&cli).expect("configured backend");
 
         assert!(configured.is_configured);
-        let subagent_config = configured.subagent_config.expect("subagent config");
+        let subagent_config = configured
+            .subagent_config
+            .as_ref()
+            .and_then(SubagentConfig::as_anthropic)
+            .expect("anthropic subagent config");
         assert_eq!(subagent_config.api_key, "provider-token");
         assert_eq!(subagent_config.base_url, "https://provider.example.test");
         assert_eq!(subagent_config.auth_mode, AnthropicAuthMode::BearerToken);
@@ -4853,7 +5729,11 @@ mod tests {
         cli.system_prompt = Some("you are deeptide".to_owned());
 
         let configured = configured_backend(&cli).expect("configured backend");
-        let cfg = configured.subagent_config.expect("subagent config");
+        let cfg = configured
+            .subagent_config
+            .as_ref()
+            .and_then(SubagentConfig::as_anthropic)
+            .expect("anthropic subagent config");
         assert_eq!(cfg.system_prompt.as_deref(), Some("you are deeptide"));
         assert!(cfg.enable_prompt_caching);
 
@@ -4871,7 +5751,11 @@ mod tests {
         cli.no_prompt_cache = true;
 
         let configured = configured_backend(&cli).expect("configured backend");
-        let cfg = configured.subagent_config.expect("subagent config");
+        let cfg = configured
+            .subagent_config
+            .as_ref()
+            .and_then(SubagentConfig::as_anthropic)
+            .expect("anthropic subagent config");
         assert!(!cfg.enable_prompt_caching);
 
         clear_api_env();
@@ -4888,7 +5772,11 @@ mod tests {
         cli.stream = true;
 
         let configured = configured_backend(&cli).expect("configured backend");
-        let cfg = configured.subagent_config.expect("subagent config");
+        let cfg = configured
+            .subagent_config
+            .as_ref()
+            .and_then(SubagentConfig::as_anthropic)
+            .expect("anthropic subagent config");
         assert!(cfg.enable_streaming, "--stream must enable streaming");
 
         clear_api_env();
@@ -4976,6 +5864,215 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&event).expect("valid JSON");
         assert_eq!(parsed["type"], "assistant_delta");
         assert_eq!(parsed["delta"], "hello \"world\"\n");
+    }
+
+    #[test]
+    fn diff_preview_word_highlights_only_changed_words_in_paired_lines() {
+        use deeptide_core::DiffPreview;
+        // An equal-length -/+ block is an in-place rewrite: only the changed
+        // word gets reverse-video (`\x1b[7m`), the common text does not.
+        let preview = DiffPreview {
+            summary: "edit f.rs".to_owned(),
+            body: "--- f.rs  (1)\n+++ f.rs  (1)\n@@ -1,1 +1,1 @@\n-let x = 1;\n+let x = 2;"
+                .to_owned(),
+        };
+        let out = super::render_diff_preview_block(&preview, true);
+        // The changed digits are wrapped in bold+reverse.
+        assert!(
+            out.contains("\x1b[1m\x1b[7m1\x1b[27m\x1b[22m"),
+            "old `1` should be reverse-highlighted: {out:?}"
+        );
+        assert!(
+            out.contains("\x1b[1m\x1b[7m2\x1b[27m\x1b[22m"),
+            "new `2` should be reverse-highlighted: {out:?}"
+        );
+        // The common prefix `let x = ` must NOT be inside a reverse-video run.
+        assert!(
+            !out.contains("\x1b[7mlet"),
+            "common text must stay calm: {out:?}"
+        );
+    }
+
+    #[test]
+    fn diff_preview_falls_back_to_plain_coloring_for_unequal_blocks() {
+        use deeptide_core::DiffPreview;
+        // 1 deletion, 2 insertions → not a 1:1 rewrite → no word-diff, just the
+        // existing per-line red/green (no reverse-video anywhere).
+        let preview = DiffPreview {
+            summary: "edit f.rs".to_owned(),
+            body: "@@ -1,1 +1,2 @@\n-old line\n+new line one\n+new line two".to_owned(),
+        };
+        let out = super::render_diff_preview_block(&preview, true);
+        assert!(
+            !out.contains("\x1b[7m"),
+            "no word-diff on unequal runs: {out:?}"
+        );
+        assert!(
+            out.contains("\x1b[31m-old line\x1b[0m"),
+            "plain red deletion: {out:?}"
+        );
+        assert!(
+            out.contains("\x1b[32m+new line one\x1b[0m"),
+            "plain green insertion: {out:?}"
+        );
+    }
+
+    #[test]
+    fn headless_permission_outcome_maps_allowed_remember_and_denied() {
+        use deeptide_core::AskOutcome;
+        use deeptide_core::embedded_protocol::PermissionResponse;
+        let resp = |allowed, remember| PermissionResponse {
+            request_id: None,
+            tool_use_id: None,
+            allowed,
+            remember,
+        };
+        // allow once
+        assert!(matches!(
+            super::headless_permission_outcome(&resp(true, false), "Write"),
+            AskOutcome::Allow
+        ));
+        // allow + remember → whitelist the whole tool
+        match super::headless_permission_outcome(&resp(true, true), "Bash") {
+            AskOutcome::AllowAllSession { tool_name } => assert_eq!(tool_name, "Bash"),
+            other => panic!("expected AllowAllSession, got {other:?}"),
+        }
+        // denied
+        assert!(matches!(
+            super::headless_permission_outcome(&resp(false, false), "Write"),
+            AskOutcome::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn decide_headless_permission_emits_request_and_consumes_queue_by_id_then_fifo() {
+        use deeptide_core::embedded_protocol::PermissionResponse;
+        use deeptide_core::{AskOutcome, ToolCall};
+        use std::collections::VecDeque;
+
+        let call = |id: &str, name: &str| ToolCall {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            input: serde_json::json!({"file_path": "a"}),
+        };
+        // One response addressed to tool-2, one unaddressed.
+        let mut queue = VecDeque::from(vec![
+            PermissionResponse {
+                request_id: None,
+                tool_use_id: Some("tool-2".to_owned()),
+                allowed: true,
+                remember: false,
+            },
+            PermissionResponse {
+                request_id: None,
+                tool_use_id: None,
+                allowed: false,
+                remember: false,
+            },
+        ]);
+
+        let mut emitted = Vec::new();
+        let mut emit = |line: &str| emitted.push(line.to_owned());
+
+        // tool-1 has no addressed response → takes the unaddressed (deny).
+        let o1 = super::decide_headless_permission(&call("tool-1", "Write"), &mut queue, &mut emit);
+        assert!(matches!(o1, AskOutcome::Deny { .. }), "tool-1: {o1:?}");
+        // tool-2's addressed response remains and is matched by id → allow.
+        let o2 = super::decide_headless_permission(&call("tool-2", "Read"), &mut queue, &mut emit);
+        assert!(matches!(o2, AskOutcome::Allow), "tool-2: {o2:?}");
+        assert!(queue.is_empty(), "both responses consumed");
+
+        // A permission_request was emitted per call, carrying the tool_use_id.
+        assert_eq!(emitted.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(&emitted[0]).expect("json");
+        assert_eq!(first["type"], "permission_request");
+        assert_eq!(first["tool_use_id"], "tool-1");
+        assert_eq!(first["tool"], "Write");
+    }
+
+    #[test]
+    fn decide_headless_permission_denies_with_reason_when_queue_empty() {
+        use deeptide_core::{AskOutcome, ToolCall};
+        use std::collections::VecDeque;
+        let mut queue = VecDeque::new();
+        let mut emit = |_: &str| {};
+        let outcome = super::decide_headless_permission(
+            &ToolCall {
+                id: "t1".to_owned(),
+                name: "Bash".to_owned(),
+                input: serde_json::json!({}),
+            },
+            &mut queue,
+            &mut emit,
+        );
+        match outcome {
+            AskOutcome::Deny { reason } => {
+                assert!(reason.contains("Bash") && reason.contains("permission_response"));
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thinking_delta_event_is_a_distinct_type_from_assistant_delta() {
+        // Reasoning chain-of-thought rides its own `thinking_delta` type so
+        // headless consumers can render it separately from the answer.
+        let event = super::thinking_delta_event("let me reason: 2+2");
+        let parsed: serde_json::Value = serde_json::from_str(&event).expect("valid JSON");
+        assert_eq!(parsed["type"], "thinking_delta");
+        assert_eq!(parsed["delta"], "let me reason: 2+2");
+        // Must NOT masquerade as an answer delta.
+        assert_ne!(parsed["type"], "assistant_delta");
+    }
+
+    #[test]
+    fn stream_json_event_line_encodes_tool_result_and_batch() {
+        use deeptide_core::{AgentLoopEvent, ToolCall};
+
+        // A tool result → a `tool_result` line carrying name/id/error/content.
+        let result = AgentLoopEvent::ToolResult {
+            tool_call: ToolCall::new("call_1", "Bash", serde_json::json!({"command": "ls"})),
+            content: "file.txt\n".to_owned(),
+            is_error: false,
+        };
+        let line = super::stream_json_event_line(&result).expect("tool_result encodes");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["type"], "tool_result");
+        assert_eq!(v["tool"], "Bash");
+        assert_eq!(v["tool_use_id"], "call_1");
+        assert_eq!(v["is_error"], false);
+        assert_eq!(v["content"], "file.txt\n");
+
+        // A batch summary → a `tool_batch` line with the tool names + failures.
+        let batch = AgentLoopEvent::ToolBatchSummary {
+            label: "Ran 2 tools".to_owned(),
+            tool_calls: vec![
+                ToolCall::new("a", "Read", serde_json::json!({})),
+                ToolCall::new("b", "Bash", serde_json::json!({})),
+            ],
+            failed_count: 1,
+        };
+        let line = super::stream_json_event_line(&batch).expect("tool_batch encodes");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["type"], "tool_batch");
+        assert_eq!(v["tools"], serde_json::json!(["Read", "Bash"]));
+        assert_eq!(v["failed_count"], 1);
+    }
+
+    #[test]
+    fn stream_json_event_line_skips_text_and_terminal_events() {
+        use deeptide_core::{AgentLoopEvent, AgentTerminalEvent, ConversationMessage};
+        // Assistant text already streams as assistant_delta; don't double it.
+        assert!(
+            super::stream_json_event_line(&AgentLoopEvent::Assistant(
+                ConversationMessage::assistant("hi")
+            ))
+            .is_none()
+        );
+        assert!(
+            super::stream_json_event_line(&AgentLoopEvent::Terminal(AgentTerminalEvent::Complete))
+                .is_none()
+        );
     }
 
     #[test]
@@ -5879,7 +6976,46 @@ mod tests {
     }
 
     fn helper() -> ReplHelper {
-        ReplHelper::new(sample_commands(), false)
+        ReplHelper::new(sample_commands())
+    }
+
+    #[test]
+    fn editor_completion_resolves_slash_command_tail() {
+        // `/exi` resolves to the `/exit` command via the editor bridge,
+        // with `start` at the line head so the editor replaces from `/`.
+        let helper = helper();
+        let line = "/exi";
+        let result = editor_completion(&helper, line, line.len());
+        assert_eq!(result.start, 0);
+        assert!(
+            result.candidates.iter().any(|c| c == "/exit"),
+            "expected /exit in {:?}",
+            result.candidates
+        );
+    }
+
+    #[test]
+    fn editor_completion_resolves_argument_values() {
+        // No command-name match for `/cost s`, so the bridge falls
+        // through to the argument-completion table.
+        let helper = helper();
+        let line = "/cost s";
+        let result = editor_completion(&helper, line, line.len());
+        assert!(
+            result.candidates.iter().any(|c| c == "show"),
+            "expected 'show' arg suggestion, got {:?}",
+            result.candidates
+        );
+    }
+
+    #[test]
+    fn editor_hint_matches_compute_hint() {
+        let helper = helper();
+        let line = "/exi";
+        assert_eq!(
+            editor_hint(&helper, line, line.len()),
+            compute_hint(line, line.len(), &sample_commands())
+        );
     }
 
     #[test]
@@ -6227,7 +7363,7 @@ mod tests {
         let line = "look at @";
         let (start, pairs) = at_path_completion(line, line.len()).expect("at-completion fired");
         assert_eq!(start, "look at @".len());
-        let names: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        let names: Vec<&str> = pairs.iter().map(|p| p.replacement.as_str()).collect();
         assert!(names.contains(&"alpha.txt"), "missing alpha.txt: {names:?}");
         assert!(names.contains(&"beta.txt"), "missing beta.txt: {names:?}");
 
@@ -6247,7 +7383,7 @@ mod tests {
 
         let line = "see @alp";
         let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
-        let names: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        let names: Vec<&str> = pairs.iter().map(|p| p.replacement.as_str()).collect();
         assert_eq!(names, vec!["alpha.txt"], "prefix filter: {names:?}");
 
         if let Some(prev) = prev {
@@ -6266,7 +7402,7 @@ mod tests {
 
         let line = "@";
         let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
-        let displays: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        let displays: Vec<&str> = pairs.iter().map(|p| p.replacement.as_str()).collect();
         assert!(
             displays.contains(&"src/"),
             "dir lacks trailing /: {displays:?}"
@@ -6291,7 +7427,7 @@ mod tests {
         std::env::set_current_dir(dir.path()).unwrap();
 
         let (_start, pairs) = at_path_completion("@", 1).expect("fired");
-        let displays: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        let displays: Vec<&str> = pairs.iter().map(|p| p.replacement.as_str()).collect();
         assert!(displays.contains(&"src/"));
         assert!(
             !displays.contains(&"node_modules/"),
@@ -6361,7 +7497,7 @@ mod tests {
 
         let line = "@modelcfg";
         let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
-        let displays: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        let displays: Vec<&str> = pairs.iter().map(|p| p.replacement.as_str()).collect();
         assert!(
             displays.contains(&"agent_modelcfg.rs"),
             "expected substring match to surface agent_modelcfg.rs: {displays:?}"
@@ -6385,7 +7521,7 @@ mod tests {
 
         let line = "@modtst";
         let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
-        let displays: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        let displays: Vec<&str> = pairs.iter().map(|p| p.replacement.as_str()).collect();
         assert!(
             displays.contains(&"models_test.rs"),
             "expected subsequence match: {displays:?}"
@@ -6417,7 +7553,7 @@ mod tests {
 
         let line = "@te";
         let (_start, pairs) = at_path_completion(line, line.len()).expect("fired");
-        let order: Vec<&str> = pairs.iter().map(|p| p.display.as_str()).collect();
+        let order: Vec<&str> = pairs.iter().map(|p| p.replacement.as_str()).collect();
         // test.rs (prefix) must come before latest.rs (substring),
         // which must come before tale.rs (subsequence).
         let test_idx = order.iter().position(|d| *d == "test.rs");
@@ -6652,37 +7788,21 @@ mod tests {
         assert!(slot.lock().unwrap().is_none());
     }
 
-    // ─── Cursor-move full-refresh guard ─────────────────────────────
-    //
-    // Pinning the Highlighter::highlight_char policy so a future
-    // ReplHelper refactor can't silently drop the workaround.
-    // Returning `true` here is what flips rustyline from "write a
-    // delta `\x1b[D`" to "refresh the whole line", which is what
-    // restores visible cursor movement in terminals that don't
-    // honour bare CUB/CUF after the model has been streaming
-    // (Clide / SwiftTerm-based terminals were the reported case).
-
     #[test]
-    fn repl_helper_forces_full_refresh_on_cursor_move() {
-        use rustyline::highlight::{CmdKind, Highlighter};
-        let helper = ReplHelper::new(vec![], false);
-        assert!(
-            helper.highlight_char("hello", 3, CmdKind::MoveCursor),
-            "MoveCursor must request a full refresh so terminals \
-             that ignore delta CUB/CUF sequences still redraw the \
-             caret",
+    fn render_tool_start_line_uses_cyan_marker_and_dim_label_with_color() {
+        let line = crate::render_tool_start_line("Bash(chrome --headless …)", true);
+        // Cyan ▶ marker, then the dimmed preview.
+        assert_eq!(
+            line,
+            "\x1b[36m▶\x1b[0m \x1b[2mBash(chrome --headless …)\x1b[0m"
         );
     }
 
     #[test]
-    fn repl_helper_does_not_force_full_refresh_on_other_kinds() {
-        // We deliberately *don't* force a refresh on `Other` /
-        // `ForcedRefresh` so we don't double-refresh keystrokes
-        // that already trigger a full redraw via the normal edit
-        // pipeline (e.g. backspace, paste, validate).
-        use rustyline::highlight::{CmdKind, Highlighter};
-        let helper = ReplHelper::new(vec![], false);
-        assert!(!helper.highlight_char("hello", 3, CmdKind::Other));
-        assert!(!helper.highlight_char("hello", 3, CmdKind::ForcedRefresh));
+    fn render_tool_start_line_degrades_to_plain_marker_without_color() {
+        let line = crate::render_tool_start_line("Read(src/main.rs)", false);
+        assert_eq!(line, "▶ Read(src/main.rs)");
+        // No ANSI escapes when color is off.
+        assert_eq!(strip_ansi(&line), line);
     }
 }

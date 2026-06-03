@@ -61,6 +61,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use deeptide_core::MessageQueue;
+use deeptide_core::width::{char_width, display_width};
+
+use crate::line_edit::{
+    backspace_grapheme, delete_grapheme_at_cursor, next_grapheme_boundary, prev_grapheme_boundary,
+};
 
 /// Foreground color used for the "type to queue" prompt prefix and
 /// the pending count badge. Bright cyan keeps it consistent with
@@ -273,13 +278,21 @@ impl QueueEditor {
                 }
             }
             ETX => {
-                // Ctrl-C clears the draft. We deliberately don't
-                // propagate SIGINT — the main thread owns signal
-                // handling and the user can still Ctrl-C at the
-                // rustyline prompt to actually exit.
-                self.buf.clear();
-                self.cursor = 0;
-                KeyOutcome::Cancelled
+                // Ctrl-C semantics, matching Codex / Claude Code:
+                //   * a non-empty draft is cleared first (like Ctrl-U) and
+                //     stays in the editor — the running turn is NOT cancelled,
+                //     so a stray Ctrl-C while typing ahead doesn't kill the
+                //     agent;
+                //   * an empty draft is the "cancel the running turn" gesture,
+                //     reported up as `Cancelled` so the pump flips the shared
+                //     interrupt flag.
+                if self.buf.is_empty() {
+                    KeyOutcome::Cancelled
+                } else {
+                    self.buf.clear();
+                    self.cursor = 0;
+                    KeyOutcome::Repaint
+                }
             }
             NAK => {
                 if self.buf.is_empty() {
@@ -564,199 +577,6 @@ impl QueueEditor {
     }
 }
 
-/// Backspace at the caret: remove the grapheme cluster that ends
-/// at `*cursor` and shift the caret backwards. A grapheme is what
-/// the user perceives as a single visible character — for ASCII /
-/// most CJK that's exactly one Rust `char` (Unicode codepoint),
-/// but IMEs commonly commit a base codepoint followed by one or
-/// more **invisible modifiers** (variation selectors, zero-width
-/// joiners, combining marks). Treating each codepoint as a
-/// separate Backspace target makes those sequences require 2+
-/// keypresses for one visible character disappearance, which the
-/// user perceives as a bug — this function avoids that by:
-///
-/// 1. Finding the codepoint immediately before the caret.
-/// 2. If it's a base, removing just that codepoint.
-/// 3. If it's a modifier, walking further back to peel off any
-///    chain of modifiers AND the base they decorate, so a single
-///    press clears the whole visible cluster.
-///
-/// Returns `true` if anything was removed (caller should
-/// repaint). When the caret is at offset 0 there's nothing to
-/// remove → returns `false`.
-fn backspace_grapheme(buf: &mut String, cursor: &mut usize) -> bool {
-    if *cursor == 0 {
-        return false;
-    }
-    // Step 1: codepoint immediately before the caret.
-    let start = prev_codepoint_boundary(buf, *cursor);
-    let first: char = buf[start..*cursor]
-        .chars()
-        .next()
-        .expect("non-empty slice between two valid boundaries");
-    let mut new_cursor = start;
-    // If the first removal was already a base, we're done.
-    if is_grapheme_modifier(first) {
-        // Step 2: peel further trailing modifiers from before
-        // `new_cursor` until we hit a base or the start of buf.
-        while new_cursor > 0 {
-            let p = prev_codepoint_boundary(buf, new_cursor);
-            let c = buf[p..new_cursor]
-                .chars()
-                .next()
-                .expect("non-empty slice between two valid boundaries");
-            if !is_grapheme_modifier(c) {
-                // Found the base: include it in the removal.
-                new_cursor = p;
-                break;
-            }
-            new_cursor = p;
-        }
-    }
-    buf.drain(new_cursor..*cursor);
-    *cursor = new_cursor;
-    true
-}
-
-/// Forward delete at the caret: remove the grapheme cluster that
-/// starts at `cursor`. Mirror of [`backspace_grapheme`] without
-/// caret movement. Returns `false` when the caret is already at
-/// the end (nothing to delete).
-fn delete_grapheme_at_cursor(buf: &mut String, cursor: usize) -> bool {
-    if cursor >= buf.len() {
-        return false;
-    }
-    let mut end = next_codepoint_boundary(buf, cursor);
-    // Eat any trailing modifiers attached to the base we just
-    // marked for removal, so one Delete press clears the whole
-    // visible cluster.
-    while end < buf.len() {
-        let next = next_codepoint_boundary(buf, end);
-        let c = buf[end..next]
-            .chars()
-            .next()
-            .expect("non-empty slice between valid boundaries");
-        if !is_grapheme_modifier(c) {
-            break;
-        }
-        end = next;
-    }
-    buf.drain(cursor..end);
-    true
-}
-
-/// Step the caret one grapheme cluster forward — i.e. past one
-/// base codepoint plus any modifier chain that decorates it.
-/// Used by the Right-arrow handler. `boundary` must already sit
-/// on a codepoint boundary; the function clamps to `buf.len()`.
-fn next_grapheme_boundary(buf: &str, boundary: usize) -> usize {
-    if boundary >= buf.len() {
-        return buf.len();
-    }
-    let mut next = next_codepoint_boundary(buf, boundary);
-    while next < buf.len() {
-        let after = next_codepoint_boundary(buf, next);
-        let c = buf[next..after]
-            .chars()
-            .next()
-            .expect("non-empty slice between valid boundaries");
-        if !is_grapheme_modifier(c) {
-            break;
-        }
-        next = after;
-    }
-    next
-}
-
-/// Step the caret one grapheme cluster backward. Symmetric with
-/// [`next_grapheme_boundary`]. Returns `0` when `boundary` is
-/// already at the start.
-fn prev_grapheme_boundary(buf: &str, boundary: usize) -> usize {
-    if boundary == 0 {
-        return 0;
-    }
-    // Walk backwards over any modifier chain first.
-    let mut cur = boundary;
-    loop {
-        let prev = prev_codepoint_boundary(buf, cur);
-        let c = buf[prev..cur]
-            .chars()
-            .next()
-            .expect("non-empty slice between valid boundaries");
-        let is_mod = is_grapheme_modifier(c);
-        cur = prev;
-        if !is_mod {
-            // We've stepped over the base; stop here so the caret
-            // lands at the start of the cluster.
-            break;
-        }
-        if cur == 0 {
-            break;
-        }
-    }
-    cur
-}
-
-/// Byte offset of the codepoint boundary immediately before
-/// `boundary`. Required because `String` doesn't expose this
-/// directly without `floor_char_boundary` (unstable in our MSRV).
-fn prev_codepoint_boundary(buf: &str, boundary: usize) -> usize {
-    debug_assert!(buf.is_char_boundary(boundary));
-    let mut i = boundary.saturating_sub(1);
-    while i > 0 && !buf.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-/// Byte offset of the codepoint boundary immediately after
-/// `boundary`. Symmetric with [`prev_codepoint_boundary`].
-fn next_codepoint_boundary(buf: &str, boundary: usize) -> usize {
-    debug_assert!(buf.is_char_boundary(boundary));
-    let len = buf.len();
-    let mut i = (boundary + 1).min(len);
-    while i < len && !buf.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
-
-/// `true` for codepoints that the IME / Unicode treats as
-/// "non-spacing" or "attaching" — i.e. they decorate a preceding
-/// base character without occupying their own visible column.
-///
-/// We approximate with three ranges that cover the common IME
-/// failure modes:
-///
-/// * **Combining marks** (`U+0300..=U+036F` — common Latin/Greek
-///   diacritics — plus broader `U+1AB0..=U+1AFF`, `U+1DC0..=U+1DFF`,
-///   `U+20D0..=U+20FF`, `U+FE20..=U+FE2F`). These attach to the
-///   preceding base.
-/// * **Variation selectors** (`U+FE00..=U+FE0F`, `U+E0100..=U+E01EF`)
-///   — pick a glyph variant of the preceding base, e.g. emoji
-///   text-vs-emoji presentation.
-/// * **Zero-width formatting** (`U+200B..=U+200F`) — ZWJ, ZWNJ,
-///   LRM, RLM, ZWSP. Especially relevant for emoji ZWJ sequences.
-///
-/// Full grapheme-cluster segmentation per UAX #29 is out of scope
-/// — that requires the Unicode Character Database. The classifier
-/// below catches every IME-emitted modifier we've observed in the
-/// wild on macOS / Windows IMEs for Chinese, Japanese, Korean,
-/// and emoji input.
-fn is_grapheme_modifier(c: char) -> bool {
-    matches!(
-        c,
-        '\u{0300}'..='\u{036F}'
-            | '\u{1AB0}'..='\u{1AFF}'
-            | '\u{1DC0}'..='\u{1DFF}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{20D0}'..='\u{20FF}'
-            | '\u{FE00}'..='\u{FE0F}'
-            | '\u{FE20}'..='\u{FE2F}'
-            | '\u{E0100}'..='\u{E01EF}'
-    )
-}
-
 /// Render the input-row content for the current editor state.
 /// Layout (color on, with non-empty buffer + 2 pending, caret at end):
 ///
@@ -845,49 +665,78 @@ pub fn paint_editor_line(
         return format!("{prompt} {cursor_block}  {hint_styled}");
     }
 
-    // Truncate the buffer (only) when the visible-character count
-    // would exceed the width budget. We approximate visible width
-    // with `.chars().count()` — correct for ASCII and CJK in
-    // fixed-width fonts (which is what terminals assume), wrong
-    // for double-width emoji, but a reasonable first pass.
+    // Truncate the buffer (only) when its terminal display WIDTH would exceed
+    // the budget. We measure in display columns — not char count — so a CJK /
+    // emoji buffer (each glyph 2 cells) doesn't overflow the pinned input row
+    // and corrupt the layout. `display_width` ANSI-strips the prompt/hint, so
+    // the styled and unstyled paths reserve the same number of columns.
     //
-    // Truncation keeps the *tail* by default — that's where the
-    // caret usually sits while the user is composing. But when
-    // the caret has been moved earlier (Home, Left, …), keeping
-    // the tail would hide the caret entirely, so we shift the
-    // visible window backwards to include it.
-    let max_buf_chars = width.saturating_sub(prompt.chars().count() + hint.chars().count() + 8);
-    let total_chars = buf.chars().count();
-    let cursor_char_idx = buf[..cursor.min(buf.len())].chars().count();
+    // Truncation keeps the region around the caret: by default the tail (where
+    // the caret sits while composing), but it slides the window backwards to
+    // keep the caret visible when it's been moved earlier (Home, Left, …).
+    let chrome_cols = display_width(&prompt) + display_width(&hint) + 8;
+    let max_buf_cols = width.saturating_sub(chrome_cols).max(1);
 
-    let (prefix_chars, suffix_chars) = if total_chars > max_buf_chars {
-        // Number of chars to drop from the head. Anchor on the
-        // caret: prefer to keep the caret roughly two-thirds of
-        // the way through the visible window so the user can see
-        // a bit of context on both sides while editing.
-        let visible = max_buf_chars.max(1);
-        let target_caret_col = visible.saturating_sub(visible / 3);
-        let mut drop = cursor_char_idx.saturating_sub(target_caret_col);
-        let max_drop = total_chars.saturating_sub(visible);
-        if drop > max_drop {
-            drop = max_drop;
+    // Per-char column offsets, so we can slice the buffer on width boundaries.
+    let chars: Vec<char> = buf.chars().collect();
+    let widths: Vec<usize> = chars.iter().map(|&c| char_width(c)).collect();
+    let total_cols: usize = widths.iter().sum();
+    // Caret's column = sum of widths of chars before the byte cursor.
+    let cursor_char_idx = buf[..cursor.min(buf.len())].chars().count();
+    let caret_col: usize = widths[..cursor_char_idx].iter().sum();
+
+    // Helper: collect chars in [from_char, ..] until adding the next would
+    // exceed `col_budget` display columns. Returns (string, chars_consumed).
+    let take_cols = |from_char: usize, col_budget: usize| -> (String, usize) {
+        let mut s = String::new();
+        let mut used = 0usize;
+        let mut n = 0usize;
+        for i in from_char..chars.len() {
+            if used + widths[i] > col_budget {
+                break;
+            }
+            s.push(chars[i]);
+            used += widths[i];
+            n += 1;
         }
-        let visible_prefix_chars = cursor_char_idx.saturating_sub(drop);
-        let visible_suffix_chars = visible.saturating_sub(visible_prefix_chars);
-        let prefix: String = buf.chars().skip(drop).take(visible_prefix_chars).collect();
-        let suffix: String = buf
-            .chars()
-            .skip(drop + visible_prefix_chars)
-            .take(visible_suffix_chars)
-            .collect();
+        (s, n)
+    };
+
+    let (prefix, suffix) = if total_cols > max_buf_cols {
+        // Anchor on the caret: keep it ~two-thirds across the visible window so
+        // there's context on both sides. `drop_cols` is how many leading
+        // display columns to hide; convert to a char index by walking widths.
+        let visible = max_buf_cols;
+        let target_caret_col = visible.saturating_sub(visible / 3);
+        let want_drop_cols = caret_col.saturating_sub(target_caret_col);
+        let max_drop_cols = total_cols.saturating_sub(visible);
+        let drop_cols = want_drop_cols.min(max_drop_cols);
+
+        // Walk to the first char whose start column is >= drop_cols (never
+        // split a wide char: round to the next char boundary).
+        let mut start_char = 0usize;
+        let mut acc = 0usize;
+        while start_char < chars.len() && acc < drop_cols {
+            acc += widths[start_char];
+            start_char += 1;
+        }
+        let start_char = start_char.min(cursor_char_idx);
+
+        // Prefix: from window start up to the caret.
+        let prefix_budget: usize = widths[start_char..cursor_char_idx].iter().sum();
+        let (prefix, _) = take_cols(start_char, prefix_budget);
+        // Suffix: remaining budget after the prefix, from the caret onward.
+        let prefix_cols: usize = widths[start_char..cursor_char_idx].iter().sum();
+        let suffix_budget = visible.saturating_sub(prefix_cols);
+        let (suffix, _) = take_cols(cursor_char_idx, suffix_budget);
         (prefix, suffix)
     } else {
-        let prefix: String = buf.chars().take(cursor_char_idx).collect();
-        let suffix: String = buf.chars().skip(cursor_char_idx).collect();
+        let prefix: String = chars[..cursor_char_idx].iter().collect();
+        let suffix: String = chars[cursor_char_idx..].iter().collect();
         (prefix, suffix)
     };
 
-    format!("{prompt} {prefix_chars}{cursor_block}{suffix_chars}  {hint_styled}")
+    format!("{prompt} {prefix}{cursor_block}{suffix}  {hint_styled}")
 }
 
 // ─── Termios (Unix) ────────────────────────────────────────────────
@@ -1032,6 +881,11 @@ pub struct EditorContext {
     /// a row before consumption is a no-op (the second press
     /// just re-sets a flag that's already true).
     pub mode_cycle: Arc<AtomicBool>,
+    /// Cooperative cancellation flag, shared with the agent loop / backend /
+    /// tool context. The pump flips it to `true` when the user presses Ctrl-C
+    /// on an empty draft during a turn, which aborts the in-flight model stream
+    /// and any running tool. The CLI resets it at the start of each turn.
+    pub interrupt: Arc<AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -1040,7 +894,9 @@ pub struct EditorContext {
 ///   * `Ok(true)`  — data ready, caller should `read()`
 ///   * `Ok(false)` — timed out, caller should re-check `stop`
 ///   * `Err(_)`    — transient EINTR or similar; caller retries
-fn poll_stdin(timeout_ms: i32) -> std::io::Result<bool> {
+///
+/// Shared with [`crate::prompt_editor`]'s between-turns read loop.
+pub(crate) fn poll_stdin(timeout_ms: i32) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
     let stdin = std::io::stdin();
     let fd = stdin.as_raw_fd();
@@ -1058,8 +914,9 @@ fn poll_stdin(timeout_ms: i32) -> std::io::Result<bool> {
 
 #[cfg(unix)]
 /// Read up to `cap` bytes from stdin without blocking. Returns
-/// `Ok(0)` when no data was ready (caller polls again).
-fn read_burst(buf: &mut [u8]) -> std::io::Result<usize> {
+/// `Ok(0)` when no data was ready (caller polls again). Shared with
+/// [`crate::prompt_editor`]'s between-turns read loop.
+pub(crate) fn read_burst(buf: &mut [u8]) -> std::io::Result<usize> {
     use std::os::fd::AsRawFd;
     let fd = std::io::stdin().as_raw_fd();
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
@@ -1179,7 +1036,18 @@ pub fn run_pump(ctx: EditorContext, mut guard: RawModeGuard) {
                     let _ = depth;
                     dirty = true;
                 }
-                KeyOutcome::Cancelled => dirty = true,
+                KeyOutcome::Cancelled => {
+                    // Empty-draft Ctrl-C during a turn: request cancellation.
+                    // The agent loop's between-step / post-tool checks and the
+                    // streaming between-events check observe this flag and
+                    // unwind the turn; the tool poll loops kill any running
+                    // child. Paint a brief acknowledgement so the press
+                    // registers; the turn's terminal "⎿ Interrupted by user"
+                    // line follows once the loop returns.
+                    ctx.interrupt.store(true, Ordering::Relaxed);
+                    (ctx.repaint)("⎿ cancelling… (Ctrl-C)");
+                    dirty = false;
+                }
                 KeyOutcome::ModeCycle => {
                     // Surface the Shift+Tab intent to the CLI via
                     // the shared atomic. The user-visible mode
@@ -1312,6 +1180,7 @@ mod tests {
             suspend: Arc::clone(&suspend),
             suspended: Arc::clone(&suspended),
             mode_cycle: Arc::clone(&mode_cycle),
+            interrupt: Arc::new(AtomicBool::new(false)),
         };
         assert!(!suspend.load(Ordering::Relaxed));
         assert!(!suspended.load(Ordering::Relaxed));
@@ -1425,11 +1294,21 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_cancels_and_clears() {
+    fn ctrl_c_on_nonempty_draft_clears_without_cancelling() {
+        // Ctrl-C with text in the draft clears it (like Ctrl-U) and stays in
+        // the editor — it must NOT signal Cancelled, so a stray Ctrl-C while
+        // typing ahead never kills the running turn.
         let mut ed = QueueEditor::new();
         ed.seed("oops");
-        assert_eq!(ed.consume(ETX), KeyOutcome::Cancelled);
+        assert_eq!(ed.consume(ETX), KeyOutcome::Repaint);
         assert!(ed.buffer().is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_on_empty_draft_signals_cancelled() {
+        // Empty-draft Ctrl-C is the "cancel the running turn" gesture.
+        let mut ed = QueueEditor::new();
+        assert_eq!(ed.consume(ETX), KeyOutcome::Cancelled);
     }
 
     #[test]
@@ -1599,15 +1478,20 @@ mod tests {
         // completely; the new anchor-on-caret logic must keep it
         // inside the visible window.
         //
-        // Using A..Z and a..z gives 52 distinct chars; we cycle
-        // them so substring assertions against a "tail" slice
-        // pick out a region that DOESN'T re-appear in the head.
-        let long_buf: String = (0..200)
+        // Cycling A..Z a..z over 200 chars makes any tail *substring* recur in
+        // the head, so we append a genuinely unique sentinel at the very end
+        // and assert THAT is trimmed — robust regardless of where the window
+        // boundary lands. (The old fixture relied on `prompt.chars().count()`
+        // over-counting the ANSI escape, which shrank the window enough to hide
+        // the recurring tail; measuring real display width exposed that, so we
+        // make the assertion not depend on the exact window size.)
+        let mut long_buf: String = (0..180)
             .map(|i| {
                 let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
                 table[i % table.len()] as char
             })
             .collect();
+        long_buf.push_str("UNIQUE_TAIL_SENTINEL_~~~");
         let painted = paint_editor_line(&long_buf, 10, 0, 80, true);
         // The cursor block must be present somewhere in the
         // visible line (we never trim the block itself).
@@ -1615,12 +1499,10 @@ mod tests {
             painted.contains("\x1b[5;1;33;7m"),
             "cursor block must remain visible after truncation: {painted:?}",
         );
-        // A unique tail slice from the end of the buffer must
-        // NOT appear in the rendered line — caret is near the
-        // start, so the painter is anchored there.
-        let tail = &long_buf[long_buf.len() - 20..];
+        // The unique tail sentinel must NOT appear — caret is near the start,
+        // so the painter anchors there and the far tail is trimmed.
         assert!(
-            !painted.contains(tail),
+            !painted.contains("UNIQUE_TAIL_SENTINEL"),
             "with caret near start, tail should be trimmed: {painted:?}",
         );
         // Conversely, the head context AROUND the caret should
@@ -1629,6 +1511,43 @@ mod tests {
         assert!(
             painted.contains(head_context),
             "head context near caret must remain visible: {painted:?}",
+        );
+    }
+
+    #[test]
+    fn paint_editor_line_truncates_cjk_buffer_on_display_width_not_char_count() {
+        use deeptide_core::width::display_width;
+        // A buffer of CJK (each glyph 2 cells) longer than fits. With char-count
+        // budgeting this would reserve twice the columns it should and overflow
+        // the pinned input row; with display-width budgeting the painted line's
+        // visible width stays within the terminal budget.
+        let cjk: String = "你好世界".repeat(20); // 80 chars, 160 cells
+        let width = 40;
+        let painted = paint_editor_line(&cjk, cjk.len(), 0, width, false);
+        // No-color path: strip the bracket caret marker before measuring.
+        let visible = painted.replace("[|]", "");
+        assert!(
+            display_width(&visible) <= width,
+            "CJK input must be truncated to the terminal width ({width}); got {} cols: {painted:?}",
+            display_width(&visible)
+        );
+        // It must NOT have kept all 20 repeats (that would be 160 cells).
+        assert!(
+            painted.matches('你').count() < 20,
+            "long CJK buffer should be truncated, not rendered whole: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn paint_editor_line_cjk_caret_at_zero_shows_head_not_overflowing() {
+        use deeptide_core::width::display_width;
+        let cjk: String = "中文输入测试".repeat(10); // 60 chars, 120 cells
+        let width = 30;
+        let painted = paint_editor_line(&cjk, 0, 0, width, false);
+        let visible = painted.replace("[|]", "");
+        assert!(
+            display_width(&visible) <= width,
+            "caret-at-zero CJK render must fit width {width}: {painted:?}"
         );
     }
 
@@ -2007,7 +1926,8 @@ mod tests {
     fn ctrl_c_resets_cursor_to_zero() {
         let mut ed = QueueEditor::new();
         ed.seed_with_cursor("oops", 2);
-        assert_eq!(ed.consume(ETX), KeyOutcome::Cancelled);
+        // Non-empty draft: Ctrl-C clears it (Repaint), resetting the cursor.
+        assert_eq!(ed.consume(ETX), KeyOutcome::Repaint);
         assert_eq!(ed.cursor(), 0);
     }
 

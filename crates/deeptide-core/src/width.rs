@@ -57,9 +57,27 @@ pub fn strip_ansi(text: &str) -> String {
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' && chars.peek() == Some(&'[') {
+            // CSI sequence (`ESC [ … final`): SGR colours, cursor moves, etc.
             chars.next();
             for next in chars.by_ref() {
                 if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        } else if ch == '\x1b' && chars.peek() == Some(&']') {
+            // OSC sequence (`ESC ] … ST`): e.g. OSC-8 hyperlinks
+            // (`ESC ] 8 ; ; URL BEL  label  ESC ] 8 ; ; BEL`). The URL and
+            // framing carry zero display width, so they must be dropped from
+            // width measurement — otherwise a hyperlinked label is counted as
+            // label+URL and wrecks alignment. Terminated by BEL (`\x07`) or the
+            // ST pair (`ESC \`).
+            chars.next();
+            while let Some(next) = chars.next() {
+                if next == '\x07' {
+                    break;
+                }
+                if next == '\x1b' && chars.peek() == Some(&'\\') {
+                    chars.next();
                     break;
                 }
             }
@@ -70,9 +88,78 @@ pub fn strip_ansi(text: &str) -> String {
     out
 }
 
+/// Truncate `text` so its terminal display width does not exceed `max_width`
+/// columns, appending an ellipsis (`…`, 1 cell) when anything was dropped.
+///
+/// This is the display-aware counterpart to the many hand-rolled
+/// `value.chars().take(n)` truncators scattered across the codebase: those cut
+/// by *character count*, which over-counts CJK (a 2-cell ideograph counted as
+/// one "char") and so truncates Chinese/Japanese/Korean labels at the wrong
+/// boundary and miscomputes the surrounding alignment. Routing every
+/// user-visible truncation through one width-aware helper keeps status-bar
+/// segments, tool-call subjects, and session/memory labels aligned for any
+/// script.
+///
+/// Behaviour:
+///   * width already ≤ `max_width` → returned unchanged (no ellipsis);
+///   * `max_width == 0` → empty string (nothing fits, not even the ellipsis);
+///   * otherwise → as many leading chars as fit in `max_width - 1` cells
+///     (reserving 1 for the ellipsis), never splitting a wide char across the
+///     boundary.
+///
+/// Input may contain ANSI styling; width is measured ANSI-stripped, but the
+/// returned string preserves whatever (visible) characters it kept. Callers
+/// that truncate *styled* spans should strip/re-apply styling themselves —
+/// this helper is for plain display text.
+pub fn truncate_to_width(text: &str, max_width: usize) -> String {
+    if display_width(text) <= max_width {
+        return text.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    // Reserve one column for the ellipsis.
+    let budget = max_width - 1;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = char_width(ch);
+        if used + w > budget {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// Like [`truncate_to_width`] but appends NO ellipsis — it simply keeps as
+/// many leading chars as fit in `max_width` display columns. For callers that
+/// want a hard cap without a truncation marker (e.g. tool-result summary lines
+/// that are already terse). Never splits a wide char across the boundary.
+pub fn clamp_to_width(text: &str, max_width: usize) -> String {
+    if display_width(text) <= max_width {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = char_width(ch);
+        if used + w > max_width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{char_width, display_width, is_wide, strip_ansi};
+    use super::{
+        char_width, clamp_to_width, display_width, is_wide, strip_ansi, truncate_to_width,
+    };
 
     #[test]
     fn ascii_is_one_cell_wide() {
@@ -176,11 +263,75 @@ mod tests {
     }
 
     #[test]
+    fn truncate_to_width_leaves_short_strings_untouched() {
+        assert_eq!(truncate_to_width("hello", 10), "hello");
+        assert_eq!(truncate_to_width("你好", 4), "你好"); // exactly fits (4 cells)
+        assert_eq!(truncate_to_width("", 5), "");
+    }
+
+    #[test]
+    fn truncate_to_width_cuts_ascii_with_ellipsis() {
+        // 10 chars, budget 5 → keep 4 + "…" = width 5.
+        assert_eq!(truncate_to_width("abcdefghij", 5), "abcd…");
+        assert_eq!(display_width(&truncate_to_width("abcdefghij", 5)), 5);
+    }
+
+    #[test]
+    fn truncate_to_width_never_splits_a_wide_char_across_the_boundary() {
+        // "你好世界" is 8 cells. Budget 5 → ellipsis reserves 1, leaving 4
+        // cells = two ideographs ("你好"), then "…". A char-count truncator
+        // would wrongly keep 4 *chars* (8 cells) and overflow.
+        let out = truncate_to_width("你好世界", 5);
+        assert_eq!(out, "你好…");
+        assert_eq!(display_width(&out), 5);
+        // Budget 4 → only room for one ideograph (2) + ellipsis (1) = 3.
+        let out = truncate_to_width("你好世界", 4);
+        assert_eq!(out, "你…");
+        assert!(display_width(&out) <= 4);
+    }
+
+    #[test]
+    fn truncate_to_width_mixed_ascii_and_cjk() {
+        // "game在哪" = 4 + 2 + 2 = 8 cells. Budget 6 → keep 5 cells worth
+        // ("game" =4, then 在 would make 6 > 5 budget) → "game…".
+        let out = truncate_to_width("game在哪", 6);
+        assert_eq!(out, "game…");
+        assert!(display_width(&out) <= 6);
+    }
+
+    #[test]
+    fn truncate_to_width_zero_budget_is_empty() {
+        assert_eq!(truncate_to_width("anything", 0), "");
+    }
+
+    #[test]
+    fn clamp_to_width_has_no_ellipsis_and_respects_wide_chars() {
+        assert_eq!(clamp_to_width("hello", 10), "hello");
+        // 8 cells, budget 5 → two ideographs (4 cells), no ellipsis.
+        assert_eq!(clamp_to_width("你好世界", 5), "你好");
+        assert!(display_width(&clamp_to_width("你好世界", 5)) <= 5);
+        assert_eq!(clamp_to_width("abcdef", 3), "abc");
+        assert_eq!(clamp_to_width("anything", 0), "");
+    }
+
+    #[test]
     fn strip_ansi_handles_truncated_escapes_safely() {
         // A stray `\x1b[` at end-of-string mustn't panic or drop chars
         // beyond it — we just bail out of the strip loop. This guards
         // against partial chunks during streaming.
         assert_eq!(strip_ansi("hello\x1b["), "hello");
         assert_eq!(strip_ansi("\x1b[3"), "");
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc8_hyperlink_framing() {
+        // An OSC-8 hyperlink: the URL + framing is zero-width and must be
+        // dropped, leaving only the visible label — whether terminated by BEL
+        // or the ESC-backslash ST. This keeps display_width honest for links.
+        let bel = "\x1b]8;;https://example.com\x07click\x1b]8;;\x07";
+        assert_eq!(strip_ansi(bel), "click");
+        assert_eq!(display_width(bel), 5);
+        let st = "\x1b]8;;https://x.io\x1b\\go\x1b]8;;\x1b\\";
+        assert_eq!(strip_ansi(st), "go");
     }
 }

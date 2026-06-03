@@ -34,6 +34,7 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -60,6 +61,14 @@ pub enum StreamingEvent {
     TextBlockStart { index: usize },
     /// Token-level text delta for an open text block.
     TextDelta { index: usize, delta: String },
+    /// Token-level delta of model *reasoning* / chain-of-thought, distinct from
+    /// the user-facing answer. Emitted by reasoning models on the OpenAI
+    /// protocol (DeepSeek-reasoner's `reasoning_content`, and the `reasoning`
+    /// alias other OpenAI-compatible providers use). UIs render this dimmed and
+    /// separately from the answer; it is deliberately NOT folded into the
+    /// response `content` (DeepSeek requires reasoning is not echoed back on the
+    /// next request, and consumers price/replay it differently).
+    ThinkingDelta { delta: String },
     /// A new tool_use block opened at this index. The model has committed
     /// to calling `name` but hasn't sent any arguments yet.
     ToolUseStart {
@@ -204,12 +213,17 @@ pub enum StreamError {
     /// SSE framing or control event was unparseable; serious upstream
     /// issue, not retriable.
     Protocol(String),
+    /// The user cancelled (Ctrl-C) while the stream was in flight. NOT a retry
+    /// candidate — the agent loop maps the resulting error to an
+    /// [`crate::AgentTerminalEvent::Interrupted`] terminal.
+    Interrupted,
 }
 
 impl StreamError {
     /// User-facing message. Equivalent to `to_string()`.
     pub fn message(&self) -> &str {
         match self {
+            StreamError::Interrupted => "stream cancelled by user",
             StreamError::Truncated(m)
             | StreamError::TokenBudgetExceeded(m)
             | StreamError::UpstreamCorruption(m)
@@ -251,6 +265,7 @@ pub fn parse_streaming_response<R: Read>(
     reader: R,
     handler: Option<&StreamingHandler>,
     elapsed: Duration,
+    interrupt: Option<&AtomicBool>,
 ) -> Result<AgentResponse, StreamError> {
     let mut reader = BufReader::new(reader);
     let mut blocks: Vec<BlockAccumulator> = Vec::new();
@@ -267,7 +282,21 @@ pub fn parse_streaming_response<R: Read>(
     // recourse).
     let mut final_stop_reason: Option<String> = None;
 
-    while let Some(event) = read_sse_event(&mut reader)? {
+    loop {
+        // Cancelled mid-stream: drop the reader (closing the connection) and
+        // bail. During active token generation, SSE events arrive
+        // continuously, so this check fires within one event (tens of ms) of
+        // the Ctrl-C. The only non-instant window is the model's pre-first-
+        // token pause, where the blocking read sits with no bytes — that
+        // cancellation lands when the first token arrives. (This reqwest build
+        // has no per-read timeout on the blocking client, so the
+        // between-events check is the cancellation mechanism.)
+        if interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(StreamError::Interrupted);
+        }
+        let Some(event) = read_sse_event(&mut reader)? else {
+            break;
+        };
         match event.event_type.as_str() {
             "ping" => {}
             "error" => {
@@ -400,6 +429,14 @@ pub fn parse_streaming_response<R: Read>(
                                 index: payload.index,
                                 partial_json,
                             });
+                        }
+                    }
+                    // Reasoning delta — emit for live display only. Not appended
+                    // to any answer accumulator (the thinking block is a reserved
+                    // Empty slot), so it never contaminates the response text.
+                    StreamDelta::ThinkingDelta { thinking } => {
+                        if let Some(handler) = handler {
+                            handler(&StreamingEvent::ThinkingDelta { delta: thinking });
                         }
                     }
                     StreamDelta::Other => {}
@@ -737,6 +774,20 @@ struct SseEvent {
     data: String,
 }
 
+/// Read one SSE event and return just its `data` payload, or `Ok(None)` on EOF.
+///
+/// Convenience wrapper over [`read_sse_event`] for protocols whose framing
+/// carries everything in the `data:` field with no `event:` type — OpenAI's
+/// chat-completions and Gemini's `streamGenerateContent?alt=sse` both work this
+/// way. Exposed at crate level so `gemini.rs` (and any future bare-`data:`
+/// backend) can reuse the battle-tested SSE line reader instead of re-rolling
+/// framing.
+pub(crate) fn read_sse_data_event<R: BufRead>(
+    reader: &mut R,
+) -> Result<Option<String>, StreamError> {
+    Ok(read_sse_event(reader)?.map(|event| event.data))
+}
+
 /// Read one SSE event off the reader. Returns `Ok(None)` on EOF.
 ///
 /// SSE framing: each event is a sequence of `field: value` lines
@@ -861,6 +912,12 @@ enum StreamDelta {
     TextDelta { text: String },
     #[serde(rename = "input_json_delta")]
     InputJsonDelta { partial_json: String },
+    /// Extended-thinking reasoning delta (when a thinking budget is enabled).
+    /// Display-only: the thinking block lives at its own index and is never
+    /// folded into the answer text. We surface it as `ThinkingDelta` for the
+    /// dim live render, symmetric with the OpenAI/Gemini reasoning paths.
+    #[serde(rename = "thinking_delta")]
+    ThinkingDelta { thinking: String },
     #[serde(other)]
     Other,
 }
@@ -895,6 +952,333 @@ struct StreamingErrorBody {
     message: String,
 }
 
+// ─── OpenAI chat-completions streaming ───────────────────────────────────────
+//
+// OpenAI's SSE dialect differs from Anthropic's in framing but maps cleanly
+// onto the SAME [`StreamingEvent`] surface, so the TUI renders both protocols
+// identically (live markdown, the `↓ N tokens` ticker, tool-call subjects).
+//
+// Wire differences handled here:
+//   * **No `event:` field** — every frame is a bare `data: {json}` line, so we
+//     dispatch on the JSON payload, not [`SseEvent::event_type`].
+//   * **`data: [DONE]`** sentinel ends the stream (Anthropic uses
+//     `event: message_stop`).
+//   * **Tool calls stream as `choices[0].delta.tool_calls[]`** — each fragment
+//     carries an `index`, optionally an `id`/`function.name` (first fragment),
+//     and incremental `function.arguments` string chunks. We accumulate by
+//     index exactly like Anthropic's `tool_use` block accumulator.
+//   * Text streams as `choices[0].delta.content` string chunks.
+//   * Usage (when present, often only on the final chunk with
+//     `stream_options.include_usage`) lives at the top level.
+
+/// One streamed chat-completions chunk (`object: "chat.completion.chunk"`).
+#[derive(Debug, Deserialize)]
+struct OpenAiChunk {
+    #[serde(default)]
+    choices: Vec<OpenAiChunkChoice>,
+    #[serde(default)]
+    usage: Option<OpenAiStreamUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChunkChoice {
+    #[serde(default)]
+    delta: OpenAiDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenAiDelta {
+    #[serde(default)]
+    content: Option<String>,
+    /// Reasoning-model chain-of-thought. DeepSeek-reasoner emits
+    /// `reasoning_content`; some OpenAI-compatible providers use `reasoning`.
+    /// Accept both so the live "thinking" stream works across vendors.
+    #[serde(default, alias = "reasoning")]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<OpenAiToolCallDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiToolCallDelta {
+    /// Position of this tool call within the assistant message. Stable across
+    /// the fragments that build up one call.
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAiFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamUsage {
+    #[serde(default)]
+    prompt_tokens: usize,
+    #[serde(default)]
+    completion_tokens: usize,
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiPromptDetails {
+    #[serde(default)]
+    cached_tokens: usize,
+}
+
+/// Parse an OpenAI chat-completions SSE stream, invoking `handler` per delta
+/// and assembling the final [`AgentResponse`]. Mirrors
+/// [`parse_streaming_response`] (the Anthropic path) in shape and cancellation
+/// behaviour so callers — and the TUI — see one uniform streaming contract.
+///
+/// `interrupt` is checked between frames; a raised flag drops the connection
+/// and returns [`StreamError::Interrupted`], same as the Anthropic path.
+pub fn parse_openai_stream<R: Read>(
+    reader: R,
+    handler: Option<&StreamingHandler>,
+    elapsed: Duration,
+    interrupt: Option<&AtomicBool>,
+) -> Result<AgentResponse, StreamError> {
+    let mut reader = BufReader::new(reader);
+    let mut text = String::new();
+    // Tool calls accumulate by their delta `index`. Each entry grows its
+    // `arguments` string across fragments; `id`/`name` arrive on the first
+    // fragment for that index.
+    let mut tool_acc: Vec<OpenAiToolAccumulator> = Vec::new();
+    let mut input_tokens = 0usize;
+    let mut output_tokens = 0usize;
+    let mut cache_read = 0usize;
+    let mut emitted_text_block = false;
+    let mut saw_done = false;
+
+    loop {
+        if interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(StreamError::Interrupted);
+        }
+        let Some(event) = read_sse_event(&mut reader)? else {
+            break;
+        };
+        let data = event.data.trim();
+        if data.is_empty() {
+            continue;
+        }
+        // The `[DONE]` sentinel terminates the stream (no JSON to parse).
+        if data == "[DONE]" {
+            saw_done = true;
+            if let Some(handler) = handler {
+                handler(&StreamingEvent::MessageStop);
+            }
+            break;
+        }
+
+        // A server-side error can arrive mid-stream as a bare `data: {error:…}`
+        // frame. Check for it FIRST — an error object also deserializes into
+        // `OpenAiChunk` (every field is optional), so we'd otherwise silently
+        // treat it as an empty chunk and lose the error.
+        if let Some(message) = openai_stream_error(data) {
+            return Err(StreamError::Protocol(format!("streaming error: {message}")));
+        }
+        let chunk: OpenAiChunk = match serde_json::from_str(data) {
+            Ok(chunk) => chunk,
+            Err(_) => {
+                return Err(StreamError::Protocol(format!(
+                    "invalid chat.completion.chunk: {data}"
+                )));
+            }
+        };
+
+        if let Some(usage) = chunk.usage {
+            output_tokens = usage.completion_tokens;
+            cache_read = usage
+                .prompt_tokens_details
+                .map(|d| d.cached_tokens)
+                .unwrap_or(cache_read);
+            // `prompt_tokens` INCLUDES the cached portion (OpenAI/DeepSeek
+            // convention); subtract it so the cost tracker doesn't charge the
+            // cached tokens twice. Mirrors the buffered path in openai.rs.
+            input_tokens = usage.prompt_tokens.saturating_sub(cache_read);
+            if let Some(handler) = handler {
+                handler(&StreamingEvent::MessageDelta {
+                    stop_reason: None,
+                    output_tokens: Some(output_tokens),
+                });
+            }
+        }
+
+        for choice in chunk.choices {
+            // Reasoning fragment (DeepSeek-reasoner et al.). Surface it live so
+            // the user sees the model "thinking", but do NOT accumulate it into
+            // `text` — reasoning is display-only and must not be echoed back as
+            // assistant content on the next turn.
+            if let Some(thought) = choice.delta.reasoning_content.filter(|s| !s.is_empty())
+                && let Some(handler) = handler
+            {
+                handler(&StreamingEvent::ThinkingDelta { delta: thought });
+            }
+
+            // Text fragment.
+            if let Some(piece) = choice.delta.content.filter(|s| !s.is_empty()) {
+                if !emitted_text_block {
+                    emitted_text_block = true;
+                    if let Some(handler) = handler {
+                        handler(&StreamingEvent::TextBlockStart { index: 0 });
+                    }
+                }
+                text.push_str(&piece);
+                if let Some(handler) = handler {
+                    handler(&StreamingEvent::TextDelta {
+                        index: 0,
+                        delta: piece,
+                    });
+                }
+            }
+
+            // Tool-call fragments, keyed by index.
+            for delta in choice.delta.tool_calls {
+                let slot = ensure_tool_index(&mut tool_acc, delta.index);
+                let first_fragment = !slot.started;
+                if let Some(id) = delta.id.filter(|s| !s.is_empty()) {
+                    slot.id = id;
+                }
+                if let Some(function) = delta.function {
+                    if let Some(name) = function.name.filter(|s| !s.is_empty()) {
+                        slot.name = name;
+                    }
+                    if let Some(args) = function.arguments {
+                        slot.arguments.push_str(&args);
+                        if let Some(handler) = handler {
+                            handler(&StreamingEvent::ToolUseInputDelta {
+                                // +1 so tool-call indices never collide with the
+                                // text block at index 0 in the handler's view.
+                                index: delta.index + 1,
+                                partial_json: args,
+                            });
+                        }
+                    }
+                }
+                // Announce the tool call the first time we see its slot, once we
+                // have a name (the TUI shows "Preparing <name>").
+                if first_fragment && !slot.name.is_empty() {
+                    slot.started = true;
+                    if let Some(handler) = handler {
+                        handler(&StreamingEvent::ToolUseStart {
+                            index: delta.index + 1,
+                            id: slot.id.clone(),
+                            name: slot.name.clone(),
+                        });
+                    }
+                } else if !slot.name.is_empty() {
+                    slot.started = true;
+                }
+            }
+
+            // A finish_reason closes the message; OpenAI still sends `[DONE]`
+            // after, but emit the terminal usage delta here so the UI's
+            // token counter lands its final value promptly.
+            if let (Some(reason), Some(handler)) = (choice.finish_reason, handler) {
+                handler(&StreamingEvent::MessageDelta {
+                    stop_reason: Some(reason),
+                    output_tokens: Some(output_tokens),
+                });
+            }
+        }
+    }
+
+    if !saw_done && text.is_empty() && tool_acc.is_empty() {
+        return Err(StreamError::EmptyStream(String::from(
+            "streaming response ended before any content was received",
+        )));
+    }
+
+    // Emit BlockStop for each tool call so the TUI's args ticker tears down.
+    if let Some(handler) = handler {
+        for acc in &tool_acc {
+            if acc.started {
+                handler(&StreamingEvent::BlockStop {
+                    index: acc.index + 1,
+                });
+            }
+        }
+    }
+
+    let tool_calls: Vec<ToolCall> = tool_acc
+        .into_iter()
+        .filter(|acc| !acc.name.is_empty())
+        .map(|acc| {
+            let input = if acc.arguments.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&acc.arguments).unwrap_or_else(|_| serde_json::json!({}))
+            };
+            ToolCall::new(acc.id, acc.name, input)
+        })
+        .collect();
+
+    let usage = if input_tokens > 0 || output_tokens > 0 {
+        Some(AgentUsage::new(
+            input_tokens,
+            output_tokens,
+            0,
+            cache_read,
+            elapsed.as_millis().try_into().unwrap_or(usize::MAX),
+        ))
+    } else {
+        None
+    };
+
+    Ok(AgentResponse {
+        content: text,
+        usage,
+        tool_calls,
+    })
+}
+
+/// Per-index accumulator for a streamed OpenAI tool call.
+#[derive(Debug, Default)]
+struct OpenAiToolAccumulator {
+    index: usize,
+    id: String,
+    name: String,
+    arguments: String,
+    /// Whether we've already emitted a `ToolUseStart` for this slot.
+    started: bool,
+}
+
+fn ensure_tool_index(
+    acc: &mut Vec<OpenAiToolAccumulator>,
+    index: usize,
+) -> &mut OpenAiToolAccumulator {
+    if let Some(pos) = acc.iter().position(|a| a.index == index) {
+        return &mut acc[pos];
+    }
+    acc.push(OpenAiToolAccumulator {
+        index,
+        ..Default::default()
+    });
+    acc.last_mut().expect("just pushed")
+}
+
+/// Best-effort extraction of an error message from a mid-stream error frame.
+fn openai_stream_error(data: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    value
+        .pointer("/error/message")
+        .or_else(|| value.pointer("/message"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,7 +1303,8 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(event.clone());
         });
-        let result = parse_streaming_response(payload.as_bytes(), Some(&handler), Duration::ZERO);
+        let result =
+            parse_streaming_response(payload.as_bytes(), Some(&handler), Duration::ZERO, None);
         (result, observed)
     }
 
@@ -964,6 +1349,7 @@ mod tests {
                 StreamingEvent::MessageStart { .. } => "MessageStart",
                 StreamingEvent::TextBlockStart { .. } => "TextBlockStart",
                 StreamingEvent::TextDelta { .. } => "TextDelta",
+                StreamingEvent::ThinkingDelta { .. } => "ThinkingDelta",
                 StreamingEvent::ToolUseStart { .. } => "ToolUseStart",
                 StreamingEvent::ToolUseInputDelta { .. } => "ToolUseInputDelta",
                 StreamingEvent::BlockStop { .. } => "BlockStop",
@@ -983,6 +1369,83 @@ mod tests {
                 "MessageStop",
             ]
         );
+    }
+
+    #[test]
+    fn extended_thinking_deltas_emit_thinking_without_polluting_the_answer() {
+        // With a thinking budget enabled, Anthropic streams a `thinking` block
+        // (own index) with `thinking_delta` reasoning, THEN the answer text in a
+        // separate block. The reasoning must surface as ThinkingDelta events and
+        // must NOT appear in the assembled answer.
+        let payload = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"m\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me reason. \"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"abc\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"The answer.\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let (result, observed) = drive(payload);
+        let response = result.expect("stream parses");
+        // Answer excludes the reasoning; the signature_delta is ignored.
+        assert_eq!(response.content, "The answer.");
+
+        let observed = observed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let thoughts: Vec<&str> = observed
+            .iter()
+            .filter_map(|e| match e {
+                StreamingEvent::ThinkingDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thoughts, vec!["Let me reason. "]);
+        assert!(observed.iter().all(|e| !matches!(
+            e,
+            StreamingEvent::TextDelta { delta, .. } if delta.contains("reason")
+        )));
+    }
+
+    #[test]
+    fn interrupt_flag_aborts_stream_before_reading() {
+        // A pre-set interrupt flag makes the parser bail at the top of the
+        // loop with `Interrupted`, even though the payload is a complete,
+        // well-formed response. Mirrors a Ctrl-C that lands just as the
+        // stream opens.
+        let flag = AtomicBool::new(true);
+        let payload = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let result =
+            parse_streaming_response(payload.as_bytes(), None, Duration::ZERO, Some(&flag));
+        assert!(
+            matches!(result, Err(StreamError::Interrupted)),
+            "a raised interrupt flag must abort the stream: {result:?}"
+        );
+        // `Interrupted` must not be a retry candidate — otherwise the API
+        // layer's truncation-retry loop would re-issue the request the user
+        // just cancelled.
+        assert!(!StreamError::Interrupted.is_transient_retry());
     }
 
     #[test]
@@ -1130,7 +1593,7 @@ mod tests {
 
     #[test]
     fn premature_stream_end_without_any_content_returns_error() {
-        let result = parse_streaming_response(b"".as_ref(), None, Duration::ZERO);
+        let result = parse_streaming_response(b"".as_ref(), None, Duration::ZERO, None);
         let err = result.expect_err("empty SSE stream must error");
         assert!(matches!(err, StreamError::EmptyStream(_)));
         assert!(
@@ -1557,5 +2020,186 @@ mod tests {
         let (result, _) = drive(payload);
         let response = result.expect("multiline data must parse");
         assert_eq!(response.content, "ok");
+    }
+
+    // ─── OpenAI streaming ────────────────────────────────────────────────────
+
+    fn drive_openai(
+        payload: &str,
+    ) -> (
+        Result<AgentResponse, StreamError>,
+        Arc<Mutex<Vec<StreamingEvent>>>,
+    ) {
+        let observed: Arc<Mutex<Vec<StreamingEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&observed);
+        let handler: StreamingHandler = Arc::new(move |event| {
+            sink.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(event.clone());
+        });
+        let result = parse_openai_stream(payload.as_bytes(), Some(&handler), Duration::ZERO, None);
+        (result, observed)
+    }
+
+    #[test]
+    fn openai_stream_assembles_text_from_content_deltas() {
+        let payload = "\
+            data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\
+            data: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n\
+            data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+            data: [DONE]\n\n";
+        let (result, observed) = drive_openai(payload);
+        let response = result.expect("stream should parse");
+        assert_eq!(response.content, "Hello, world");
+        assert!(response.tool_calls.is_empty());
+
+        let events = observed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // First content delta opens a text block, deltas flow, stream stops.
+        assert!(matches!(
+            events[0],
+            StreamingEvent::TextBlockStart { index: 0 }
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamingEvent::TextDelta { delta, .. } if delta == "Hello"))
+        );
+        assert!(matches!(events.last(), Some(StreamingEvent::MessageStop)));
+    }
+
+    #[test]
+    fn openai_stream_surfaces_reasoning_content_as_thinking_without_polluting_answer() {
+        // DeepSeek-reasoner streams `reasoning_content` deltas BEFORE the answer
+        // `content`. The reasoning must surface as live ThinkingDelta events but
+        // must NOT leak into the final answer text (it's display-only and must
+        // not be echoed back to the model next turn).
+        let payload = "\
+            data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me think. \"}}]}\n\n\
+            data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"2+2=4.\"}}]}\n\n\
+            data: {\"choices\":[{\"delta\":{\"content\":\"The answer is 4.\"}}]}\n\n\
+            data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+            data: [DONE]\n\n";
+        let (result, observed) = drive_openai(payload);
+        let response = result.expect("stream should parse");
+        // Answer is clean — reasoning is excluded.
+        assert_eq!(response.content, "The answer is 4.");
+
+        let events = observed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let thoughts: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamingEvent::ThinkingDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thoughts, vec!["Let me think. ", "2+2=4."]);
+        // No reasoning text bled into any TextDelta.
+        assert!(events.iter().all(|e| !matches!(
+            e,
+            StreamingEvent::TextDelta { delta, .. } if delta.contains("think") || delta.contains("2+2")
+        )));
+    }
+
+    #[test]
+    fn openai_stream_accepts_reasoning_alias() {
+        // Some OpenAI-compatible providers name the field `reasoning`.
+        let payload = "\
+            data: {\"choices\":[{\"delta\":{\"reasoning\":\"hmm\"}}]}\n\n\
+            data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+            data: [DONE]\n\n";
+        let (result, observed) = drive_openai(payload);
+        assert_eq!(result.expect("parse").content, "hi");
+        let events = observed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamingEvent::ThinkingDelta { delta } if delta == "hmm"))
+        );
+    }
+
+    #[test]
+    fn openai_stream_accumulates_tool_call_across_fragments() {
+        // id+name arrive on the first fragment; arguments stream in chunks.
+        let payload = "\
+            data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\"}}]}}]}\n\n\
+            data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]}}]}\n\n\
+            data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+            data: [DONE]\n\n";
+        let (result, observed) = drive_openai(payload);
+        let response = result.expect("stream should parse");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call_1");
+        assert_eq!(response.tool_calls[0].name, "Bash");
+        assert_eq!(
+            response.tool_calls[0].input,
+            serde_json::json!({"command": "ls"})
+        );
+
+        let events = observed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Tool index is offset by +1 so it never collides with text block 0.
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamingEvent::ToolUseStart { index: 1, name, .. } if name == "Bash"
+        )));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamingEvent::ToolUseInputDelta { index: 1, .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamingEvent::BlockStop { index: 1 }))
+        );
+    }
+
+    #[test]
+    fn openai_stream_reads_usage_from_final_chunk() {
+        let payload = "\
+            data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+            data: {\"choices\":[],\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":8,\"prompt_tokens_details\":{\"cached_tokens\":20}}}\n\n\
+            data: [DONE]\n\n";
+        let (result, _) = drive_openai(payload);
+        let usage = result.expect("parse").usage.expect("usage present");
+        // prompt_tokens (50) includes the 20 cached → uncached input is 30 so
+        // the cached tokens aren't priced twice.
+        assert_eq!(usage.input_tokens, 30);
+        assert_eq!(usage.output_tokens, 8);
+        assert_eq!(usage.cache_read, 20);
+        assert_eq!(usage.input_tokens + usage.cache_read, 50);
+    }
+
+    #[test]
+    fn openai_stream_surfaces_mid_stream_error_frame() {
+        let payload =
+            "data: {\"error\":{\"message\":\"model overloaded\",\"type\":\"server_error\"}}\n\n";
+        let (result, _) = drive_openai(payload);
+        let err = result.expect_err("error frame must surface");
+        assert!(
+            matches!(&err, StreamError::Protocol(m) if m.contains("model overloaded")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn openai_stream_honors_a_preset_interrupt_flag() {
+        let flag = AtomicBool::new(true);
+        let payload = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+        let result = parse_openai_stream(payload.as_bytes(), None, Duration::ZERO, Some(&flag));
+        assert!(matches!(result, Err(StreamError::Interrupted)));
+    }
+
+    #[test]
+    fn openai_stream_empty_body_is_an_empty_stream_error() {
+        let (result, _) = drive_openai("");
+        assert!(matches!(result, Err(StreamError::EmptyStream(_))));
     }
 }

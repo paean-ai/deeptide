@@ -256,6 +256,7 @@ impl MarkdownRenderer {
 enum Style {
     Accent,
     Bold,
+    Italic,
     Dim,
     InlineCode,
     Strike,
@@ -267,13 +268,19 @@ fn style(text: impl AsRef<str>, style: Style, color: bool) -> String {
     if !color {
         return text.to_owned();
     }
-    let code = match style {
-        Style::Accent => "\x1b[36m",
+    // Colour accents come from the active theme (default `dark` reproduces the
+    // pre-theming codes, so markdown snapshots are unchanged). Text ATTRIBUTES
+    // (bold/italic/dim/strike) are structural, not palette colours, so they
+    // stay fixed regardless of theme.
+    let md = &crate::theme::active().markdown;
+    let code: &str = match style {
+        Style::Accent => &md.accent,
         Style::Bold => "\x1b[1m",
+        Style::Italic => "\x1b[3m",
         Style::Dim => "\x1b[2m",
-        Style::InlineCode => "\x1b[36m",
+        Style::InlineCode => &md.inline_code,
         Style::Strike => "\x1b[9m",
-        Style::Link => "\x1b[34m",
+        Style::Link => &md.link,
     };
     format!("{code}{text}\x1b[0m")
 }
@@ -286,12 +293,17 @@ fn render_code_block(language: &str, lines: &[&str], color: bool) -> String {
         format!(" {}", style(language, Style::Dim, color))
     };
     out.push(format!("{}{}", style("┌─", Style::Dim, color), suffix));
+    // Per-token syntax highlighting when colour is on and we recognise the
+    // language; otherwise every line keeps the uniform inline-code colour.
+    let highlight = color && crate::syntax::is_supported(language);
     for line in lines {
-        out.push(format!(
-            "{} {}",
-            style("│", Style::Dim, color),
+        let body = if highlight {
+            crate::syntax::highlight_line(language, line)
+                .unwrap_or_else(|| style(line, Style::InlineCode, color))
+        } else {
             style(line, Style::InlineCode, color)
-        ));
+        };
+        out.push(format!("{} {}", style("│", Style::Dim, color), body));
     }
     out.push(style("└─", Style::Dim, color));
     out.join("\n")
@@ -543,12 +555,84 @@ fn render_inline_emphasis(text: &str, color: bool) -> String {
     if text.is_empty() {
         return String::new();
     }
-    let text = replace_delimited(text, "**", "**", |inner| style(inner, Style::Bold, color));
-    let text = replace_delimited(&text, "__", "__", |inner| style(inner, Style::Bold, color));
-    let text = replace_delimited(&text, "~~", "~~", |inner| {
-        style(inner, Style::Strike, color)
+    // Double-delimiter passes run first. Each closure recurses through the
+    // remaining emphasis on its inner text so nested spans like `**_x_**`
+    // (bold wrapping italic) pick up BOTH styles instead of leaving the inner
+    // `_x_` literal.
+    let text = replace_delimited(text, "**", "**", |inner| {
+        style(render_inline_emphasis(inner, color), Style::Bold, color)
     });
+    let text = replace_delimited(&text, "__", "__", |inner| {
+        style(render_inline_emphasis(inner, color), Style::Bold, color)
+    });
+    let text = replace_delimited(&text, "~~", "~~", |inner| {
+        style(render_inline_emphasis(inner, color), Style::Strike, color)
+    });
+    // Italic runs AFTER bold so the double-delimiter passes have already
+    // consumed `**`/`__`; only genuine single-delimiter spans remain in the
+    // outer text. (Inner spans were already handled by the recursion above,
+    // and carry no raw `*`/`_` for this pass to re-match.)
+    let text = replace_italic(&text, '*', color);
+    let text = replace_italic(&text, '_', color);
     render_links(&text, color)
+}
+
+/// Render single-delimiter emphasis (`*italic*` / `_italic_`) using CommonMark
+/// flanking rules so we don't mangle prose. An opener must be immediately
+/// followed by a non-space, a closer immediately preceded by a non-space, and —
+/// for `_` only — neither side may sit between two alphanumerics, so
+/// identifiers like `foo_bar_baz` and `a * b` (multiplication) stay literal.
+fn replace_italic(text: &str, delim: char, color: bool) -> String {
+    let bytes: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != delim {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        // Candidate opener at i: needs a non-space immediately after and, for
+        // `_`, a non-alphanumeric immediately before (word boundary).
+        let before = if i == 0 { None } else { Some(bytes[i - 1]) };
+        let after = bytes.get(i + 1).copied();
+        let opener_ok = matches!(after, Some(c) if !c.is_whitespace() && c != delim)
+            && (delim != '_' || before.is_none_or(|c| !c.is_alphanumeric()));
+        if !opener_ok {
+            out.push(delim);
+            i += 1;
+            continue;
+        }
+        // Scan for a valid closer: a delim preceded by non-space and (for `_`)
+        // not followed by an alphanumeric.
+        let mut j = i + 1;
+        let mut found = None;
+        while j < bytes.len() {
+            if bytes[j] == delim {
+                let prev = bytes[j - 1];
+                let next = bytes.get(j + 1).copied();
+                let closer_ok = !prev.is_whitespace()
+                    && (delim != '_' || next.is_none_or(|c| !c.is_alphanumeric()));
+                if closer_ok {
+                    found = Some(j);
+                    break;
+                }
+            }
+            j += 1;
+        }
+        match found {
+            Some(close) => {
+                let inner: String = bytes[i + 1..close].iter().collect();
+                out.push_str(&style(inner, Style::Italic, color));
+                i = close + 1;
+            }
+            None => {
+                out.push(delim);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 fn replace_delimited<F>(text: &str, opener: &str, closer: &str, apply: F) -> String
@@ -580,34 +664,113 @@ where
     out
 }
 
+/// Whether `url` is safe to embed in an OSC-8 hyperlink escape. Rejects any
+/// control character (which would prematurely terminate or corrupt the escape
+/// framing) and restricts to schemes a terminal can sensibly open, so a crafted
+/// link can't smuggle escape sequences into the stream.
+fn is_safe_hyperlink(url: &str) -> bool {
+    if url.is_empty() || url.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    ["http://", "https://", "mailto:", "file://"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+}
+
 fn render_links(text: &str, color: bool) -> String {
     let mut out = String::new();
     let mut rest = text;
     while let Some(label_start) = rest.find('[') {
-        out.push_str(&rest[..label_start]);
+        // Prose before the markdown link gets bare-URL autolinking.
+        out.push_str(&render_autolinks(&rest[..label_start], color));
         let after_label = label_start + 1;
         let Some(label_end_rel) = rest[after_label..].find("](") else {
-            out.push_str(&rest[label_start..]);
+            out.push_str(&render_autolinks(&rest[label_start..], color));
             return out;
         };
         let label_end = after_label + label_end_rel;
         let url_start = label_end + 2;
         let Some(url_end_rel) = rest[url_start..].find(')') else {
-            out.push_str(&rest[label_start..]);
+            out.push_str(&render_autolinks(&rest[label_start..], color));
             return out;
         };
         let url_end = url_start + url_end_rel;
         let label = &rest[after_label..label_end];
         let url = &rest[url_start..url_end];
-        out.push_str(&format!(
-            "{} ({})",
-            style(label, Style::Link, color),
-            style(url, Style::Dim, color)
-        ));
+        let styled_label = style(label, Style::Link, color);
+        // Wrap the label in an OSC-8 hyperlink so terminals that support it make
+        // the label itself clickable (zero-cli parity + then some). The dimmed
+        // `(url)` stays as a visible fallback for terminals that ignore OSC-8;
+        // the escape framing is zero-width and stripped from width measurement.
+        let linked = if color && is_safe_hyperlink(url) {
+            format!("\x1b]8;;{url}\x07{styled_label}\x1b]8;;\x07")
+        } else {
+            styled_label
+        };
+        out.push_str(&format!("{} ({})", linked, style(url, Style::Dim, color)));
         rest = &rest[url_end + 1..];
+    }
+    out.push_str(&render_autolinks(rest, color));
+    out
+}
+
+/// Auto-link bare `http(s)://` URLs sitting in prose (not already part of a
+/// `[label](url)` span, which `render_links` handles). Each detected URL is
+/// wrapped in an OSC-8 hyperlink so it's clickable while the visible text stays
+/// the URL itself. No-op when colour is off (a plain URL is already its own
+/// "label", and we don't emit escapes into piped output) — which also keeps the
+/// no-colour snapshot tests byte-identical.
+fn render_autolinks(text: &str, color: bool) -> String {
+    // Skip when colour is off, the segment is empty, or it ALREADY carries an
+    // OSC-8 escape. The last guard matters because `render_links` recurses
+    // (bold/italic closures), so a segment can arrive already containing a
+    // hyperlink whose visible label is itself a URL — re-linking it would nest
+    // OSC-8 and corrupt the sequence. Conservative but always correct.
+    if !color || text.is_empty() || text.contains("\x1b]8") {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = find_scheme(rest) {
+        out.push_str(&rest[..start]);
+        let run = &rest[start..];
+        let len = url_run_len(run);
+        let url = &run[..len];
+        if is_safe_hyperlink(url) {
+            out.push_str(&format!("\x1b]8;;{url}\x07{url}\x1b]8;;\x07"));
+        } else {
+            out.push_str(url);
+        }
+        rest = &run[len..];
     }
     out.push_str(rest);
     out
+}
+
+/// Byte offset of the earliest `http://` / `https://` in `text`, if any.
+fn find_scheme(text: &str) -> Option<usize> {
+    match (text.find("https://"), text.find("http://")) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
+/// Length of the URL run starting at the scheme. Stops at whitespace, an ANSI
+/// escape, or URL-hostile delimiters (`<>"'` `` ` `` `)`), then trims trailing
+/// sentence punctuation so `…example.com.` / `(…example.com)` link cleanly.
+fn url_run_len(run: &str) -> usize {
+    let mut end = run.len();
+    for (i, ch) in run.char_indices() {
+        if ch.is_whitespace() || ch == '\x1b' || matches!(ch, '<' | '>' | '"' | '\'' | '`' | ')') {
+            end = i;
+            break;
+        }
+    }
+    // Don't swallow trailing sentence punctuation into the link target.
+    let trimmed = run[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    trimmed.len()
 }
 
 use crate::width::display_width;
@@ -691,6 +854,69 @@ mod tests {
     }
 
     #[test]
+    fn inline_italic_styles_apply_and_strip_clean() {
+        // Both `*` and `_` mark italics; the text survives ANSI stripping.
+        let plain = render_plain("a *b* c _d_ e");
+        assert_eq!(plain, "a b c d e");
+
+        // The italic SGR (ESC[3m) is actually emitted with color on, and is
+        // distinct from bold (ESC[1m) so `*x*` and `**x**` don't collide.
+        let colored = render_colored("*one* and **two**");
+        assert!(
+            colored.contains("\x1b[3m"),
+            "italic escape missing: {colored:?}"
+        );
+        assert!(
+            colored.contains("\x1b[1m"),
+            "bold escape missing: {colored:?}"
+        );
+    }
+
+    #[test]
+    fn intraword_underscores_and_bare_stars_stay_literal() {
+        // CommonMark flanking: `_` inside identifiers must NOT italicize, and a
+        // multiplication `*` with spaces around it isn't an emphasis opener.
+        assert_eq!(render_plain("call foo_bar_baz now"), "call foo_bar_baz now");
+        assert_eq!(render_plain("compute a * b * c"), "compute a * b * c");
+        // An unmatched single delimiter is left verbatim.
+        assert_eq!(render_plain("a *lonely star"), "a *lonely star");
+    }
+
+    #[test]
+    fn bold_wrapping_italic_keeps_both_styles() {
+        // `**_x_**` → bold pass consumes the `**`, italic pass the inner `_`.
+        let colored = render_colored("**_emph_**");
+        assert!(colored.contains("\x1b[1m"), "bold missing: {colored:?}");
+        assert!(colored.contains("\x1b[3m"), "italic missing: {colored:?}");
+        assert_eq!(render_plain("**_emph_**"), "emph");
+    }
+
+    #[test]
+    fn fenced_code_gets_syntax_highlighting_for_known_languages() {
+        // A recognised language colours keywords inside the fence (per-token),
+        // while the fence chrome stays dim. Stripping ANSI must still yield the
+        // exact source line — highlighting is lossless.
+        let colored = render_colored("```rust\nlet x = 1;\n```");
+        assert!(
+            colored.contains("\x1b[35mlet\x1b[0m"),
+            "rust `let` keyword should be magenta inside the fence: {colored:?}"
+        );
+        let plain = render_plain("```rust\nlet x = 1;\n```");
+        assert!(
+            plain.contains("│ let x = 1;"),
+            "source preserved: {plain:?}"
+        );
+
+        // An UNKNOWN language falls back to the uniform inline-code colour with
+        // no per-token keyword escape.
+        let unknown = render_colored("```\nlet x = 1;\n```");
+        assert!(
+            !unknown.contains("\x1b[35mlet\x1b[0m"),
+            "no language → no per-token highlight: {unknown:?}"
+        );
+    }
+
+    #[test]
     fn single_tilde_is_not_strikethrough() {
         // The model uses ~ for "approximately"; only ~~ should strike, so the
         // single tildes must be preserved verbatim.
@@ -719,6 +945,70 @@ mod tests {
         // Malformed links are left untouched rather than dropped.
         assert_eq!(render_plain("[label](unclosed"), "[label](unclosed");
         assert_eq!(render_plain("[bare label] text"), "[bare label] text");
+    }
+
+    #[test]
+    fn http_links_emit_osc8_hyperlink_with_visible_fallback() {
+        // With colour on, an http(s) link wraps the label in an OSC-8 escape so
+        // supporting terminals make it clickable, while the dimmed `(url)` stays
+        // visible for terminals that ignore the escape.
+        let colored = render_colored("[Anthropic](https://example.com)");
+        assert!(
+            colored.contains("\x1b]8;;https://example.com\x07"),
+            "OSC-8 open missing: {colored:?}"
+        );
+        assert!(
+            colored.contains("\x1b]8;;\x07"),
+            "OSC-8 close missing: {colored:?}"
+        );
+        // Stripping ALL escapes (CSI + OSC) leaves the human-readable fallback.
+        assert_eq!(strip_ansi(&colored), "Anthropic (https://example.com)");
+    }
+
+    #[test]
+    fn bare_urls_in_prose_are_autolinked_with_osc8() {
+        // A bare URL in running text becomes a clickable OSC-8 link whose
+        // visible text is the URL itself; stripping escapes restores the prose.
+        let colored = render_colored("see https://example.com here");
+        assert!(
+            colored.contains("\x1b]8;;https://example.com\x07https://example.com\x1b]8;;\x07"),
+            "bare url should be OSC-8 wrapped: {colored:?}"
+        );
+        assert_eq!(strip_ansi(&colored), "see https://example.com here");
+
+        // Trailing sentence punctuation is NOT swallowed into the link target.
+        let dotted = render_colored("visit https://example.com.");
+        assert!(
+            dotted.contains("\x1b]8;;https://example.com\x07"),
+            "url without trailing dot: {dotted:?}"
+        );
+        assert!(
+            !dotted.contains("https://example.com.\x07"),
+            "the period must stay outside the link: {dotted:?}"
+        );
+        assert_eq!(strip_ansi(&dotted), "visit https://example.com.");
+    }
+
+    #[test]
+    fn autolinking_is_off_without_color_and_leaves_prose_unchanged() {
+        // No-colour output must be byte-identical to the input prose (no escapes
+        // leak into piped/`--no-color` consumers).
+        let plain = MarkdownRenderer::render_with_options(
+            "see https://example.com here",
+            MarkdownRenderOptions { color: false },
+        );
+        assert_eq!(plain, "see https://example.com here");
+    }
+
+    #[test]
+    fn non_http_schemes_are_not_hyperlinked() {
+        // A `javascript:`/relative/control-char URL must NOT become an OSC-8
+        // escape — only known-safe schemes are clickable, the rest render plain.
+        let colored = render_colored("[x](javascript:alert(1))");
+        assert!(
+            !colored.contains("\x1b]8;;"),
+            "unsafe scheme must not emit OSC-8: {colored:?}"
+        );
     }
 
     #[test]
