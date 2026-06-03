@@ -469,6 +469,13 @@ struct Cli {
     doctor: bool,
 
     #[arg(
+        long = "gui",
+        action = ArgAction::SetTrue,
+        help = "Launch the native desktop GUI (the `deeptide-gui` binary), sharing this config + sessions."
+    )]
+    gui: bool,
+
+    #[arg(
         long = "no-session-persistence",
         env = "DEEPTIDE_NO_SESSION_PERSISTENCE",
         action = ArgAction::SetTrue,
@@ -547,6 +554,37 @@ fn local_now() -> time::OffsetDateTime {
     time::OffsetDateTime::now_utc().to_offset(offset)
 }
 
+/// Launch the native desktop GUI (`deeptide-gui`). The CLI deliberately does NOT
+/// depend on the GUI crate (that would drag a webview/graphics stack into the
+/// lean headless binary), so we exec the separate binary — preferring one next
+/// to this executable, then falling back to a PATH lookup by name.
+fn launch_gui() -> Result<(), String> {
+    let name = if cfg!(windows) {
+        "deeptide-gui.exe"
+    } else {
+        "deeptide-gui"
+    };
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
+        .filter(|path| path.exists());
+    let program = beside.unwrap_or_else(|| std::path::PathBuf::from(name));
+
+    let status = std::process::Command::new(&program)
+        .status()
+        .map_err(|error| {
+            format!(
+                "could not launch the desktop GUI ({name}): {error}.\n\
+             Build/install it with `cargo build -p deeptide-gui` (or place `{name}` on PATH)."
+            )
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("the desktop GUI exited with {status}"))
+    }
+}
+
 fn run(mut cli: Cli) -> Result<(), String> {
     // Resolve the local UTC offset now, at the single-threaded entry
     // point. `time::UtcOffset::current_local_offset()` deliberately
@@ -564,6 +602,12 @@ fn run(mut cli: Cli) -> Result<(), String> {
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    // --gui hands off to the native desktop app. It shares this process's cwd
+    // (so `--cwd` carries through) and reads the same settings.json / sessions.
+    if cli.gui {
+        return launch_gui();
+    }
 
     // --list-sessions is a no-API-key early exit: print the session list and stop.
     if cli.list_sessions {
@@ -4951,6 +4995,7 @@ mod tests {
             import_as: "context".to_owned(),
             list_models: false,
             doctor: false,
+            gui: false,
             no_session_persistence: false,
             no_session_capture: false,
             no_suggestions: false,
