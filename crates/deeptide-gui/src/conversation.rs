@@ -34,6 +34,15 @@ use crate::events::{HydratedBubble, TerminalKind, UiEvent, Usage, WorkerMsg};
 /// [`Conversation::respond_permission`]; the worker's callback receives it.
 type PendingPermissions = Arc<Mutex<HashMap<String, Sender<AskOutcome>>>>;
 
+/// How to start a conversation: optionally resume a session, and optionally
+/// override the provider / model the picker selected (empty = use config/env).
+#[derive(Debug, Clone, Default)]
+pub struct StartConfig {
+    pub resume: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
 /// Handle the UI holds to one running conversation.
 pub struct Conversation {
     to_worker: Sender<WorkerMsg>,
@@ -50,17 +59,17 @@ impl Conversation {
     /// Spawn a fresh conversation. `ctx` is cloned so the worker can wake the UI
     /// on each event (egui's `Context` is `Send + Sync + Clone`).
     pub fn spawn(ctx: egui::Context) -> Self {
-        Self::spawn_inner(ctx, None)
+        Self::spawn_inner(ctx, StartConfig::default())
     }
 
-    /// Spawn a conversation that resumes `session_id`: the worker loads the prior
-    /// transcript from the shared store, restores it into the loop, and emits a
-    /// `Hydrate` event so the UI shows the history before the user continues.
-    pub fn spawn_resume(ctx: egui::Context, session_id: String) -> Self {
-        Self::spawn_inner(ctx, Some(session_id))
+    /// Spawn a conversation per `config` — fresh or resuming a session, with an
+    /// optional provider/model override. Resuming loads the prior transcript and
+    /// emits a `Hydrate` event so the UI shows the history before continuing.
+    pub fn start(ctx: egui::Context, config: StartConfig) -> Self {
+        Self::spawn_inner(ctx, config)
     }
 
-    fn spawn_inner(ctx: egui::Context, resume: Option<String>) -> Self {
+    fn spawn_inner(ctx: egui::Context, config: StartConfig) -> Self {
         let (to_worker, worker_rx) = unbounded::<WorkerMsg>();
         let (worker_tx, from_worker) = unbounded::<UiEvent>();
         let interrupt = Arc::new(AtomicBool::new(false));
@@ -76,7 +85,7 @@ impl Conversation {
                     ctx,
                     interrupt_for_worker,
                     pending_for_worker,
-                    resume,
+                    config,
                 )
             })
             .expect("spawn conversation worker thread");
@@ -119,7 +128,7 @@ fn worker_loop(
     ctx: egui::Context,
     interrupt: Arc<AtomicBool>,
     pending: PendingPermissions,
-    resume: Option<String>,
+    config: StartConfig,
 ) {
     // Live structured-event sink: map each core event to a UI event, send it,
     // and wake the UI. Synchronous and cheap (just a channel send + repaint).
@@ -155,7 +164,14 @@ fn worker_loop(
     // Build the real backend from the shared config (same settings.json the CLI
     // reads), through the shared host builder — identical to the CLI's path.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let params = deeptide_host::config::resolve_backend_params(&cwd);
+    let mut params = deeptide_host::config::resolve_backend_params(&cwd);
+    // The picker's selections override config/env for this conversation.
+    if let Some(provider) = config.provider.as_deref().filter(|p| !p.is_empty()) {
+        params.provider = provider.to_owned();
+    }
+    if let Some(model) = config.model.as_deref().filter(|m| !m.is_empty()) {
+        params.model_override = Some(model.to_owned());
+    }
     let configured = match deeptide_host::backend::build_backend(
         &params,
         Some(streaming_handler),
@@ -244,7 +260,7 @@ fn worker_loop(
     // session is `deeptide --resume`-able and vice-versa. Resuming reuses the
     // existing id so we continue the same file.
     let started_at = now_rfc3339();
-    let session_id = match resume {
+    let session_id = match config.resume {
         Some(id) => {
             // Load the prior transcript, restore it into the loop, and hand the
             // UI a hydrated history to render before the user continues.

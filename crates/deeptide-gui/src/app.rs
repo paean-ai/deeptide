@@ -11,7 +11,7 @@ use deeptide_core::{AskOutcome, SessionEntry, SessionStore};
 use eframe::egui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
-use crate::conversation::Conversation;
+use crate::conversation::{Conversation, StartConfig};
 use crate::events::{TerminalKind, UiEvent, Usage};
 
 /// An approval the user still needs to answer.
@@ -58,6 +58,10 @@ pub struct App {
     markdown_cache: CommonMarkCache,
     /// Cumulative token/cost totals shown in the status bar.
     usage: Usage,
+    /// Provider preset chosen in the picker (empty = config/env default).
+    provider_choice: String,
+    /// Model override chosen in the picker (empty = provider default).
+    model_choice: String,
 }
 
 impl App {
@@ -76,7 +80,30 @@ impl App {
             sessions,
             markdown_cache: CommonMarkCache::default(),
             usage: Usage::default(),
+            provider_choice: String::new(),
+            model_choice: String::new(),
         }
+    }
+
+    /// The picker's current selection as a `StartConfig` provider/model pair.
+    fn start_config(&self, resume: Option<String>) -> StartConfig {
+        StartConfig {
+            resume,
+            provider: Some(self.provider_choice.clone()).filter(|p| !p.is_empty()),
+            model: Some(self.model_choice.clone()).filter(|m| !m.is_empty()),
+        }
+    }
+
+    /// Start a brand-new conversation with the picker's provider/model, clearing
+    /// the transcript.
+    fn new_chat(&mut self, ctx: egui::Context) {
+        self.conversation = Conversation::start(ctx, self.start_config(None));
+        self.transcript.clear();
+        self.streaming = None;
+        self.thinking = None;
+        self.pending.clear();
+        self.running = false;
+        self.usage = Usage::default();
     }
 
     /// Fold every pending worker event into the transcript.
@@ -207,12 +234,13 @@ impl App {
     /// worker loads the prior transcript and emits a `Hydrate` event to repopulate
     /// the (now-cleared) UI state.
     fn resume(&mut self, ctx: egui::Context, session_id: String) {
-        self.conversation = Conversation::spawn_resume(ctx, session_id);
+        self.conversation = Conversation::start(ctx, self.start_config(Some(session_id)));
         self.transcript.clear();
         self.streaming = None;
         self.thinking = None;
         self.pending.clear();
         self.running = false;
+        self.usage = Usage::default();
     }
 }
 
@@ -249,11 +277,38 @@ impl eframe::App for App {
         });
 
         let mut resume_request: Option<String> = None;
+        let mut new_chat_request = false;
+        // Disjoint field borrows so the panel closure doesn't capture all of self.
+        let sessions = &self.sessions;
+        let provider_choice = &mut self.provider_choice;
+        let model_choice = &mut self.model_choice;
         egui::Panel::left("sessions")
             .resizable(true)
             .default_size(220.0)
             .show_inside(ui, |ui| {
                 ui.add_space(4.0);
+                if ui.button("➕  New chat").clicked() {
+                    new_chat_request = true;
+                }
+                ui.add_space(4.0);
+                egui::ComboBox::from_label("provider")
+                    .selected_text(if provider_choice.is_empty() {
+                        "(default)"
+                    } else {
+                        provider_choice.as_str()
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(provider_choice, String::new(), "(default)");
+                        for id in deeptide_host::provider::known_provider_ids() {
+                            ui.selectable_value(provider_choice, (*id).to_owned(), *id);
+                        }
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(model_choice)
+                        .hint_text("model (optional)")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.separator();
                 ui.label(egui::RichText::new("Sessions").strong());
                 ui.label(
                     egui::RichText::new("shared with the CLI · click to resume")
@@ -264,14 +319,14 @@ impl eframe::App for App {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if self.sessions.is_empty() {
+                        if sessions.is_empty() {
                             ui.label(
                                 egui::RichText::new("no saved sessions yet")
                                     .italics()
                                     .color(egui::Color32::GRAY),
                             );
                         }
-                        for session in &self.sessions {
+                        for session in sessions {
                             let preview = if session.preview.is_empty() {
                                 "(empty)"
                             } else {
@@ -301,6 +356,9 @@ impl eframe::App for App {
                         }
                     });
             });
+        if new_chat_request {
+            self.new_chat(ui.ctx().clone());
+        }
         if let Some(session_id) = resume_request {
             self.resume(ui.ctx().clone(), session_id);
         }
