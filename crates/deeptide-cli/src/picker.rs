@@ -10,6 +10,7 @@
 use std::io::{self, Write};
 
 use deeptide_core::ReplMenu;
+use deeptide_core::width::{display_width, truncate_to_width};
 
 use crate::queue_editor::enter_raw_mode;
 
@@ -32,13 +33,34 @@ fn fuzzy_matches(query: &str, text: &str) -> bool {
     if query.is_empty() {
         return true;
     }
-    let mut q = query.chars().map(|c| c.to_ascii_lowercase()).peekable();
-    for ch in text.chars().map(|c| c.to_ascii_lowercase()) {
+    // Full Unicode case folding (not just ASCII) so a query like `é` matches
+    // `É` in a label. `to_lowercase` allocates, but labels/queries are short.
+    let query = query.to_lowercase();
+    let text = text.to_lowercase();
+    let mut q = query.chars().peekable();
+    for ch in text.chars() {
         if q.peek() == Some(&ch) {
             q.next();
         }
     }
     q.peek().is_none()
+}
+
+/// Current terminal width in columns; falls back to 80 when it can't be probed.
+fn term_cols() -> usize {
+    terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .filter(|&c| c > 0)
+        .unwrap_or(80)
+}
+
+/// Fit one rendered line to the terminal width. A label wider than the terminal
+/// would wrap onto a second physical row that the picker's line counter doesn't
+/// count, desyncing the redraw rewind and making the list creep upward. Reuses
+/// the canonical width-aware truncator, which is char-safe (never splits a
+/// multibyte / CJK / emoji codepoint) and reserves a column for its ellipsis.
+fn fit_width(s: &str, max_cols: usize) -> String {
+    truncate_to_width(s, max_cols)
 }
 
 #[cfg(unix)]
@@ -137,16 +159,31 @@ fn render(
         ("", "", "", "")
     };
 
+    // Every printed line is fit to the terminal width first. A label wider than
+    // the terminal would wrap onto a second physical row, which `lines` (and so
+    // the next frame's rewind) wouldn't count — desyncing the redraw and making
+    // the list creep upward. Fitting each line to one row keeps the math exact.
+    let width = term_cols();
     let mut lines = 0usize;
-    let _ = write!(
-        out,
-        "{bold}{}{reset}  {dim}{} match{}{reset}\r\n",
-        menu.title,
-        filtered.len(),
-        if filtered.len() == 1 { "" } else { "es" }
+    let title = fit_width(
+        &format!(
+            "{}  {} match{}",
+            menu.title,
+            filtered.len(),
+            if filtered.len() == 1 { "" } else { "es" }
+        ),
+        width,
     );
+    let _ = write!(out, "{bold}{title}{reset}\r\n");
     lines += 1;
-    let _ = write!(out, "{dim}search:{reset} {query}\r\n");
+    // Keep the dim "search:" label visually distinct from the bright typed query
+    // (the query is what the user is actively editing). Budget the label to leave
+    // room for "{label} {query}" within the width; if the query itself overruns,
+    // it's truncated so the combined line still fits one physical row.
+    let search_label = "search:";
+    let query_budget = width.saturating_sub(display_width(search_label) + 1);
+    let query_fit = fit_width(query, query_budget);
+    let _ = write!(out, "{dim}{search_label}{reset} {query_fit}\r\n");
     lines += 1;
 
     let end = (scroll + MAX_VISIBLE).min(filtered.len());
@@ -154,23 +191,35 @@ fn render(
         let abs = scroll + row;
         let label = &menu.choices[i].label;
         if abs == selected {
-            let _ = write!(out, "{sel_on}› {label}{reset}\r\n");
+            let _ = write!(
+                out,
+                "{sel_on}{}{reset}\r\n",
+                fit_width(&format!("› {label}"), width)
+            );
         } else {
-            let _ = write!(out, "  {label}\r\n");
+            let _ = write!(out, "{}\r\n", fit_width(&format!("  {label}"), width));
         }
         lines += 1;
     }
     if filtered.is_empty() {
-        let _ = write!(out, "{dim}  (no matches){reset}\r\n");
+        let _ = write!(
+            out,
+            "{dim}{}{reset}\r\n",
+            fit_width("  (no matches)", width)
+        );
         lines += 1;
     }
     if !menu.footer.is_empty() {
-        let _ = write!(out, "{dim}{}{reset}\r\n", menu.footer);
+        let _ = write!(out, "{dim}{}{reset}\r\n", fit_width(&menu.footer, width));
         lines += 1;
     }
     let _ = write!(
         out,
-        "{dim}↑/↓ move · type to filter · Enter select · Esc cancel{reset}"
+        "{dim}{}{reset}",
+        fit_width(
+            "↑/↓ move · type to filter · Enter select · Esc cancel",
+            width
+        )
     );
     lines += 1; // the hint line (no trailing newline)
     let _ = out.flush();
@@ -295,5 +344,20 @@ mod tests {
         assert!(!fuzzy_matches("zzz", "[claude] x"));
         // out-of-order chars don't match a subsequence
         assert!(!fuzzy_matches("dcx", "[claude]"));
+    }
+
+    #[test]
+    fn fuzzy_folds_non_ascii_case() {
+        assert!(fuzzy_matches("é", "RÉSUMÉ"));
+        assert!(fuzzy_matches("ÉS", "résumé"));
+    }
+
+    #[test]
+    fn fit_width_clamps_to_terminal_columns() {
+        // Delegates to the canonical width-aware truncator (itself unit-tested
+        // in deeptide_core::width); a spot check that wiring is right.
+        assert_eq!(fit_width("abc", 10), "abc");
+        assert_eq!(fit_width("abcdefgh", 4), "abc…");
+        assert_eq!(fit_width("abc", 1), "…");
     }
 }

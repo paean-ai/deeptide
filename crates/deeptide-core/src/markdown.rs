@@ -133,6 +133,13 @@ impl StreamingMarkdownRenderer {
     /// tool call interrupts streamed text so narration doesn't run on).
     pub fn flush(&mut self) -> String {
         let mut out = String::new();
+        // A trailing partial row (no closing newline) that belongs to a pending
+        // table block gets folded in, so the whole table still renders aligned
+        // rather than printing the last row with raw `|` pipes.
+        if !self.table_buf.is_empty() && !self.in_fence && self.buf.trim_start().starts_with('|') {
+            let line = std::mem::take(&mut self.buf);
+            self.table_buf.push(line);
+        }
         if !self.table_buf.is_empty() {
             out.push_str(&self.render_table_block());
             self.table_buf.clear();
@@ -1233,5 +1240,34 @@ mod tests {
         out.push_str(&r.push(" line\n"));
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines, vec!["first line", "second line"]);
+    }
+
+    #[test]
+    fn flush_folds_trailing_partial_table_row() {
+        // The final row arrives with no closing newline (the stream/turn ends
+        // mid-row), so it sits in the partial-line buffer. flush() must fold it
+        // into the pending table block and render the whole table aligned — not
+        // print the last row as raw `|` pipes. We assert the partial-tail render
+        // matches the newline-terminated render (the aligned baseline).
+        let partial = "| A | BB |\n|---|----|\n| 1 | 2 |"; // no trailing newline
+        let full = "| A | BB |\n|---|----|\n| 1 | 2 |\n";
+
+        let mut r1 = streaming_plain();
+        let mut from_partial = String::new();
+        from_partial.push_str(&r1.push(partial));
+        from_partial.push_str(&r1.flush());
+
+        let mut r2 = streaming_plain();
+        let mut from_full = String::new();
+        from_full.push_str(&r2.push(full));
+        from_full.push_str(&r2.flush());
+
+        assert_eq!(from_partial, from_full, "partial tail must render aligned");
+        // The raw separator row is consumed by table rendering, so it must not
+        // survive verbatim — proving the tail was folded into the table block.
+        assert!(
+            !from_partial.contains("|---|----|"),
+            "table must render, not pass through raw: {from_partial:?}"
+        );
     }
 }
