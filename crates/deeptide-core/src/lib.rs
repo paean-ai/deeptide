@@ -42,8 +42,8 @@ pub mod width;
 pub mod word_diff;
 
 pub use agent_loop::{
-    AgentBackend, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse, AgentTerminalEvent,
-    AgentUsage, AskOutcome, ConversationMessage, LocalEchoBackend, MessageRole,
+    AgentBackend, AgentEventCallback, AgentLoop, AgentLoopEvent, AgentRequest, AgentResponse,
+    AgentTerminalEvent, AgentUsage, AskOutcome, ConversationMessage, LocalEchoBackend, MessageRole,
     PermissionAskCallback, ToolCall, ToolProgressCallback, ToolProgressEvent, ToolResultBlock,
 };
 pub use api::{

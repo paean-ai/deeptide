@@ -37,6 +37,18 @@ impl Tok {
             Tok::Plain => None,
         }
     }
+
+    /// Map the internal token to its public, UI-neutral [`TokenClass`].
+    fn class(self) -> TokenClass {
+        match self {
+            Tok::Keyword => TokenClass::Keyword,
+            Tok::Str => TokenClass::Str,
+            Tok::Comment => TokenClass::Comment,
+            Tok::Number => TokenClass::Number,
+            Tok::Type => TokenClass::Type,
+            Tok::Plain => TokenClass::Plain,
+        }
+    }
 }
 
 /// Per-language lexing rules. Intentionally tiny — just enough to classify the
@@ -221,7 +233,39 @@ fn lang_spec(language: &str) -> Option<LangSpec> {
 /// The caller is responsible for only invoking this when colour is enabled.
 pub fn highlight_line(language: &str, line: &str) -> Option<String> {
     let spec = lang_spec(language)?;
-    Some(highlight_with(&spec, line, &crate::theme::active().syntax))
+    let palette = &crate::theme::active().syntax;
+    let mut out = String::with_capacity(line.len() + 16);
+    for (tok, text) in tokenize_spans(&spec, line) {
+        emit(&mut out, tok, &text, palette);
+    }
+    Some(out)
+}
+
+/// Public, UI-neutral token classes — the same classification the ANSI
+/// highlighter uses, exposed so a non-terminal host (the GUI) can map each
+/// class to its own colour (`egui::Color32`, a CSS class, …) instead of ANSI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenClass {
+    Keyword,
+    Str,
+    Comment,
+    Number,
+    Type,
+    Plain,
+}
+
+/// Tokenize one line of `language` into coalesced `(class, text)` spans, driven
+/// by the exact same tokenizer as [`highlight_line`]. Concatenating the `text`
+/// of every span reproduces `line` verbatim. `None` for unknown languages, so
+/// the caller can fall back to a uniform colour.
+pub fn highlight_spans(language: &str, line: &str) -> Option<Vec<(TokenClass, String)>> {
+    let spec = lang_spec(language)?;
+    Some(
+        tokenize_spans(&spec, line)
+            .into_iter()
+            .map(|(tok, text)| (tok.class(), text))
+            .collect(),
+    )
 }
 
 /// Is this language known to the highlighter? Lets callers decide layout
@@ -238,18 +282,22 @@ fn is_ident_continue(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-fn highlight_with(spec: &LangSpec, line: &str, palette: &crate::theme::SyntaxPalette) -> String {
+/// The shared tokenizer: classify a line into coalesced `(Tok, text)` spans.
+/// `Tok::Plain` runs are merged into one span; styled tokens are pushed
+/// individually (so re-emitting them as ANSI wraps each in its own SGR, matching
+/// the original behaviour exactly). Both `highlight_line` (ANSI) and
+/// `highlight_spans` (semantic) are thin renderers over this.
+fn tokenize_spans(spec: &LangSpec, line: &str) -> Vec<(Tok, String)> {
     let chars: Vec<char> = line.chars().collect();
-    let mut out = String::with_capacity(line.len() + 16);
+    let mut spans: Vec<(Tok, String)> = Vec::new();
     let mut plain = String::new();
     let mut i = 0;
 
-    // Flush any buffered plain run verbatim (no escape codes).
+    // Flush any buffered plain run as a single Plain span.
     macro_rules! flush_plain {
-        ($out:expr, $plain:expr) => {
+        ($spans:expr, $plain:expr) => {
             if !$plain.is_empty() {
-                $out.push_str(&$plain);
-                $plain.clear();
+                $spans.push((Tok::Plain, std::mem::take(&mut $plain)));
             }
         };
     }
@@ -262,9 +310,9 @@ fn highlight_with(spec: &LangSpec, line: &str, palette: &crate::theme::SyntaxPal
             .iter()
             .find(|p| starts_with_at(&chars, i, p))
         {
-            flush_plain!(out, plain);
+            flush_plain!(spans, plain);
             let rest: String = chars[i..].iter().collect();
-            emit(&mut out, Tok::Comment, &rest, palette);
+            spans.push((Tok::Comment, rest));
             let _ = prefix;
             break;
         }
@@ -274,18 +322,18 @@ fn highlight_with(spec: &LangSpec, line: &str, palette: &crate::theme::SyntaxPal
         // 2. String literal opened by a known delimiter. Consumes through the
         //    matching unescaped delimiter, or to end-of-line if unterminated.
         if spec.string_delims.contains(&c) {
-            flush_plain!(out, plain);
+            flush_plain!(spans, plain);
             let (lit, next) = scan_string(&chars, i, c);
-            emit(&mut out, Tok::Str, &lit, palette);
+            spans.push((Tok::Str, lit));
             i = next;
             continue;
         }
 
         // 3. Shell `$name` / `${name}` variable reference.
         if spec.dollar_vars && c == '$' {
-            flush_plain!(out, plain);
+            flush_plain!(spans, plain);
             let (var, next) = scan_dollar(&chars, i);
-            emit(&mut out, Tok::Type, &var, palette);
+            spans.push((Tok::Type, var));
             i = next;
             continue;
         }
@@ -294,9 +342,9 @@ fn highlight_with(spec: &LangSpec, line: &str, palette: &crate::theme::SyntaxPal
         //    (so `utf8` stays one identifier, but `0x1F` / `3.14` colour).
         let prev_ident = i > 0 && is_ident_continue(chars[i - 1]);
         if c.is_ascii_digit() && !prev_ident {
-            flush_plain!(out, plain);
+            flush_plain!(spans, plain);
             let (num, next) = scan_number(&chars, i);
-            emit(&mut out, Tok::Number, &num, palette);
+            spans.push((Tok::Number, num));
             i = next;
             continue;
         }
@@ -313,8 +361,8 @@ fn highlight_with(spec: &LangSpec, line: &str, palette: &crate::theme::SyntaxPal
             if tok == Tok::Plain {
                 plain.push_str(&word);
             } else {
-                flush_plain!(out, plain);
-                emit(&mut out, tok, &word, palette);
+                flush_plain!(spans, plain);
+                spans.push((tok, word));
             }
             continue;
         }
@@ -323,8 +371,8 @@ fn highlight_with(spec: &LangSpec, line: &str, palette: &crate::theme::SyntaxPal
         plain.push(c);
         i += 1;
     }
-    flush_plain!(out, plain);
-    out
+    flush_plain!(spans, plain);
+    spans
 }
 
 /// Decide the class of a completed identifier `word`. `after` is the index just
@@ -488,6 +536,32 @@ mod tests {
     }
 
     #[test]
+    fn highlight_spans_is_lossless_and_classifies_tokens() {
+        // The GUI-facing spans API: concatenating span text reproduces the line,
+        // and the high-signal tokens carry the right class.
+        let spans = highlight_spans("rust", "let x = 42; // c").expect("supported");
+        let rebuilt: String = spans.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(rebuilt, "let x = 42; // c", "lossless: {spans:?}");
+        assert!(
+            spans
+                .iter()
+                .any(|(c, t)| *c == TokenClass::Keyword && t == "let")
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|(c, t)| *c == TokenClass::Number && t == "42")
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|(c, t)| *c == TokenClass::Comment && t == "// c")
+        );
+        // Unknown language → None (caller falls back to a uniform colour).
+        assert!(highlight_spans("cobol", "x").is_none());
+    }
+
+    #[test]
     fn keywords_strings_comments_numbers_get_distinct_colors() {
         let out = highlight_line("rust", "let s = \"hi\"; // n=42").expect("supported language");
         assert!(out.contains("\x1b[35mlet\x1b[0m"), "keyword: {out:?}");
@@ -507,7 +581,10 @@ mod tests {
         // `light` theme recolours comments and numbers away from dark's codes.
         let spec = lang_spec("rust").expect("rust supported");
         let light = crate::theme::Theme::light().syntax;
-        let out = highlight_with(&spec, "let n = 42 // c", &light);
+        let mut out = String::new();
+        for (tok, text) in tokenize_spans(&spec, "let n = 42 // c") {
+            emit(&mut out, tok, &text, &light);
+        }
         // Keyword stays magenta (light keeps it), but the number is now blue
         // (light) not yellow (dark), and the comment grey not bright-black.
         assert!(out.contains("\x1b[35mlet\x1b[0m"), "keyword: {out:?}");
