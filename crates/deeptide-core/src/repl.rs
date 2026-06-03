@@ -1996,9 +1996,17 @@ impl ReplSession {
             if tok == "--as" || tok == "-a" {
                 if let Some(m) = tokens.next() {
                     mode_given = true;
+                    // Validate rather than silently falling back to memory, so a
+                    // typo'd mode is reported here just as the CLI's clap
+                    // value_parser reports it on `--import-as` (no divergence).
                     mode = match m {
+                        "memory" => "memory",
                         "context" | "handoff" => "context",
-                        _ => "memory",
+                        other => {
+                            return vec![ReplEvent::Output(format!(
+                                "Unknown import mode `{other}`. Use `--as memory` or `--as context`."
+                            ))];
+                        }
                     };
                 }
             } else if selector.is_empty() {
@@ -2049,12 +2057,19 @@ impl ReplSession {
 
     /// `/import all` — distil EVERY discovered session (Claude Code, Codex,
     /// deeptide) for this project into long-term memory in ONE consolidation
-    /// pass. Flattened transcripts are concatenated newest-first up to a byte
-    /// budget so a deep history doesn't blow the window; the model dedups via
-    /// MemorySearch as usual.
+    /// pass. Flattened transcripts are concatenated newest-first up to a
+    /// display-column budget (each session truncated to its slice of what
+    /// remains, so even one huge transcript can't blow the window); the model
+    /// dedups via MemorySearch as usual.
     fn import_all_to_memory(&mut self) -> Vec<ReplEvent> {
         const MAX_SESSIONS: usize = 15;
-        const CHAR_BUDGET: usize = 60_000;
+        // Total budget for the concatenated transcript, in display columns
+        // (matches `import::truncate`, which is width-aware). Sized to stay well
+        // under the model's context window across the bundled sessions.
+        const WIDTH_BUDGET: usize = 60_000;
+        // Below this many columns of room left, stop adding more sessions: a
+        // header plus only a sliver of content isn't worth a whole session slot.
+        const MIN_CONTENT_SLICE: usize = 200;
 
         let refs: Vec<_> = crate::import::discover(&self.tool_context.cwd)
             .into_iter()
@@ -2066,29 +2081,29 @@ impl ReplSession {
             ))];
         }
 
-        let mut combined = String::new();
-        let mut included = 0usize;
-        let mut skipped = 0usize;
-        for r in &refs {
-            let Ok(transcript) = crate::import::parse_file(&r.path, r.source) else {
-                continue;
-            };
-            let flat = crate::import::flatten_for_extraction(&transcript);
-            if flat.trim().is_empty() {
-                continue;
-            }
-            if combined.len() + flat.len() > CHAR_BUDGET && included > 0 {
-                skipped += 1;
-                continue;
-            }
-            combined.push_str(&format!(
-                "\n\n===== {} session {} =====\n",
-                r.source.label(),
-                session_short(&r.session_id)
-            ));
-            combined.push_str(&flat);
-            included += 1;
-        }
+        // Parse + flatten each discovered session, then bound the concatenation
+        // (see `build_bulk_import_corpus`, which is unit-tested for the ceiling).
+        let sessions: Vec<(String, String)> = refs
+            .iter()
+            .filter_map(|r| {
+                let transcript = crate::import::parse_file(&r.path, r.source).ok()?;
+                let flat = crate::import::flatten_for_extraction(&transcript);
+                if flat.trim().is_empty() {
+                    return None;
+                }
+                let header = format!(
+                    "\n\n===== {} session {} =====\n",
+                    r.source.label(),
+                    session_short(&r.session_id)
+                );
+                Some((header, flat))
+            })
+            .collect();
+        let BulkImportCorpus {
+            combined,
+            included,
+            skipped,
+        } = build_bulk_import_corpus(&sessions, WIDTH_BUDGET, MIN_CONTENT_SLICE);
         if included == 0 {
             return vec![ReplEvent::Output(String::from(
                 "Found sessions, but none had distillable conversational content.",
@@ -4093,12 +4108,61 @@ pub fn is_first_run() -> bool {
 }
 
 /// Record that the first-run onboarding has been shown, so it never fires again.
-pub fn mark_onboarded() {
+/// Returns `true` if the marker was persisted; `false` if the write failed
+/// (e.g. an unwritable config dir) — the caller can warn so the user isn't
+/// silently re-nudged (and the discovery walk re-run) on every startup.
+#[must_use]
+pub fn mark_onboarded() -> bool {
     let path = onboarded_marker();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&path, "1\n");
+    std::fs::write(&path, "1\n").is_ok()
+}
+
+/// Result of bounding a set of `(header, flattened-body)` sessions into one
+/// budget-capped corpus for `/import all`.
+struct BulkImportCorpus {
+    combined: String,
+    included: usize,
+    skipped: usize,
+}
+
+/// Concatenate `sessions` (newest-first `(header, body)` pairs) into a single
+/// string capped at `width_budget` **display columns**. The newest session is
+/// always included (truncated if it alone exceeds the budget); each subsequent
+/// session is truncated to the columns remaining, and once fewer than
+/// `min_content_slice` columns (beyond its header) are left, the rest are
+/// skipped. Width-aware so the cap is a real ceiling on the model-bound text,
+/// never split across a multibyte char. Pure — unit-tested for the ceiling.
+fn build_bulk_import_corpus(
+    sessions: &[(String, String)],
+    width_budget: usize,
+    min_content_slice: usize,
+) -> BulkImportCorpus {
+    let mut combined = String::new();
+    let mut used = 0usize; // display columns accumulated so far
+    let mut included = 0usize;
+    let mut skipped = 0usize;
+    for (header, body) in sessions {
+        let header_width = crate::width::display_width(header);
+        let remaining = width_budget.saturating_sub(used);
+        if included > 0 && remaining <= header_width + min_content_slice {
+            skipped += 1;
+            continue;
+        }
+        let content_budget = remaining.saturating_sub(header_width);
+        let body = crate::import::truncate(body, content_budget);
+        used += header_width + crate::width::display_width(&body);
+        combined.push_str(header);
+        combined.push_str(&body);
+        included += 1;
+    }
+    BulkImportCorpus {
+        combined,
+        included,
+        skipped,
+    }
 }
 
 /// Shorten a (possibly UUID-long) session id for display: first dash-group,
@@ -6063,6 +6127,80 @@ fn split_shell_like(input: &str) -> Vec<String> {
     }
 
     parts
+}
+
+#[cfg(test)]
+mod bulk_import_corpus_tests {
+    use super::{BulkImportCorpus, build_bulk_import_corpus};
+
+    fn width(s: &str) -> usize {
+        crate::width::display_width(s)
+    }
+
+    #[test]
+    fn single_oversized_session_is_truncated_to_the_ceiling() {
+        // One session whose body dwarfs the budget must still be capped — the
+        // motivating bug was that the first session was included whole.
+        let budget = 1_000;
+        let header = String::from("\n\n===== claude session abc =====\n");
+        let body = "x".repeat(50_000);
+        let BulkImportCorpus {
+            combined,
+            included,
+            skipped,
+        } = build_bulk_import_corpus(&[(header, body)], budget, 200);
+        assert_eq!(included, 1);
+        assert_eq!(skipped, 0);
+        assert!(
+            width(&combined) <= budget,
+            "combined width {} must not exceed budget {budget}",
+            width(&combined)
+        );
+    }
+
+    #[test]
+    fn later_sessions_are_truncated_then_skipped_within_budget() {
+        // First session eats most of the budget; the rest get a shrinking slice
+        // and are eventually skipped — but the total never exceeds the budget.
+        let budget = 2_000;
+        let sessions: Vec<(String, String)> = (0..5)
+            .map(|i| {
+                (
+                    format!("\n\n===== claude session s{i} =====\n"),
+                    "y".repeat(1_500),
+                )
+            })
+            .collect();
+        let BulkImportCorpus {
+            combined,
+            included,
+            skipped,
+        } = build_bulk_import_corpus(&sessions, budget, 200);
+        assert_eq!(included + skipped, 5, "every session is accounted for");
+        assert!(included >= 1, "the newest session is always kept");
+        assert!(
+            skipped >= 1,
+            "some later sessions must be skipped for length"
+        );
+        assert!(
+            width(&combined) <= budget,
+            "combined width {} must not exceed budget {budget}",
+            width(&combined)
+        );
+    }
+
+    #[test]
+    fn everything_fits_when_under_budget() {
+        let sessions = vec![
+            (String::from("==h1==\n"), String::from("short one")),
+            (String::from("==h2==\n"), String::from("short two")),
+        ];
+        let BulkImportCorpus {
+            included, skipped, ..
+        } = build_bulk_import_corpus(&sessions, 60_000, 200);
+        assert_eq!(included, 2);
+        assert_eq!(skipped, 0);
+    }
 }
 
 #[cfg(test)]

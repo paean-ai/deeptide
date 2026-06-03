@@ -450,6 +450,7 @@ struct Cli {
         long = "import-as",
         value_name = "MODE",
         default_value = "context",
+        value_parser = ["context", "memory"],
         help = "How to bring the imported session in: `context` (splice a live handoff) or `memory` (distil durable facts)."
     )]
     import_as: String,
@@ -468,6 +469,10 @@ struct Cli {
     )]
     doctor: bool,
 
+    // Env fallback for these `no_*` toggles is applied manually in `run` via
+    // `env_flag` rather than clap's `env=`: clap's bool+env treats the var as
+    // set for ANY non-"false" value, so e.g. `DEEPTIDE_NO_SUGGESTIONS=0` would
+    // wrongly *enable* the flag. `env_flag` gives intuitive 0/false/no/off→off.
     #[arg(
         long = "gui",
         action = ArgAction::SetTrue,
@@ -477,25 +482,22 @@ struct Cli {
 
     #[arg(
         long = "no-session-persistence",
-        env = "DEEPTIDE_NO_SESSION_PERSISTENCE",
         action = ArgAction::SetTrue,
-        help = "Do not autosave conversation turns to disk (privacy / scratch sessions)."
+        help = "Do not autosave conversation turns to disk (privacy / scratch sessions) (env DEEPTIDE_NO_SESSION_PERSISTENCE=1; 0/false/no/off/empty/unset = persist)."
     )]
     no_session_persistence: bool,
 
     #[arg(
         long = "no-session-capture",
-        env = "DEEPTIDE_NO_SESSION_CAPTURE",
         action = ArgAction::SetTrue,
-        help = "Skip the end-of-session memory consolidation pass so /exit and Ctrl-D return immediately."
+        help = "Skip the end-of-session memory consolidation pass so /exit and Ctrl-D return immediately (env DEEPTIDE_NO_SESSION_CAPTURE=1; 0/false/no/off/empty/unset = capture)."
     )]
     no_session_capture: bool,
 
     #[arg(
         long = "no-suggestions",
-        env = "DEEPTIDE_NO_SUGGESTIONS",
         action = ArgAction::SetTrue,
-        help = "Do not show follow-up prompt suggestions after a task finishes."
+        help = "Do not show follow-up prompt suggestions after a task finishes (env DEEPTIDE_NO_SUGGESTIONS=1; 0/false/no/off/empty/unset = shown)."
     )]
     no_suggestions: bool,
 
@@ -585,6 +587,19 @@ fn launch_gui() -> Result<(), String> {
     }
 }
 
+/// Truthiness of a boolean env var with well-defined semantics: unset, empty,
+/// or `0`/`false`/`no`/`off` (case-insensitive) → `false`; any other value →
+/// `true`. Avoids clap's `env`+bool footgun where `=0` could enable a flag.
+fn env_flag(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
+        }
+        Err(_) => false,
+    }
+}
+
 fn run(mut cli: Cli) -> Result<(), String> {
     // Resolve the local UTC offset now, at the single-threaded entry
     // point. `time::UtcOffset::current_local_offset()` deliberately
@@ -595,6 +610,13 @@ fn run(mut cli: Cli) -> Result<(), String> {
     capture_local_offset();
 
     normalize_embedded_mode(&mut cli);
+
+    // Fold env-var overrides in explicitly (see `env_flag`): the CLI flag OR a
+    // truthy env var enables the toggle; a falsey env var never forces it on.
+    cli.no_suggestions = cli.no_suggestions || env_flag("DEEPTIDE_NO_SUGGESTIONS");
+    cli.no_session_capture = cli.no_session_capture || env_flag("DEEPTIDE_NO_SESSION_CAPTURE");
+    cli.no_session_persistence =
+        cli.no_session_persistence || env_flag("DEEPTIDE_NO_SESSION_PERSISTENCE");
 
     if let Some(cwd) = cli.cwd.as_ref() {
         std::env::set_current_dir(cwd)
@@ -2318,7 +2340,18 @@ fn run_interactive(
             writeln!(stdout, "{}", status_bar::dim(&hint, use_color))
                 .map_err(|error| error.to_string())?;
         }
-        deeptide_core::mark_onboarded();
+        if !deeptide_core::mark_onboarded() {
+            writeln!(
+                stdout,
+                "{}",
+                status_bar::dim(
+                    "(could not persist the onboarding marker; set HOME or XDG_CONFIG_HOME to a \
+                     writable dir to stop this hint from reappearing)",
+                    use_color
+                )
+            )
+            .map_err(|error| error.to_string())?;
+        }
     }
 
     // --resume / --continue: restore a prior conversation before the first prompt.

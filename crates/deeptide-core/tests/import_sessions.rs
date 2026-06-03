@@ -78,7 +78,7 @@ fn import_discovers_and_hands_off_a_claude_session() {
         hint.contains("prior session"),
         "hint should mention prior sessions: {hint}"
     );
-    deeptide_core::mark_onboarded();
+    assert!(deeptide_core::mark_onboarded(), "marker should persist");
     assert!(
         repl_for_hint.first_run_import_hint().is_none(),
         "onboarding must not fire again after mark_onboarded"
@@ -146,6 +146,14 @@ fn import_discovers_and_hands_off_a_claude_session() {
     // 3) Unknown source is reported, not panicked.
     let bad = outputs(repl.run_import("notarealtool --as context"));
     assert!(bad.contains("Unknown source"), "got: {bad}");
+
+    // 3b) An invalid --as mode is rejected, not silently treated as memory —
+    //     matching the CLI's clap value_parser so the two surfaces agree.
+    let bad_mode = outputs(repl.run_import("claude abc12345 --as bogus"));
+    assert!(
+        bad_mode.contains("Unknown import mode"),
+        "invalid --as must be reported, got: {bad_mode}"
+    );
 
     // 4) Bare `/import` shows an interactive numbered menu. With >1 session it
     //    leads with "Import ALL"; a bare numeric reply picks a row.

@@ -172,6 +172,10 @@ pub fn resolve_ref(cwd: &Path, source: SourceTool, selector: &str) -> Result<Ses
 /// Discover importable sessions from every known tool for `cwd`, newest first.
 pub fn discover(cwd: &Path) -> Vec<SessionRef> {
     let mut refs = Vec::new();
+    // Claude and deeptide key sessions by a cwd-slug directory, so each reads a
+    // single flat dir — no walk to bound. Only Codex shards sessions across a
+    // date tree that must be walked, so only `discover_codex` carries depth /
+    // entry / symlink guards.
     refs.extend(discover_claude(cwd));
     refs.extend(discover_codex(cwd));
     refs.extend(discover_deeptide(cwd));
@@ -235,15 +239,41 @@ fn discover_codex(cwd: &Path) -> Vec<SessionRef> {
     let root = home.join(".codex").join("sessions");
     let target = cwd.to_string_lossy().to_string();
     let mut out = Vec::new();
-    let mut stack = vec![root];
-    while let Some(dir) = stack.pop() {
+    // Bound the walk: cap depth and total entries, and never follow symlinks, so
+    // a symlink cycle under ~/.codex/sessions can't spin forever and a huge tree
+    // can't stall startup (this runs on the first-run onboarding path too).
+    const MAX_DEPTH: usize = 8;
+    const MAX_ENTRIES: usize = 20_000;
+    let mut scanned = 0usize;
+    let mut capped = false;
+    let mut stack = vec![(root, 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if scanned >= MAX_ENTRIES {
+            capped = true;
+            break;
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
+            scanned += 1;
+            if scanned >= MAX_ENTRIES {
+                capped = true;
+                break;
+            }
+            // `file_type()` does not traverse symlinks, so a symlinked dir
+            // reports as a symlink here and we skip it (no cycle, no escape).
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
             let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
+            if ft.is_dir() {
+                if depth < MAX_DEPTH {
+                    stack.push((path, depth + 1));
+                }
                 continue;
             }
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -264,6 +294,15 @@ fn discover_codex(cwd: &Path) -> Vec<SessionRef> {
                 });
             }
         }
+    }
+    if capped {
+        // Don't let a bounded scan masquerade as "nothing else here": say so once
+        // on stderr so a user with a very deep Codex history knows discovery was
+        // partial (and `/import <id>` can still target a specific session).
+        eprintln!(
+            "deeptide: stopped scanning ~/.codex/sessions after {MAX_ENTRIES} entries; \
+             some older Codex sessions may not appear in discovery."
+        );
     }
     out
 }
@@ -317,10 +356,15 @@ fn codex_session_id(path: &Path) -> Option<String> {
 }
 
 fn first_line(path: &Path) -> Option<String> {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read};
     let file = std::fs::File::open(path).ok()?;
     let mut line = String::new();
-    BufReader::new(file).read_line(&mut line).ok()?;
+    // Cap the read so a corrupt/newline-free file can't buffer unbounded memory
+    // just to extract the meta cwd. Codex meta lines are well under this; a line
+    // longer than the cap simply won't parse and the session is skipped.
+    BufReader::new(file.take(256 * 1024))
+        .read_line(&mut line)
+        .ok()?;
     Some(line)
 }
 
@@ -360,7 +404,7 @@ fn text_from_content(content: &serde_json::Value) -> String {
     parts.join("\n")
 }
 
-fn truncate(text: &str, cap: usize) -> String {
+pub(crate) fn truncate(text: &str, cap: usize) -> String {
     // `cap` is a display-column budget; width-aware so CJK session previews in
     // the import picker are cut on the right boundary and stay aligned.
     crate::width::truncate_to_width(text.trim(), cap)
