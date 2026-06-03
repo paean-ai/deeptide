@@ -1170,6 +1170,66 @@ fn dream_unknown_subcommand_shows_usage_hint() {
     assert!(out.contains("Usage:") && out.contains("/dream"));
 }
 
+#[test]
+fn deep_seek_without_a_question_shows_usage() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let out = only_output(repl.submit("/deep-seek"));
+    assert!(out.contains("Usage: /deep-seek"), "got: {out}");
+    // The usage text should orient the user to the web-search key requirement.
+    assert!(
+        out.contains("BRAVE_SEARCH_API_KEY") || out.contains("SERPER_API_KEY"),
+        "usage should mention the search backend keys: {out}"
+    );
+}
+
+#[test]
+fn deep_seek_emits_a_research_status_then_runs_the_pass() {
+    // StaticBackend returns a plain final answer (no tool calls), so the pass
+    // completes in one turn. We assert the leading status line names the
+    // question and that the synthesized answer follows.
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let events = repl.submit("/deep-seek what is the capital of France");
+    let joined = events
+        .iter()
+        .filter_map(|e| match e {
+            ReplEvent::Output(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("[deep-seek] researching: what is the capital of France"),
+        "should emit a research status line: {joined}"
+    );
+    assert!(
+        joined.contains("assistant reply"),
+        "the pass's synthesized answer should follow: {joined}"
+    );
+}
+
+#[test]
+fn deep_seek_blocks_non_research_tools() {
+    // The pass restricts tools to a read-only research allowlist. A backend that
+    // tries a Bash shell (NOT on the allowlist) on turn 1 must see it rejected by
+    // the gate — proving the allowlist is enforced, not advisory, even though
+    // imported web content could try to coax the model into a shell. (We probe
+    // Bash rather than WebSearch so the test stays offline/deterministic
+    // regardless of whether a search API key happens to be set in the env.)
+    let mut repl = ReplSession::new(Box::new(ShellProbeBackend::default()));
+    let _ = repl.submit("/deep-seek probe the tool gate");
+    // The rejection is fed back into the conversation as a tool result (not a
+    // user-visible REPL output), so inspect the recorded messages for it.
+    let rejected = repl.agent_loop().messages().iter().any(|m| {
+        m.tool_results
+            .iter()
+            .any(|r| r.is_error && r.content.contains("not available to this agent"))
+    });
+    assert!(
+        rejected,
+        "Bash should be blocked by the research allowlist (no rejection tool-result found)"
+    );
+}
+
 fn only_output(events: Vec<ReplEvent>) -> String {
     match events.as_slice() {
         [ReplEvent::Output(output)] => output.clone(),
@@ -1225,6 +1285,32 @@ impl AgentBackend for EchoUserBackend {
             .map(|message| message.content.as_str())
             .unwrap_or_default();
         Ok(AgentResponse::text(format!("echo: {prompt}")))
+    }
+}
+
+/// Tries a Bash shell call on turn 1, then finishes. Used to prove the
+/// `/deep-seek` research allowlist rejects tools outside it.
+#[derive(Default)]
+struct ShellProbeBackend {
+    calls: usize,
+}
+
+impl AgentBackend for ShellProbeBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("let me check the shell"),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_bash",
+                    "Bash",
+                    serde_json::json!({"command": "echo hi"}),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done researching"))
+        }
     }
 }
 

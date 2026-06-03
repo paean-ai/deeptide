@@ -1141,6 +1141,7 @@ fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
         ),
         ("Git", &["branch", "commit"]),
         ("Review", &["review", "test", "lint"]),
+        ("Research", &["deep-seek"]),
         ("Skills", &["skills", "simplify", "tools"]),
         ("Config", &["config", "doctor", "update", "cache"]),
         ("UX", &["keybindings", "debug", "vim"]),
