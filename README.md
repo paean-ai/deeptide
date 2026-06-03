@@ -22,7 +22,7 @@
 
 | | DeepTide for macOS | DeepTide CLI (`deeptide`) | DeepTide CLI Rust (`deeptide-rs`) |
 |---|---|---|---|
-| **Form factor** | Native macOS app | Cross-platform terminal CLI | Cross-platform terminal CLI |
+| **Form factor** | Native macOS app | Cross-platform terminal CLI | Cross-platform terminal CLI **+ native desktop GUI** ([`--gui`](#desktop-gui-deeptide-rs)) |
 | **Runtime** | Swift 6 native binary, ~15 MB idle | Bun, ~50 MB resident | Native Rust binary, ~10 MB on disk, no runtime |
 | **Platforms** | macOS 15+ | Linux · Windows · macOS | Linux · Windows · macOS |
 | **Install** | `curl -fsSL https://deeptide.sh/install.sh \| sh` | `bun add -g deeptide` (this package) | `npm install -g deeptide-rs` |
@@ -148,6 +148,54 @@ For the full configuration surface (settings.json schema, hooks,
 permissions, MCP servers, sub-agents, model aliases) see the upstream
 [Zero CLI README](https://github.com/a8e-ai/zero-cli#readme), which is
 the authoritative reference.
+
+---
+
+## Desktop GUI (`deeptide-rs`)
+
+The Rust port ships a **native desktop app** — a single Rust binary (egui, no
+Electron/webview) that is a thin window over the same engine the CLI uses. It
+**fully shares the CLI's configuration, session history, and the entire tool
+set** — there is no separate config to maintain:
+
+- **Same config** — reads the identical `~/.config/tide/settings.json` (and
+  project `.deeptide/settings.json`); set your provider/model/API key once and
+  both the CLI and the GUI pick it up.
+- **Same sessions** — conversations save to the same on-disk store, so a chat
+  started in the GUI is `deeptide-rs --resume`-able from the terminal, and a CLI
+  session shows up in the GUI's sidebar to resume with one click.
+- **Same tools** — the full agent tool set (Read/Write/Edit, Bash, Glob/Grep,
+  WebFetch, MCP servers, sub-agents, …) is available identically.
+
+What it does: streaming chat with **markdown rendering**, live **reasoning**
+("💭 thinking") and **tool-call cards**, **interactive tool approvals** (with a
+coloured diff preview for Write/Edit), a **session sidebar** (resume past
+chats), a **provider/model picker**, **New chat**, **Stop/interrupt**, and a
+**cost/usage bar** (↑/↓ tokens · cache · $).
+
+### Launch
+
+```bash
+# Via the CLI launcher (execs the desktop binary, sharing this config/cwd):
+deeptide-rs --gui
+
+# …or run the GUI binary directly:
+deeptide-gui
+```
+
+### Build from source
+
+```bash
+# From the repo root (the Rust workspace under crates/):
+cargo run -p deeptide-gui            # dev run
+cargo build -p deeptide-gui --release # release binary at target/release/deeptide-gui
+```
+
+Configure a model the same way as the CLI — e.g. `export DEEPTIDE_API_KEY=…`
+(or set it in `settings.json`) before launching. Without a credential the GUI
+opens in a safe local-echo mode and shows a "no API key" banner. To point it at
+a non-default provider, use the in-app picker or `export DEEPTIDE_PROVIDER=…`
+(e.g. `deepseek`, `ollama`, `openai`, `gemini`).
 
 ---
 
