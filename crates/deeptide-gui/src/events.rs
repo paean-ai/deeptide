@@ -40,8 +40,10 @@ pub enum UiEvent {
         req_id: String,
         /// Tool name (e.g. `Write`, `Bash`).
         tool: String,
-        /// Short human preview of what the tool will do.
+        /// Short human preview of what the tool will do (raw input).
         preview: String,
+        /// Unified-diff body for Write/Edit tools, ready to render coloured.
+        diff: Option<String>,
     },
     /// The turn ended.
     Terminal(TerminalKind),

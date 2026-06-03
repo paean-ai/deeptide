@@ -22,8 +22,8 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use deeptide_core::{
     AgentEventCallback, AgentLoop, AgentLoopEvent, AgentTerminalEvent, AskOutcome,
-    ConversationMessage, MessageRole, PermissionAskCallback, SessionStore, StreamingEvent,
-    StreamingHandler, ToolCall, new_session_id,
+    ConversationMessage, DiffPreviewOptions, MessageRole, PermissionAskCallback, SessionStore,
+    StreamingEvent, StreamingHandler, ToolCall, new_session_id, render_tool_call_diff,
 };
 use eframe::egui;
 
@@ -186,16 +186,29 @@ fn worker_loop(
     let ctx_perm = ctx.clone();
     let interrupt_perm = Arc::clone(&interrupt);
     let pending_perm = Arc::clone(&pending);
+    let cwd_perm = cwd.clone();
     let ask_cb: PermissionAskCallback = Arc::new(move |tool_call: &ToolCall| -> AskOutcome {
         let req_id = tool_call.id.clone();
         let (decision_tx, decision_rx) = bounded::<AskOutcome>(1);
         if let Ok(mut map) = pending_perm.lock() {
             map.insert(req_id.clone(), decision_tx);
         }
+        // For Write/Edit, show the proposed change as a diff instead of raw JSON.
+        let diff = render_tool_call_diff(
+            &tool_call.name,
+            &tool_call.input,
+            &cwd_perm,
+            DiffPreviewOptions {
+                max_lines: 200,
+                context_lines: 3,
+            },
+        )
+        .map(|preview| preview.body);
         let _ = tx_perm.send(UiEvent::PermissionRequest {
             req_id: req_id.clone(),
             tool: tool_call.name.clone(),
             preview: permission_preview(tool_call),
+            diff,
         });
         ctx_perm.request_repaint();
         // Park until the UI answers; poll so a Stop/cancel can't hang us.

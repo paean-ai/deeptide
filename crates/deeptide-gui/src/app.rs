@@ -19,6 +19,9 @@ struct PendingPermission {
     req_id: String,
     tool: String,
     preview: String,
+    /// Unified-diff body for Write/Edit, rendered coloured instead of the raw
+    /// JSON preview when present.
+    diff: Option<String>,
 }
 
 /// One rendered item in the transcript.
@@ -144,10 +147,12 @@ impl App {
                     req_id,
                     tool,
                     preview,
+                    diff,
                 } => self.pending.push(PendingPermission {
                     req_id,
                     tool,
                     preview,
+                    diff,
                 }),
                 UiEvent::Terminal(kind) => {
                     self.running = false;
@@ -344,11 +349,16 @@ impl eframe::App for App {
                             .strong()
                             .color(egui::Color32::YELLOW),
                     );
-                    ui.label(
-                        egui::RichText::new(&pending.preview)
-                            .monospace()
-                            .color(egui::Color32::GRAY),
-                    );
+                    match &pending.diff {
+                        Some(diff) => render_diff(ui, diff),
+                        None => {
+                            ui.label(
+                                egui::RichText::new(&pending.preview)
+                                    .monospace()
+                                    .color(egui::Color32::GRAY),
+                            );
+                        }
+                    }
                     ui.horizontal(|ui| {
                         if ui.button("Allow").clicked() {
                             decision = Some((pending.req_id.clone(), AskOutcome::Allow));
@@ -459,6 +469,31 @@ fn render_bubble(ui: &mut egui::Ui, bubble: &Bubble, markdown_cache: &mut Common
             );
         }
     }
+}
+
+/// Render a unified-diff body with per-line colour (added green / removed red /
+/// hunk cyan / file headers dim) in a tight monospace block.
+fn render_diff(ui: &mut egui::Ui, body: &str) {
+    egui::ScrollArea::vertical()
+        .max_height(220.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for line in body.lines() {
+                let color = if line.starts_with("+++") || line.starts_with("---") {
+                    egui::Color32::GRAY
+                } else if line.starts_with('+') {
+                    egui::Color32::from_rgb(0x4e, 0xc9, 0x4e)
+                } else if line.starts_with('-') {
+                    egui::Color32::from_rgb(0xe0, 0x6c, 0x6c)
+                } else if line.starts_with("@@") {
+                    egui::Color32::from_rgb(0x4e, 0xb0, 0xc9)
+                } else {
+                    egui::Color32::GRAY
+                };
+                ui.label(egui::RichText::new(line).monospace().color(color));
+            }
+        });
 }
 
 /// Compact token count for the status bar (`1234` → `1.2k`, `1_200_000` → `1.2M`).
