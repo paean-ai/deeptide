@@ -294,6 +294,35 @@ fn repl_executes_help_command() {
     assert!(output.contains("/exit"));
     assert!(output.contains("/cost"));
     assert!(output.contains("/read"));
+    // /todo is registered and listed in help.
+    assert!(output.contains("/todo"));
+}
+
+#[test]
+fn repl_todo_command_reports_empty_then_lists_after_todowrite() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    // With no backlog, /todo explains how the list gets populated.
+    let empty = only_output(repl.submit("/todo"));
+    assert!(empty.contains("No active todos"), "got: {empty}");
+
+    // Drive the TodoWrite tool the way the agent would (it writes to the same
+    // global todo storage /todo reads), then /todo lists them.
+    use deeptide_core::{TodoWriteTool, Tool, ToolContext};
+    let _ = TodoWriteTool.call(
+        serde_json::json!({"todos": [
+            {"content": "write the parser", "status": "in_progress", "activeForm": "Writing the parser"},
+            {"content": "add tests", "status": "pending"}
+        ]}),
+        &ToolContext::new("."),
+    );
+    let listed = only_output(repl.submit("/todo"));
+    assert!(listed.contains("Writing the parser"), "got: {listed}");
+    assert!(listed.contains("add tests"), "got: {listed}");
+    assert!(
+        listed.contains("in progress") && listed.contains("pending"),
+        "got: {listed}"
+    );
 }
 
 #[test]

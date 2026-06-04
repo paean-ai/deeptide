@@ -562,6 +562,29 @@ impl ReplSession {
         CommandResult::Text(body)
     }
 
+    /// `/todo` (aliases `/todos`, `/tasklist`) — expand the TODO backlog the
+    /// status bar only summarizes as `todo N/M`. Read-only; the agent owns the
+    /// list via the `TodoWrite` tool.
+    fn execute_todo_command(&self) -> CommandResult {
+        let lines = crate::tools::todo_lines();
+        if lines.is_empty() {
+            return CommandResult::Text(String::from(
+                "No active todos. The agent populates this list with the TodoWrite tool as it works through a multi-step task.",
+            ));
+        }
+        let summary = crate::tools::todo_summary();
+        let mut body = format!(
+            "Todo backlog ({} in progress · {} pending · {} done):\n",
+            summary.in_progress, summary.pending, summary.completed
+        );
+        for line in lines {
+            body.push_str("  ");
+            body.push_str(&line);
+            body.push('\n');
+        }
+        CommandResult::Text(body.trim_end().to_owned())
+    }
+
     /// CLI-facing entry for `/import` — same arg grammar as the slash command
     /// (`<tool> [<id>|--latest] [--as memory|context]`). Returns the events the
     /// REPL would emit so the caller can render them identically.
@@ -1267,6 +1290,7 @@ impl ReplSession {
             "import" => return self.execute_import_command(args),
             "continue" | "handoff" => return self.execute_continue_command(args),
             "version" | "ver" => self.execute_version_command(),
+            "todo" | "todos" | "tasklist" => self.execute_todo_command(),
             "suggest" | "suggestions" => self.execute_suggest_command(args),
             "open" => self.execute_open_command(args),
             "paste" | "p" => self.execute_paste_command(args),
@@ -4848,6 +4872,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             ["ver"],
             "Show the running deeptide build (version, commit, date)",
             "/version",
+        ),
+        CommandCompletionSource::new(
+            "todo",
+            ["todos", "tasklist"],
+            "List the agent's current todo backlog (status-bar count, expanded)",
+            "/todo",
         ),
         CommandCompletionSource::new(
             "suggest",

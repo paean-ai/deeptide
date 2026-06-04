@@ -1108,6 +1108,7 @@ fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
                 "status",
                 "cost",
                 "usage",
+                "todo",
                 "reminder",
                 "goal",
             ],
