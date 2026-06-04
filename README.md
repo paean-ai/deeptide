@@ -213,6 +213,11 @@ tools, observes results, and adapts. Out of the box:
 - **Memory system** — persistent project memory across sessions
 - **Sub-agents from markdown** — define custom agents in your project
 - **Plan mode** — design before you code, get approval before execution
+- **Web research** — `/deep-seek <question>` uses the model's built-in
+  knowledge to propose likely official/canonical URLs, then verifies them with
+  `WebFetch`. Optional `BRAVE_SEARCH_API_KEY` / `SERPER_API_KEY` credentials
+  can improve source discovery, but are not required for URL-based research.
+  Sources are labeled `[verified]`, `[known]`, or `[unverified]`.
 
 The tool catalog, slash command set, hook event names, and model
 aliases are kept aligned with the macOS native DeepTide app via the

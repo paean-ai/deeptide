@@ -2167,7 +2167,8 @@ impl ReplSession {
     }
 
     /// Run a one-off agent pass over `prompt`, bounded to `max_turns` and
-    /// restricted to `allowed_tools` only, restoring both afterwards.
+    /// restricted to `allowed_tools` only, restoring both afterwards. This
+    /// intersects with any user-supplied restrictions instead of replacing them.
     ///
     /// The scoped tool allowlist is a real security boundary, not just a hint:
     /// `is_tool_permitted` gates dispatch, so a pass seeded with untrusted text
@@ -2181,10 +2182,9 @@ impl ReplSession {
         allowed_tools: &[&str],
     ) -> Vec<ReplEvent> {
         let prev_turns = self.agent_loop.set_max_turns(max_turns);
-        let (prev_allowed, prev_disallowed) = self.agent_loop.set_tool_restrictions(
-            Some(allowed_tools.iter().map(|t| (*t).to_string()).collect()),
-            Vec::new(),
-        );
+        let (prev_allowed, prev_disallowed) = self
+            .agent_loop
+            .set_tool_restrictions_intersecting(allowed_tools);
         let events = self
             .agent_loop
             .run(prompt)
@@ -2199,60 +2199,81 @@ impl ReplSession {
 
     /// `/deep-seek <question>` (aliases `/deepseek`, `/research`) — run a bounded
     /// web-research pass: decompose the question, search + fetch sources,
-    /// cross-check, and synthesize a cited answer. Restricted to read-only
-    /// research tools (no shell / file writes / config), so it's safe to point at
-    /// arbitrary questions whose answers pull in untrusted web content.
+    /// cross-check, and synthesize a cited answer. Restricted to web-only
+    /// research tools (no shell / local file reads / file writes / config), so
+    /// it's safe to point at arbitrary questions whose answers pull in untrusted
+    /// web content.
     fn execute_deep_seek_command(&mut self, args: &str) -> Vec<ReplEvent> {
         let question = args.trim();
         if question.is_empty() {
             return vec![ReplEvent::Output(String::from(
-                "Usage: /deep-seek <question>\n\nRuns a bounded web-research pass (search → \
-                 fetch → cross-check → cited synthesis). Needs a web-search backend — set \
-                 BRAVE_SEARCH_API_KEY or SERPER_API_KEY (WebFetch alone works without a key). \
-                 Sends your question and fetched page content to your configured model.",
+                "Usage: /deep-seek <question>\n\nRuns a bounded web-research pass. By default, \
+                 the model proposes likely official/canonical URLs from its built-in knowledge \
+                 and verifies them with WebFetch. Optional search backends (BRAVE_SEARCH_API_KEY \
+                 or SERPER_API_KEY) can improve source discovery. Sources are labeled as \
+                 [verified], [known], or [unverified]. Sends your question and fetched page \
+                 content to your configured model.",
             ))];
         }
+        // Evidence policy:
+        //
+        // `/deep-seek` is intentionally not a strict citation gate by default.
+        // LLMs often know stable canonical URLs (official docs, RFCs, crate docs,
+        // standards pages) and can use those as WebFetch targets without a search
+        // backend, which keeps the open-source default path cheap and simple.
+        // The important product contract is transparency: the final report must
+        // distinguish pages actually fetched this run from model-prior knowledge
+        // and from claims that remain unverified. A future `--strict` mode can
+        // hard-enforce "only cite successfully fetched URLs" once we plumb
+        // per-pass fetched-URL tracking into the event stream.
         let prompt = format!(
             "[deep research — execute once; do NOT create cron jobs, recurring jobs, or background loops]\n\n\
             You are running Deeptide's deep-research pass. Investigate this question thoroughly \
             and answer it with evidence:\n\n\
             QUESTION: {question}\n\n\
+            Evidence labels:\n\
+            - [verified]: you successfully retrieved and read the page with `WebFetch` in this pass.\n\
+            - [known]: a source URL or fact you know from model knowledge but did not fetch in this pass.\n\
+            - [unverified]: plausible but not confirmed by a fetched source or reliable model knowledge.\n\n\
             Method:\n\
             - Decompose the question into the specific sub-questions you must answer.\n\
-            - Use `WebSearch` to find relevant sources, then `WebFetch` to read the most \
-            promising ones in full — don't rely on search snippets alone.\n\
+            - First, use your built-in knowledge to identify likely official/canonical URLs \
+            and call `WebFetch` on them. Prefer stable sources such as official docs, standards, \
+            source repositories, release notes, filings, papers, and primary announcements.\n\
+            - If a WebSearch backend is configured, you may use `WebSearch` to improve source \
+            discovery; then call `WebFetch` on the promising results. Never rely on search \
+            snippets alone.\n\
+            - If you cannot identify exact URLs and WebSearch is unavailable, say that source \
+            discovery is limited and make a best-effort answer from fetched URLs and your own \
+            knowledge, clearly marked as unverified where appropriate.\n\
             - Corroborate each key claim across at least two independent sources; note where \
             sources disagree or where evidence is thin.\n\
             - Prefer primary and recent sources; be explicit about publication dates when \
             recency matters.\n\n\
             Output a single final report with:\n\
             - A direct answer up top (2–4 sentences).\n\
-            - The key findings as bullets, each with an inline source URL.\n\
+            - The key findings as bullets, each with an inline source URL and an evidence label \
+            (`[verified]`, `[known]`, or `[unverified]`).\n\
             - A short 'Confidence & gaps' note: what is well-supported, what is uncertain, \
-            and what you could not verify.\n\
-            - A 'Sources' list of the URLs you actually read.\n\n\
+            and which important sources were not fetched.\n\
+            - A 'Sources' list grouped by evidence label: `[verified]` URLs fetched this pass, \
+            `[known]` canonical URLs not fetched, and `[unverified]` attempted or uncertain URLs.\n\n\
             Rules:\n\
-            - Research only: do NOT edit files, run shell commands, or change settings/config.\n\
-            - If no web-search backend is configured, say so plainly and answer only from what \
-            `WebFetch` and your own knowledge can support, flagging it as unverified.\n\
-            - Do not fabricate URLs or citations; cite only pages you actually retrieved."
+            - Research only: do NOT read local files, edit files, run shell commands, or change settings/config.\n\
+            - Do not pretend a source was fetched. If you did not successfully retrieve a URL \
+            with `WebFetch`, label it `[known]` or `[unverified]`, not `[verified]`.\n\
+            - Do not fabricate URLs. If a likely URL fails to fetch, mention it only as an \
+            attempted or unverified source."
         );
         let mut events = vec![ReplEvent::Output(format!(
-            "[deep-seek] researching: {question}\n(searches the web and sends your question + \
-             fetched page content to your configured model; this can take a bit)…"
+            "[deep-seek] researching: {question}\n(fetches likely sources and sends your question \
+             + fetched page content to your configured model; optional WebSearch may be used when \
+             configured)…"
         ))];
         events.extend(self.run_bounded_pass(
             &prompt,
             DEEP_SEEK_MAX_TURNS,
-            &[
-                "WebSearch",
-                "WebFetch",
-                "Agent",
-                "MemorySearch",
-                "Read",
-                "Grep",
-                "Glob",
-            ],
+            &["WebSearch", "WebFetch"],
         ));
         events
     }

@@ -1175,10 +1175,17 @@ fn deep_seek_without_a_question_shows_usage() {
     let mut repl = ReplSession::new(Box::new(StaticBackend));
     let out = only_output(repl.submit("/deep-seek"));
     assert!(out.contains("Usage: /deep-seek"), "got: {out}");
-    // The usage text should orient the user to the web-search key requirement.
+    // The usage text should make clear that search keys are optional, not the
+    // default dependency for open-source users.
     assert!(
-        out.contains("BRAVE_SEARCH_API_KEY") || out.contains("SERPER_API_KEY"),
-        "usage should mention the search backend keys: {out}"
+        out.contains("built-in knowledge")
+            && out.contains("WebFetch")
+            && out.contains("BRAVE_SEARCH_API_KEY")
+            && out.contains("SERPER_API_KEY")
+            && out.contains("[verified]")
+            && out.contains("[known]")
+            && out.contains("[unverified]"),
+        "usage should mention the default URL+fetch flow and optional search backends: {out}"
     );
 }
 
@@ -1230,6 +1237,97 @@ fn deep_seek_blocks_non_research_tools() {
     );
 }
 
+#[test]
+fn deep_seek_blocks_local_read_tools() {
+    let mut repl = ReplSession::new(Box::new(ToolProbeBackend::new(
+        "Read",
+        serde_json::json!({"file_path": "notes.txt"}),
+    )));
+    let _ = repl.submit("/deep-seek probe local file isolation");
+    assert!(
+        tool_rejection_recorded(&repl),
+        "Read should be blocked by the web-only research allowlist"
+    );
+}
+
+#[test]
+fn deep_seek_blocks_subagents() {
+    let mut repl = ReplSession::new(Box::new(ToolProbeBackend::new(
+        "Agent",
+        serde_json::json!({
+            "subagent_type": "general-purpose",
+            "description": "try to escape research mode",
+            "prompt": "run a shell command",
+        }),
+    )));
+    let _ = repl.submit("/deep-seek probe subagent isolation");
+    assert!(
+        tool_rejection_recorded(&repl),
+        "Agent should be blocked by the web-only research allowlist"
+    );
+}
+
+#[test]
+fn deep_seek_preserves_user_disallowed_tools() {
+    let mut repl = ReplSession::new(Box::new(ToolProbeBackend::new(
+        "WebFetch",
+        serde_json::json!({"url": "https://example.com"}),
+    )))
+    .with_tool_restrictions(None, vec![String::from("WebFetch")]);
+    let _ = repl.submit("/deep-seek probe user policy");
+    assert!(
+        tool_rejection_recorded(&repl),
+        "WebFetch should stay blocked when the user disallowed it before /deep-seek"
+    );
+}
+
+#[test]
+fn deep_seek_prompt_requires_evidence_labels() {
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mut repl = ReplSession::new(Box::new(CapturePromptBackend {
+        captured: captured.clone(),
+    }));
+    let _ = repl.submit("/deep-seek compare rust async traits");
+
+    let prompt = captured.lock().expect("capture lock").clone();
+    assert!(
+        prompt.contains("[verified]")
+            && prompt.contains("[known]")
+            && prompt.contains("[unverified]"),
+        "prompt should define all evidence labels: {prompt}"
+    );
+    assert!(
+        prompt.contains("Do not pretend a source was fetched"),
+        "prompt should prohibit representing unfetched sources as verified: {prompt}"
+    );
+}
+
+fn tool_rejection_recorded(repl: &ReplSession) -> bool {
+    repl.agent_loop().messages().iter().any(|m| {
+        m.tool_results
+            .iter()
+            .any(|r| r.is_error && r.content.contains("not available to this agent"))
+    })
+}
+
+struct CapturePromptBackend {
+    captured: Arc<Mutex<String>>,
+}
+
+impl AgentBackend for CapturePromptBackend {
+    fn respond(&mut self, request: AgentRequest) -> Result<AgentResponse, String> {
+        let prompt = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, deeptide_core::MessageRole::User))
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        *self.captured.lock().expect("capture lock") = prompt;
+        Ok(AgentResponse::text("captured"))
+    }
+}
+
 fn only_output(events: Vec<ReplEvent>) -> String {
     match events.as_slice() {
         [ReplEvent::Output(output)] => output.clone(),
@@ -1259,6 +1357,41 @@ fn git_stdout<const N: usize>(cwd: &std::path::Path, args: [&str; N]) -> String 
         .expect("git stdout should be utf8")
         .trim()
         .to_owned()
+}
+
+struct ToolProbeBackend {
+    calls: usize,
+    tool_name: String,
+    input: serde_json::Value,
+}
+
+impl ToolProbeBackend {
+    fn new(tool_name: impl Into<String>, input: serde_json::Value) -> Self {
+        Self {
+            calls: 0,
+            tool_name: tool_name.into(),
+            input,
+        }
+    }
+}
+
+impl AgentBackend for ToolProbeBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: format!("trying {}", self.tool_name),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    format!("toolu_{}", self.tool_name.to_ascii_lowercase()),
+                    self.tool_name.clone(),
+                    self.input.clone(),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done researching"))
+        }
+    }
 }
 
 struct StaticBackend;
