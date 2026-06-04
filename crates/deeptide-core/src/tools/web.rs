@@ -56,7 +56,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search the web using configured Brave Search or Serper credentials."
+        "Search the web using optional Brave Search or Serper credentials."
     }
 
     fn is_read_only(&self) -> bool {
@@ -85,28 +85,41 @@ fn web_search_with_environment(
 
     let allowed_domains = extract_string_array(input.get("allowed_domains"));
     let blocked_domains = extract_string_array(input.get("blocked_domains"));
+    let mut provider_errors = Vec::new();
 
     if let Some(api_key) = env
         .get("BRAVE_SEARCH_API_KEY")
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-        && let Ok(results) = search_brave(query, api_key, &allowed_domains, &blocked_domains)
     {
-        return ToolResult::text(results);
+        match search_brave(query, api_key, &allowed_domains, &blocked_domains) {
+            Ok(results) => return ToolResult::text(results),
+            Err(error) => provider_errors.push(format!("Brave Search: {error}")),
+        }
     }
 
     if let Some(api_key) = env
         .get("SERPER_API_KEY")
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-        && let Ok(results) = search_serper(query, api_key, &allowed_domains, &blocked_domains)
     {
-        return ToolResult::text(results);
+        match search_serper(query, api_key, &allowed_domains, &blocked_domains) {
+            Ok(results) => return ToolResult::text(results),
+            Err(error) => provider_errors.push(format!("Serper: {error}")),
+        }
     }
 
     let encoded = encode_query_component(query);
+
+    if !provider_errors.is_empty() {
+        return ToolResult::error(format!(
+            "Configured WebSearch backend(s) failed:\n  - {}\n\nCheck the configured endpoint/key, or provide specific URLs and use WebFetch. You can also fetch a search-results page directly:\n  - https://html.duckduckgo.com/html/?q={encoded}\n  - https://www.google.com/search?q={encoded}",
+            provider_errors.join("\n  - ")
+        ));
+    }
+
     ToolResult::error(format!(
-        "WebSearch requires an API key. Set one of:\n  export BRAVE_SEARCH_API_KEY=<key>   # https://search.brave.com (2000 free/month)\n  export SERPER_API_KEY=<key>          # https://serper.dev (Google results)\n\nAlternative: use WebFetch to retrieve search results directly:\n  - https://html.duckduckgo.com/html/?q={encoded}\n  - https://www.google.com/search?q={encoded}"
+        "WebSearch has no configured search backend. Optional backends:\n  export BRAVE_SEARCH_API_KEY=<key>    # Brave Search API\n  export SERPER_API_KEY=<key>          # Serper / Google results\n\nFor /deep-seek, this is not fatal: the model can propose likely official/canonical URLs from its built-in knowledge and verify them with WebFetch. To discover sources without a backend, fetch a search-results page directly:\n  - https://html.duckduckgo.com/html/?q={encoded}\n  - https://www.google.com/search?q={encoded}"
     ))
 }
 
@@ -329,6 +342,9 @@ fn extract_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// URL-encode `query` as a `q=` query-parameter value, so the WebFetch fallback
+/// URLs below point at a real search-results page. Falls back to the raw query
+/// if URL construction somehow fails (never panics).
 fn encode_query_component(query: &str) -> String {
     let Ok(mut url) = Url::parse("https://example.invalid/") else {
         return query.to_owned();
