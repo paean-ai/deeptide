@@ -1741,6 +1741,8 @@ fn discover_skills_lists_every_builtin_skill_as_json() {
         "batch",
         "publish",
         "update-config",
+        "explain",
+        "changelog",
     ] {
         assert!(
             names.contains(&required),

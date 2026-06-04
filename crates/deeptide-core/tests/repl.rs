@@ -294,8 +294,10 @@ fn repl_executes_help_command() {
     assert!(output.contains("/exit"));
     assert!(output.contains("/cost"));
     assert!(output.contains("/read"));
-    // /todo is registered and listed in help.
+    // /todo, /explain, /changelog are registered and listed in help.
     assert!(output.contains("/todo"));
+    assert!(output.contains("/explain"));
+    assert!(output.contains("/changelog"));
 }
 
 #[test]
@@ -1402,6 +1404,46 @@ fn custom_command_appears_in_help_and_completion() {
         help.contains("/standup"),
         "custom command should list in help: {help}"
     );
+}
+
+#[test]
+fn explain_without_a_target_shows_usage() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let out = only_output(repl.submit("/explain"));
+    assert!(out.contains("Usage: /explain"), "got: {out}");
+}
+
+#[test]
+fn explain_expands_the_skill_prompt_with_the_target() {
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mut repl = ReplSession::new(Box::new(CapturePromptBackend {
+        captured: captured.clone(),
+    }));
+    let _ = repl.submit("/explain src/repl.rs");
+    let prompt = captured.lock().expect("lock").clone();
+    assert!(
+        prompt.contains("src/repl.rs"),
+        "target substituted: {prompt}"
+    );
+    assert!(
+        prompt.contains("read-only") || prompt.contains("do NOT edit"),
+        "explain must be framed read-only: {prompt}"
+    );
+}
+
+#[test]
+fn changelog_expands_the_skill_prompt() {
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mut repl = ReplSession::new(Box::new(CapturePromptBackend {
+        captured: captured.clone(),
+    }));
+    let _ = repl.submit("/changelog v1.0.0..HEAD");
+    let prompt = captured.lock().expect("lock").clone();
+    assert!(
+        prompt.contains("v1.0.0..HEAD"),
+        "range substituted: {prompt}"
+    );
+    assert!(prompt.contains("git log"), "should drive git log: {prompt}");
 }
 
 fn tool_rejection_recorded(repl: &ReplSession) -> bool {

@@ -1308,6 +1308,8 @@ impl ReplSession {
             "commit" => return self.execute_commit_command(args),
             "review" => return self.execute_review_command(args),
             "simplify" => return self.execute_simplify_command(args),
+            "explain" => return self.execute_explain_command(args),
+            "changelog" => return self.execute_changelog_command(args),
             "skills" | "skill" => self.execute_skills_command(args),
             "reminder" | "anchor" | "reorient" => return self.execute_reminder_command(args),
             "dream" => return self.execute_dream_command(args),
@@ -2991,16 +2993,31 @@ impl ReplSession {
     }
 
     fn execute_commit_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        self.dispatch_skill_command("commit", "/commit", "commit", args)
+    }
+
+    /// Expand a built-in skill via the Skill tool and run the resulting prompt as
+    /// a turn. Shared by the thin skill-backed slash commands (`/commit`,
+    /// `/explain`, `/changelog`, …): `skill` is the registry skill name,
+    /// `command` the user-facing name for error messages, and `label` the verb
+    /// shown in the "Dispatching …" status line.
+    fn dispatch_skill_command(
+        &mut self,
+        skill: &str,
+        command: &str,
+        label: &str,
+        args: &str,
+    ) -> Vec<ReplEvent> {
         let result = self.tool_registry.call(
             "Skill",
-            serde_json::json!({"skill": "commit", "args": args}),
+            serde_json::json!({"skill": skill, "args": args}),
             &self.tool_context,
         );
         if result.is_error {
-            return vec![ReplEvent::Output(format!("/commit: {}", result.content))];
+            return vec![ReplEvent::Output(format!("{command}: {}", result.content))];
         }
-        let mut events = vec![ReplEvent::Output(String::from(
-            "Dispatching commit skill to the model.",
+        let mut events = vec![ReplEvent::Output(format!(
+            "Dispatching {label} skill to the model."
         ))];
         events.extend(
             self.agent_loop
@@ -3009,6 +3026,21 @@ impl ReplSession {
                 .filter_map(agent_event_to_repl_event),
         );
         events
+    }
+
+    /// `/explain <file|symbol|area>` — read-only codebase explanation.
+    fn execute_explain_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        if args.trim().is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "Usage: /explain <file path, symbol, or area to explain>",
+            ))];
+        }
+        self.dispatch_skill_command("explain", "/explain", "explain", args)
+    }
+
+    /// `/changelog [range]` — draft release notes from the git history.
+    fn execute_changelog_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        self.dispatch_skill_command("changelog", "/changelog", "changelog", args)
     }
 
     fn execute_review_command(&mut self, args: &str) -> Vec<ReplEvent> {
@@ -5030,6 +5062,18 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             Vec::<&str>::new(),
             "Review changed code for reuse, quality, and efficiency",
             "/simplify [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "explain",
+            Vec::<&str>::new(),
+            "Explain a file, symbol, or area of the codebase (read-only)",
+            "/explain <file|symbol|area>",
+        ),
+        CommandCompletionSource::new(
+            "changelog",
+            Vec::<&str>::new(),
+            "Draft release notes from the git history",
+            "/changelog [git-range]",
         ),
         CommandCompletionSource::new(
             "skills",
