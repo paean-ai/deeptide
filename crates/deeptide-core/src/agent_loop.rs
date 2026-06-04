@@ -706,8 +706,18 @@ impl AgentLoop {
     }
 
     pub fn run(&mut self, user_input: impl Into<String>) -> Vec<AgentLoopEvent> {
-        let user_input = user_input.into();
+        let events = self.run_inner(user_input.into());
+        // Stop hooks fire once the agent has finished responding to this turn,
+        // regardless of how the loop exited (normal, max-turns, blocked, error).
+        // Observational — the result is discarded, so a Stop hook can never wedge
+        // the REPL. Enables turn-end automation (auto-format/commit/notify).
+        if self.hooks.has_hooks(crate::hooks::HookEvent::Stop) {
+            let _ = self.hooks.run(crate::hooks::HookEvent::Stop, None, None);
+        }
+        events
+    }
 
+    fn run_inner(&mut self, user_input: String) -> Vec<AgentLoopEvent> {
         // UserPromptSubmit hooks fire before the prompt is processed. They are
         // observational (the result is discarded), matching the Swift
         // implementation; the prompt text is passed as the hook input.
@@ -1257,6 +1267,18 @@ impl AgentLoop {
             "Sub-agent task: {}\n\n{}",
             invocation.description, invocation.prompt
         ));
+
+        // SubagentStop fires on the PARENT's hook engine once the sub-agent's
+        // own loop has returned (the sub-agent runs with no hooks of its own).
+        // The sub-agent's task description is passed as the hook input so a hook
+        // can tell which sub-agent finished. Observational — result discarded.
+        if self.hooks.has_hooks(crate::hooks::HookEvent::SubagentStop) {
+            let _ = self.hooks.run(
+                crate::hooks::HookEvent::SubagentStop,
+                None,
+                Some(&invocation.description),
+            );
+        }
 
         Some(render_subagent_result(
             invocation.definition.kind,

@@ -75,6 +75,10 @@ pub struct SettingsHooks {
     pub session_end: Option<Vec<HookEntry>>,
     #[serde(rename = "PreCompact", skip_serializing_if = "Option::is_none")]
     pub pre_compact: Option<Vec<HookEntry>>,
+    #[serde(rename = "Stop", skip_serializing_if = "Option::is_none")]
+    pub stop: Option<Vec<HookEntry>>,
+    #[serde(rename = "SubagentStop", skip_serializing_if = "Option::is_none")]
+    pub subagent_stop: Option<Vec<HookEntry>>,
 }
 
 // ── MCP server ────────────────────────────────────────────────────────────────
@@ -616,7 +620,9 @@ impl ConfigStore {
                 + hooks.user_prompt_submit.as_ref().map_or(0, Vec::len)
                 + hooks.session_start.as_ref().map_or(0, Vec::len)
                 + hooks.session_end.as_ref().map_or(0, Vec::len)
-                + hooks.pre_compact.as_ref().map_or(0, Vec::len);
+                + hooks.pre_compact.as_ref().map_or(0, Vec::len)
+                + hooks.stop.as_ref().map_or(0, Vec::len)
+                + hooks.subagent_stop.as_ref().map_or(0, Vec::len);
             lines.push(kv("hooks", &format!("{count} entries")));
         }
 

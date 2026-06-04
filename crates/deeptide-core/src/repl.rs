@@ -2674,6 +2674,12 @@ impl ReplSession {
         if let Some(ref v) = hooks.pre_compact {
             add("PreCompact", v);
         }
+        if let Some(ref v) = hooks.stop {
+            add("Stop", v);
+        }
+        if let Some(ref v) = hooks.subagent_stop {
+            add("SubagentStop", v);
+        }
 
         if lines.len() == 1 {
             lines.push(String::from("  (all hooks are disabled)"));
