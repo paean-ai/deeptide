@@ -2131,7 +2131,7 @@ fn builtin_skill_descriptions() -> String {
         .join("\n")
 }
 
-fn expand_skill_prompt(prompt: &str, args: Option<&str>) -> String {
+pub(crate) fn expand_skill_prompt(prompt: &str, args: Option<&str>) -> String {
     let Some(args) = args.filter(|value| !value.is_empty()) else {
         return prompt.replace("$ARGUMENTS", "");
     };

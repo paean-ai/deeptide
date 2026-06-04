@@ -1346,6 +1346,13 @@ impl ReplSession {
             // synchronously (`--run`). See `execute_toolchain_command`.
             "test" | "tests" => self.execute_toolchain_command(args, ToolchainAction::Test),
             "lint" | "check" => self.execute_toolchain_command(args, ToolchainAction::Lint),
+            // A user-authored markdown command (`<name>.md` under a commands/
+            // dir) expands to a prompt and runs as a normal turn. Checked only
+            // after every built-in handler, so a built-in always wins over a
+            // same-named file (no shadowing of core commands).
+            _ if find_command_file(&self.tool_context.cwd, &name).is_some() => {
+                return self.execute_custom_command(&name, args);
+            }
             _ => CommandResult::Text(crate::commands::render_unknown_command(
                 &name,
                 &context.all_commands(),
@@ -1353,6 +1360,37 @@ impl ReplSession {
         };
 
         command_result_to_repl_events(result)
+    }
+
+    /// Run a user-authored markdown slash command: read `<name>.md`, drop its
+    /// YAML frontmatter, substitute `$ARGUMENTS` / `$1..$11` from the command
+    /// tail (reusing the built-in skill expander), and submit the result as a
+    /// normal agent turn. The body becomes a *prompt*, not a nested slash
+    /// command, so there's no command-recursion to guard against.
+    fn execute_custom_command(&mut self, name: &str, args: &str) -> Vec<ReplEvent> {
+        let Some(path) = find_command_file(&self.tool_context.cwd, name) else {
+            // Raced away between dispatch and here; fall back to the usage line.
+            return vec![ReplEvent::Output(crate::commands::render_unknown_command(
+                name,
+                &self.command_context().all_commands(),
+            ))];
+        };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return vec![ReplEvent::Output(format!(
+                "Could not read custom command `/{name}` at {}.",
+                path.display()
+            ))];
+        };
+        let body = crate::memory::strip_frontmatter(&raw);
+        if body.trim().is_empty() {
+            return vec![ReplEvent::Output(format!(
+                "Custom command `/{name}` ({}) has no body to run.",
+                path.display()
+            ))];
+        }
+        let args = args.trim();
+        let expanded = crate::tools::expand_skill_prompt(&body, (!args.is_empty()).then_some(args));
+        self.submit(&expanded)
     }
 
     fn execute_read_command(&self, args: &str) -> CommandResult {
@@ -4128,11 +4166,33 @@ impl ReplSession {
         let set_cost_display_enabled = Arc::clone(&self.cost_display_enabled);
         let summary = self.agent_loop.cost_tracker().summary();
         let cwd = self.tool_context.cwd.clone();
+        let commands_cwd = cwd.clone();
 
         CommandContext::builder()
             .clear_conversation(|| Some(String::new()))
             .compact_conversation(|| {})
-            .all_commands(repl_command_sources)
+            // Built-in command list plus any user-authored markdown commands
+            // discovered for this cwd, so the latter tab-complete and show in
+            // /help just like the built-ins.
+            .all_commands(move || {
+                let mut sources = repl_command_sources();
+                for name in discover_command_names(&commands_cwd) {
+                    // A custom command never shadows a built-in in completion.
+                    if sources
+                        .iter()
+                        .any(|s| s.name == name || s.aliases.iter().any(|a| a == &name))
+                    {
+                        continue;
+                    }
+                    sources.push(CommandCompletionSource::new(
+                        name,
+                        Vec::<&str>::new(),
+                        "Custom command (project .deeptide/commands)",
+                        "",
+                    ));
+                }
+                sources
+            })
             .cost_summary(move || summary.clone())
             .cost_display_enabled(move || cost_display_enabled.load(Ordering::SeqCst))
             .set_cost_display_enabled(move |enabled| {
@@ -5681,6 +5741,68 @@ fn discover_agent_names(cwd: &std::path::Path) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+/// Directories searched for user-authored slash commands (`<name>.md`), in
+/// precedence order: project-scoped config, global config, in-repo `.deeptide`,
+/// then home `.deeptide`. Mirrors the agent-discovery layout so a project can
+/// ship commands alongside its agents.
+fn command_dirs(cwd: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![
+        MemorySystem::tide_config_dir()
+            .join("projects")
+            .join(MemorySystem::project_slug(cwd))
+            .join("commands"),
+        MemorySystem::tide_config_dir().join("commands"),
+        cwd.join(".deeptide").join("commands"),
+    ];
+    if let Some(home) = home_dir() {
+        dirs.push(home.join(".deeptide").join("commands"));
+    }
+    dirs
+}
+
+/// Names of all discoverable custom slash commands for `cwd`, deduped + sorted.
+/// Used to register them for tab-completion and `/help`.
+fn discover_command_names(cwd: &std::path::Path) -> Vec<String> {
+    let mut names = Vec::new();
+    for dir in command_dirs(cwd) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                names.push(stem.to_owned());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Resolve a custom-command name to its `.md` file, honouring `command_dirs`
+/// precedence (first match wins). Command names are restricted to a safe
+/// charset so a `/..%2f`-style name can't escape the commands directory.
+fn find_command_file(cwd: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    for dir in command_dirs(cwd) {
+        let candidate = dir.join(format!("{name}.md"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn home_dir() -> Option<std::path::PathBuf> {
