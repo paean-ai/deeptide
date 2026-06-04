@@ -1170,6 +1170,164 @@ fn dream_unknown_subcommand_shows_usage_hint() {
     assert!(out.contains("Usage:") && out.contains("/dream"));
 }
 
+#[test]
+fn deep_seek_without_a_question_shows_usage() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let out = only_output(repl.submit("/deep-seek"));
+    assert!(out.contains("Usage: /deep-seek"), "got: {out}");
+    // The usage text should make clear that search keys are optional, not the
+    // default dependency for open-source users.
+    assert!(
+        out.contains("built-in knowledge")
+            && out.contains("WebFetch")
+            && out.contains("BRAVE_SEARCH_API_KEY")
+            && out.contains("SERPER_API_KEY")
+            && out.contains("[verified]")
+            && out.contains("[known]")
+            && out.contains("[unverified]"),
+        "usage should mention the default URL+fetch flow and optional search backends: {out}"
+    );
+}
+
+#[test]
+fn deep_seek_emits_a_research_status_then_runs_the_pass() {
+    // StaticBackend returns a plain final answer (no tool calls), so the pass
+    // completes in one turn. We assert the leading status line names the
+    // question and that the synthesized answer follows.
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let events = repl.submit("/deep-seek what is the capital of France");
+    let joined = events
+        .iter()
+        .filter_map(|e| match e {
+            ReplEvent::Output(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("[deep-seek] researching: what is the capital of France"),
+        "should emit a research status line: {joined}"
+    );
+    assert!(
+        joined.contains("assistant reply"),
+        "the pass's synthesized answer should follow: {joined}"
+    );
+}
+
+#[test]
+fn deep_seek_blocks_non_research_tools() {
+    // The pass restricts tools to a read-only research allowlist. A backend that
+    // tries a Bash shell (NOT on the allowlist) on turn 1 must see it rejected by
+    // the gate — proving the allowlist is enforced, not advisory, even though
+    // imported web content could try to coax the model into a shell. (We probe
+    // Bash rather than WebSearch so the test stays offline/deterministic
+    // regardless of whether a search API key happens to be set in the env.)
+    let mut repl = ReplSession::new(Box::new(ShellProbeBackend::default()));
+    let _ = repl.submit("/deep-seek probe the tool gate");
+    // The rejection is fed back into the conversation as a tool result (not a
+    // user-visible REPL output), so inspect the recorded messages for it.
+    let rejected = repl.agent_loop().messages().iter().any(|m| {
+        m.tool_results
+            .iter()
+            .any(|r| r.is_error && r.content.contains("not available to this agent"))
+    });
+    assert!(
+        rejected,
+        "Bash should be blocked by the research allowlist (no rejection tool-result found)"
+    );
+}
+
+#[test]
+fn deep_seek_blocks_local_read_tools() {
+    let mut repl = ReplSession::new(Box::new(ToolProbeBackend::new(
+        "Read",
+        serde_json::json!({"file_path": "notes.txt"}),
+    )));
+    let _ = repl.submit("/deep-seek probe local file isolation");
+    assert!(
+        tool_rejection_recorded(&repl),
+        "Read should be blocked by the web-only research allowlist"
+    );
+}
+
+#[test]
+fn deep_seek_blocks_subagents() {
+    let mut repl = ReplSession::new(Box::new(ToolProbeBackend::new(
+        "Agent",
+        serde_json::json!({
+            "subagent_type": "general-purpose",
+            "description": "try to escape research mode",
+            "prompt": "run a shell command",
+        }),
+    )));
+    let _ = repl.submit("/deep-seek probe subagent isolation");
+    assert!(
+        tool_rejection_recorded(&repl),
+        "Agent should be blocked by the web-only research allowlist"
+    );
+}
+
+#[test]
+fn deep_seek_preserves_user_disallowed_tools() {
+    let mut repl = ReplSession::new(Box::new(ToolProbeBackend::new(
+        "WebFetch",
+        serde_json::json!({"url": "https://example.com"}),
+    )))
+    .with_tool_restrictions(None, vec![String::from("WebFetch")]);
+    let _ = repl.submit("/deep-seek probe user policy");
+    assert!(
+        tool_rejection_recorded(&repl),
+        "WebFetch should stay blocked when the user disallowed it before /deep-seek"
+    );
+}
+
+#[test]
+fn deep_seek_prompt_requires_evidence_labels() {
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mut repl = ReplSession::new(Box::new(CapturePromptBackend {
+        captured: captured.clone(),
+    }));
+    let _ = repl.submit("/deep-seek compare rust async traits");
+
+    let prompt = captured.lock().expect("capture lock").clone();
+    assert!(
+        prompt.contains("[verified]")
+            && prompt.contains("[known]")
+            && prompt.contains("[unverified]"),
+        "prompt should define all evidence labels: {prompt}"
+    );
+    assert!(
+        prompt.contains("Do not pretend a source was fetched"),
+        "prompt should prohibit representing unfetched sources as verified: {prompt}"
+    );
+}
+
+fn tool_rejection_recorded(repl: &ReplSession) -> bool {
+    repl.agent_loop().messages().iter().any(|m| {
+        m.tool_results
+            .iter()
+            .any(|r| r.is_error && r.content.contains("not available to this agent"))
+    })
+}
+
+struct CapturePromptBackend {
+    captured: Arc<Mutex<String>>,
+}
+
+impl AgentBackend for CapturePromptBackend {
+    fn respond(&mut self, request: AgentRequest) -> Result<AgentResponse, String> {
+        let prompt = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, deeptide_core::MessageRole::User))
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        *self.captured.lock().expect("capture lock") = prompt;
+        Ok(AgentResponse::text("captured"))
+    }
+}
+
 fn only_output(events: Vec<ReplEvent>) -> String {
     match events.as_slice() {
         [ReplEvent::Output(output)] => output.clone(),
@@ -1201,6 +1359,41 @@ fn git_stdout<const N: usize>(cwd: &std::path::Path, args: [&str; N]) -> String 
         .to_owned()
 }
 
+struct ToolProbeBackend {
+    calls: usize,
+    tool_name: String,
+    input: serde_json::Value,
+}
+
+impl ToolProbeBackend {
+    fn new(tool_name: impl Into<String>, input: serde_json::Value) -> Self {
+        Self {
+            calls: 0,
+            tool_name: tool_name.into(),
+            input,
+        }
+    }
+}
+
+impl AgentBackend for ToolProbeBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: format!("trying {}", self.tool_name),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    format!("toolu_{}", self.tool_name.to_ascii_lowercase()),
+                    self.tool_name.clone(),
+                    self.input.clone(),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done researching"))
+        }
+    }
+}
+
 struct StaticBackend;
 
 impl AgentBackend for StaticBackend {
@@ -1225,6 +1418,32 @@ impl AgentBackend for EchoUserBackend {
             .map(|message| message.content.as_str())
             .unwrap_or_default();
         Ok(AgentResponse::text(format!("echo: {prompt}")))
+    }
+}
+
+/// Tries a Bash shell call on turn 1, then finishes. Used to prove the
+/// `/deep-seek` research allowlist rejects tools outside it.
+#[derive(Default)]
+struct ShellProbeBackend {
+    calls: usize,
+}
+
+impl AgentBackend for ShellProbeBackend {
+    fn respond(&mut self, _request: AgentRequest) -> Result<AgentResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            Ok(AgentResponse {
+                content: String::from("let me check the shell"),
+                usage: None,
+                tool_calls: vec![ToolCall::new(
+                    "toolu_bash",
+                    "Bash",
+                    serde_json::json!({"command": "echo hi"}),
+                )],
+            })
+        } else {
+            Ok(AgentResponse::text("done researching"))
+        }
     }
 }
 

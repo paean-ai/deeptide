@@ -294,6 +294,12 @@ const DEFAULT_DREAM_CADENCE: usize = 25;
 /// from blocking on many model round-trips before the REPL returns.
 const CONSOLIDATION_MAX_TURNS: usize = 8;
 
+/// Turn budget for a `/deep-seek` research pass. Higher than the consolidation
+/// cap because real research fans out across several search → fetch → cross-check
+/// rounds before it can synthesize, but still bounded so a runaway can't loop
+/// indefinitely (and so the user keeps an interrupt point).
+const DEEP_SEEK_MAX_TURNS: usize = 24;
+
 impl Default for DreamSchedule {
     fn default() -> Self {
         Self {
@@ -1281,6 +1287,9 @@ impl ReplSession {
             "skills" | "skill" => self.execute_skills_command(args),
             "reminder" | "anchor" | "reorient" => return self.execute_reminder_command(args),
             "dream" => return self.execute_dream_command(args),
+            "deep-seek" | "deepseek" | "research" => {
+                return self.execute_deep_seek_command(args);
+            }
             "cron" => self.execute_cron_command(args),
             "goal" | "objective" => return self.execute_goal_command(args),
             "cache" | "kvcache" | "manifest" => self.execute_cache_command(args),
@@ -2154,14 +2163,28 @@ impl ReplSession {
     /// `MemorySearch` / `MemoryWrite` — never run a shell, edit files, or touch
     /// settings/cron/provider config — instead of relying on prose guardrails.
     fn run_memory_consolidation(&mut self, prompt: &str, max_turns: usize) -> Vec<ReplEvent> {
+        self.run_bounded_pass(prompt, max_turns, &["MemorySearch", "MemoryWrite"])
+    }
+
+    /// Run a one-off agent pass over `prompt`, bounded to `max_turns` and
+    /// restricted to `allowed_tools` only, restoring both afterwards. This
+    /// intersects with any user-supplied restrictions instead of replacing them.
+    ///
+    /// The scoped tool allowlist is a real security boundary, not just a hint:
+    /// `is_tool_permitted` gates dispatch, so a pass seeded with untrusted text
+    /// (an imported transcript, or web content pulled in by `/deep-seek`) can
+    /// only reach the tools the caller named — never a shell, file edit, or
+    /// settings/cron/provider mutation, even if that text tries to prompt-inject.
+    fn run_bounded_pass(
+        &mut self,
+        prompt: &str,
+        max_turns: usize,
+        allowed_tools: &[&str],
+    ) -> Vec<ReplEvent> {
         let prev_turns = self.agent_loop.set_max_turns(max_turns);
-        let (prev_allowed, prev_disallowed) = self.agent_loop.set_tool_restrictions(
-            Some(vec![
-                String::from("MemorySearch"),
-                String::from("MemoryWrite"),
-            ]),
-            Vec::new(),
-        );
+        let (prev_allowed, prev_disallowed) = self
+            .agent_loop
+            .set_tool_restrictions_intersecting(allowed_tools);
         let events = self
             .agent_loop
             .run(prompt)
@@ -2171,6 +2194,87 @@ impl ReplSession {
         self.agent_loop
             .set_tool_restrictions(prev_allowed, prev_disallowed);
         self.agent_loop.set_max_turns(prev_turns);
+        events
+    }
+
+    /// `/deep-seek <question>` (aliases `/deepseek`, `/research`) — run a bounded
+    /// web-research pass: decompose the question, search + fetch sources,
+    /// cross-check, and synthesize a cited answer. Restricted to web-only
+    /// research tools (no shell / local file reads / file writes / config), so
+    /// it's safe to point at arbitrary questions whose answers pull in untrusted
+    /// web content.
+    fn execute_deep_seek_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        let question = args.trim();
+        if question.is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "Usage: /deep-seek <question>\n\nRuns a bounded web-research pass. By default, \
+                 the model proposes likely official/canonical URLs from its built-in knowledge \
+                 and verifies them with WebFetch. Optional search backends (BRAVE_SEARCH_API_KEY \
+                 or SERPER_API_KEY) can improve source discovery. Sources are labeled as \
+                 [verified], [known], or [unverified]. Sends your question and fetched page \
+                 content to your configured model.",
+            ))];
+        }
+        // Evidence policy:
+        //
+        // `/deep-seek` is intentionally not a strict citation gate by default.
+        // LLMs often know stable canonical URLs (official docs, RFCs, crate docs,
+        // standards pages) and can use those as WebFetch targets without a search
+        // backend, which keeps the open-source default path cheap and simple.
+        // The important product contract is transparency: the final report must
+        // distinguish pages actually fetched this run from model-prior knowledge
+        // and from claims that remain unverified. A future `--strict` mode can
+        // hard-enforce "only cite successfully fetched URLs" once we plumb
+        // per-pass fetched-URL tracking into the event stream.
+        let prompt = format!(
+            "[deep research — execute once; do NOT create cron jobs, recurring jobs, or background loops]\n\n\
+            You are running Deeptide's deep-research pass. Investigate this question thoroughly \
+            and answer it with evidence:\n\n\
+            QUESTION: {question}\n\n\
+            Evidence labels:\n\
+            - [verified]: you successfully retrieved and read the page with `WebFetch` in this pass.\n\
+            - [known]: a source URL or fact you know from model knowledge but did not fetch in this pass.\n\
+            - [unverified]: plausible but not confirmed by a fetched source or reliable model knowledge.\n\n\
+            Method:\n\
+            - Decompose the question into the specific sub-questions you must answer.\n\
+            - First, use your built-in knowledge to identify likely official/canonical URLs \
+            and call `WebFetch` on them. Prefer stable sources such as official docs, standards, \
+            source repositories, release notes, filings, papers, and primary announcements.\n\
+            - If a WebSearch backend is configured, you may use `WebSearch` to improve source \
+            discovery; then call `WebFetch` on the promising results. Never rely on search \
+            snippets alone.\n\
+            - If you cannot identify exact URLs and WebSearch is unavailable, say that source \
+            discovery is limited and make a best-effort answer from fetched URLs and your own \
+            knowledge, clearly marked as unverified where appropriate.\n\
+            - Corroborate each key claim across at least two independent sources; note where \
+            sources disagree or where evidence is thin.\n\
+            - Prefer primary and recent sources; be explicit about publication dates when \
+            recency matters.\n\n\
+            Output a single final report with:\n\
+            - A direct answer up top (2–4 sentences).\n\
+            - The key findings as bullets, each with an inline source URL and an evidence label \
+            (`[verified]`, `[known]`, or `[unverified]`).\n\
+            - A short 'Confidence & gaps' note: what is well-supported, what is uncertain, \
+            and which important sources were not fetched.\n\
+            - A 'Sources' list grouped by evidence label: `[verified]` URLs fetched this pass, \
+            `[known]` canonical URLs not fetched, and `[unverified]` attempted or uncertain URLs.\n\n\
+            Rules:\n\
+            - Research only: do NOT read local files, edit files, run shell commands, or change settings/config.\n\
+            - Do not pretend a source was fetched. If you did not successfully retrieve a URL \
+            with `WebFetch`, label it `[known]` or `[unverified]`, not `[verified]`.\n\
+            - Do not fabricate URLs. If a likely URL fails to fetch, mention it only as an \
+            attempted or unverified source."
+        );
+        let mut events = vec![ReplEvent::Output(format!(
+            "[deep-seek] researching: {question}\n(fetches likely sources and sends your question \
+             + fetched page content to your configured model; optional WebSearch may be used when \
+             configured)…"
+        ))];
+        events.extend(self.run_bounded_pass(
+            &prompt,
+            DEEP_SEEK_MAX_TURNS,
+            &["WebSearch", "WebFetch"],
+        ));
         events
     }
 
@@ -4732,6 +4836,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             ["handoff"],
             "Hand off the newest foreign session into the live conversation",
             "/continue [claude|codex|deeptide]",
+        ),
+        CommandCompletionSource::new(
+            "deep-seek",
+            ["deepseek", "research"],
+            "Run a bounded web-research pass (search → fetch → cross-check → cited answer)",
+            "/deep-seek <question>",
         ),
         CommandCompletionSource::new(
             "version",

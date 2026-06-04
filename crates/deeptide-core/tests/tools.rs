@@ -2829,9 +2829,20 @@ fn web_search_tool_reports_missing_api_keys_with_fetch_alternatives() {
     );
 
     assert!(result.is_error);
-    assert!(result.content.contains("WebSearch requires an API key"));
+    assert!(
+        result
+            .content
+            .contains("WebSearch has no configured search backend")
+    );
     assert!(result.content.contains("BRAVE_SEARCH_API_KEY"));
     assert!(result.content.contains("SERPER_API_KEY"));
+    assert!(
+        result
+            .content
+            .contains("propose likely official/canonical URLs")
+    );
+    // The error still offers directly-fetchable search-results pages as a
+    // no-backend fallback (the query is URL-encoded into the `q=` param).
     assert!(
         result
             .content

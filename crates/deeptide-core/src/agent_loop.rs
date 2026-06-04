@@ -532,6 +532,31 @@ impl AgentLoop {
         prev
     }
 
+    /// Temporarily narrow the active tool policy for a scoped pass without
+    /// relaxing any existing caller restrictions. The requested allowlist is
+    /// intersected with the current allowlist (when present), and the current
+    /// denylist is preserved.
+    pub fn set_tool_restrictions_intersecting(
+        &mut self,
+        requested_allowed: &[&str],
+    ) -> (Option<Vec<String>>, Vec<String>) {
+        let requested: Vec<String> = requested_allowed
+            .iter()
+            .map(|tool| (*tool).to_string())
+            .collect();
+        let narrowed = if let Some(current_allowed) = &self.allowed_tools {
+            Some(
+                requested
+                    .into_iter()
+                    .filter(|tool| current_allowed.iter().any(|current| current == tool))
+                    .collect(),
+            )
+        } else {
+            Some(requested)
+        };
+        self.set_tool_restrictions(narrowed, self.disallowed_tools.clone())
+    }
+
     /// The set of tools to advertise to the model. `None` when unrestricted
     /// (advertise everything); otherwise only the permitted tools, so a
     /// restricted sub-agent is never offered a tool it cannot call.
