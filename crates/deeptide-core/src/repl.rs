@@ -1297,6 +1297,7 @@ impl ReplSession {
             "doctor" => self.execute_doctor_command(args),
             "config" => self.execute_config_command(args),
             "hooks" => self.execute_hooks_command(args),
+            "mcp" => self.execute_mcp_command(args),
             "init" => self.execute_init_command(args),
             "update" | "upgrade" => self.execute_update_command(args),
             "vim" | "edit" | "e" | "compose" => return self.execute_vim_command(args),
@@ -2683,6 +2684,114 @@ impl ReplSession {
 
         if lines.len() == 1 {
             lines.push(String::from("  (all hooks are disabled)"));
+        }
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    /// `/mcp` — list, add, or remove MCP servers in the global settings file.
+    ///   `/mcp`                                  list configured servers
+    ///   `/mcp add <name> <command> [args…]`     add a stdio server
+    ///   `/mcp add <name> --url <url>`           add an HTTP/SSE server
+    ///   `/mcp remove <name>`                    remove a server
+    /// Writes to the user-global `settings.json`; takes effect next launch.
+    fn execute_mcp_command(&self, args: &str) -> CommandResult {
+        use crate::config::{ConfigStore, McpServerConfig};
+
+        let mut tokens = args.split_whitespace();
+        let Some(sub) = tokens.next() else {
+            return self.mcp_list();
+        };
+        match sub {
+            "list" | "ls" => self.mcp_list(),
+            "add" => {
+                let Some(name) = tokens.next() else {
+                    return CommandResult::Text(String::from(
+                        "Usage: /mcp add <name> <command> [args…]   (stdio)\n   or: /mcp add <name> --url <url>          (HTTP/SSE)",
+                    ));
+                };
+                let rest: Vec<&str> = tokens.collect();
+                let server = if let Some(pos) = rest.iter().position(|t| *t == "--url") {
+                    let Some(url) = rest.get(pos + 1) else {
+                        return CommandResult::Text(String::from("`--url` needs a URL."));
+                    };
+                    McpServerConfig {
+                        command: None,
+                        args: None,
+                        env: None,
+                        url: Some((*url).to_owned()),
+                        name: Some(name.to_owned()),
+                    }
+                } else {
+                    let Some((command, cmd_args)) = rest.split_first() else {
+                        return CommandResult::Text(String::from(
+                            "An stdio server needs a command, e.g. `/mcp add fs npx -y @modelcontextprotocol/server-filesystem .`",
+                        ));
+                    };
+                    McpServerConfig {
+                        command: Some((*command).to_owned()),
+                        args: (!cmd_args.is_empty())
+                            .then(|| cmd_args.iter().map(|s| (*s).to_owned()).collect()),
+                        env: None,
+                        url: None,
+                        name: Some(name.to_owned()),
+                    }
+                };
+                let path = ConfigStore::global_path();
+                match ConfigStore::set_mcp_server(name, &server, &path) {
+                    Ok(()) => CommandResult::Text(format!(
+                        "Added MCP server `{name}` to {}. It loads on the next launch.",
+                        path.display()
+                    )),
+                    Err(error) => CommandResult::Text(format!("Could not add `{name}`: {error}")),
+                }
+            }
+            "remove" | "rm" | "delete" => {
+                let Some(name) = tokens.next() else {
+                    return CommandResult::Text(String::from("Usage: /mcp remove <name>"));
+                };
+                let path = ConfigStore::global_path();
+                match ConfigStore::remove_mcp_server(name, &path) {
+                    Ok(true) => CommandResult::Text(format!(
+                        "Removed MCP server `{name}` from {}.",
+                        path.display()
+                    )),
+                    Ok(false) => CommandResult::Text(format!(
+                        "No MCP server named `{name}` in {}.",
+                        path.display()
+                    )),
+                    Err(error) => {
+                        CommandResult::Text(format!("Could not remove `{name}`: {error}"))
+                    }
+                }
+            }
+            other => CommandResult::Text(format!(
+                "Unknown /mcp subcommand `{other}`. Use `/mcp`, `/mcp add …`, or `/mcp remove <name>`."
+            )),
+        }
+    }
+
+    /// Render the merged MCP server list for `/mcp` (and `/mcp list`).
+    fn mcp_list(&self) -> CommandResult {
+        let servers = crate::config::ConfigStore::load(&self.tool_context.cwd).mcp_servers;
+        let Some(servers) = servers.filter(|m| !m.is_empty()) else {
+            return CommandResult::Text(String::from(
+                "No MCP servers configured. Add one with `/mcp add <name> <command> [args…]` or `/mcp add <name> --url <url>`.",
+            ));
+        };
+        let mut names: Vec<&String> = servers.keys().collect();
+        names.sort();
+        let mut lines = vec![format!("MCP servers ({}):", names.len())];
+        for name in names {
+            let cfg = &servers[name];
+            let transport = if let Some(url) = &cfg.url {
+                format!("http {url}")
+            } else if let Some(command) = &cfg.command {
+                let args = cfg.args.as_ref().map(|a| a.join(" ")).unwrap_or_default();
+                format!("stdio {command} {args}").trim_end().to_owned()
+            } else {
+                String::from("(no transport configured)")
+            };
+            lines.push(format!("  {name} — {transport}"));
         }
         CommandResult::Text(lines.join("\n"))
     }
@@ -5012,6 +5121,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             Vec::<&str>::new(),
             "List configured hooks",
             "/hooks",
+        ),
+        CommandCompletionSource::new(
+            "mcp",
+            Vec::<&str>::new(),
+            "List, add, or remove MCP servers in settings.json",
+            "/mcp [add <name> <cmd…>|add <name> --url <url>|remove <name>]",
         ),
         CommandCompletionSource::new(
             "init",

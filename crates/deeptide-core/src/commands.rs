@@ -1133,6 +1133,7 @@ fn help_categories() -> &'static [(&'static str, &'static [&'static str])] {
         ),
         ("Permissions", &["permission"]),
         ("Hooks", &["hooks"]),
+        ("MCP", &["mcp"]),
         ("Cron", &["cron"]),
         (
             "Files",

@@ -501,6 +501,74 @@ impl ConfigStore {
             .map_err(|e| format!("cannot write {}: {e}", path.display()))
     }
 
+    /// Insert (or overwrite) one entry in the `mcp_servers` object of the target
+    /// settings file, preserving every other key. Round-trips through a raw
+    /// `serde_json::Value` so unknown top-level fields and other servers survive.
+    /// Creates the file and `mcp_servers` object if absent.
+    pub fn set_mcp_server(name: &str, server: &McpServerConfig, path: &Path) -> Result<(), String> {
+        let mut data: serde_json::Value = if path.exists() {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            serde_json::from_str(&raw)
+                .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?
+        } else {
+            serde_json::Value::Object(serde_json::Map::new())
+        };
+
+        let serde_json::Value::Object(ref mut map) = data else {
+            return Err(format!("{} is not a JSON object", path.display()));
+        };
+        let servers = map
+            .entry("mcp_servers")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let serde_json::Value::Object(servers_map) = servers else {
+            return Err(format!(
+                "`mcp_servers` in {} is not a JSON object",
+                path.display()
+            ));
+        };
+        let server_value = serde_json::to_value(server)
+            .map_err(|e| format!("cannot serialize MCP server: {e}"))?;
+        servers_map.insert(name.to_owned(), server_value);
+
+        Self::write_pretty(&data, path)
+    }
+
+    /// Remove one entry from the `mcp_servers` object, preserving everything
+    /// else. Returns `Ok(false)` if no server by that name was present.
+    pub fn remove_mcp_server(name: &str, path: &Path) -> Result<bool, String> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let mut data: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?;
+        let removed = match &mut data {
+            serde_json::Value::Object(map) => match map.get_mut("mcp_servers") {
+                Some(serde_json::Value::Object(servers)) => servers.remove(name).is_some(),
+                _ => false,
+            },
+            _ => false,
+        };
+        if removed {
+            Self::write_pretty(&data, path)?;
+        }
+        Ok(removed)
+    }
+
+    /// Pretty-serialize `data` and write it to `path`, creating parent dirs.
+    fn write_pretty(data: &serde_json::Value, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        let serialized = serde_json::to_string_pretty(data)
+            .map_err(|e| format!("cannot serialize config: {e}"))?;
+        std::fs::write(path, serialized)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    }
+
     /// Human-readable summary of the merged config for `/config show`.
     pub fn show(cwd: &Path) -> String {
         let global_path = Self::global_path();
@@ -771,6 +839,54 @@ mod tests {
         let isolated = ConfigStore::load_isolated(Some(&settings));
         assert_eq!(isolated.model.as_deref(), Some("iso-only"));
         assert!(isolated.max_turns.is_none());
+    }
+
+    #[test]
+    fn set_and_remove_mcp_server_preserve_unknown_fields_and_siblings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        // A pre-existing file with an unrelated top-level key and an existing
+        // server, to prove the round-trip preserves both.
+        std::fs::write(
+            &path,
+            r#"{"model":"keep-me","mcp_servers":{"existing":{"url":"https://example.com"}}}"#,
+        )
+        .expect("seed settings");
+
+        let added = McpServerConfig {
+            command: Some(String::from("npx")),
+            args: Some(vec![String::from("-y"), String::from("server-fs")]),
+            env: None,
+            url: None,
+            name: Some(String::from("fs")),
+        };
+        ConfigStore::set_mcp_server("fs", &added, &path).expect("add server");
+
+        // Re-read raw and check: unknown `model` survived, both servers present.
+        let raw = std::fs::read_to_string(&path).expect("read back");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        assert_eq!(value["model"], "keep-me", "unknown field must survive");
+        assert_eq!(
+            value["mcp_servers"]["existing"]["url"],
+            "https://example.com"
+        );
+        assert_eq!(value["mcp_servers"]["fs"]["command"], "npx");
+
+        // It also loads back through the typed parser.
+        let cfg = ConfigStore::read_file(&path);
+        let servers = cfg.mcp_servers.expect("servers");
+        assert!(servers.contains_key("existing") && servers.contains_key("fs"));
+
+        // Remove just `fs`; `existing` and `model` remain.
+        assert!(ConfigStore::remove_mcp_server("fs", &path).expect("remove"));
+        let raw = std::fs::read_to_string(&path).expect("read back");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        assert_eq!(value["model"], "keep-me");
+        assert!(value["mcp_servers"]["existing"].is_object());
+        assert!(value["mcp_servers"].get("fs").is_none());
+
+        // Removing a non-existent server reports false, doesn't error.
+        assert!(!ConfigStore::remove_mcp_server("nope", &path).expect("noop remove"));
     }
 
     #[test]

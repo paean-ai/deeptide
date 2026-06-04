@@ -294,8 +294,9 @@ fn repl_executes_help_command() {
     assert!(output.contains("/exit"));
     assert!(output.contains("/cost"));
     assert!(output.contains("/read"));
-    // /todo, /explain, /changelog are registered and listed in help.
+    // /todo, /mcp, /explain, /changelog are registered and listed in help.
     assert!(output.contains("/todo"));
+    assert!(output.contains("/mcp"));
     assert!(output.contains("/explain"));
     assert!(output.contains("/changelog"));
 }
