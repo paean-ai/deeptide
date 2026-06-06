@@ -473,14 +473,7 @@ impl ConfigStore {
             _ => return Err(format!("{} is not a JSON object", path.display())),
         }
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-        }
-        let serialized = serde_json::to_string_pretty(&data)
-            .map_err(|e| format!("cannot serialize config: {e}"))?;
-        std::fs::write(path, serialized)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        Self::write_pretty(&data, path)
     }
 
     /// Remove a key from the target file.  No-op if the key doesn't exist.
@@ -495,10 +488,7 @@ impl ConfigStore {
         if let serde_json::Value::Object(ref mut map) = data {
             map.remove(key);
         }
-        let serialized = serde_json::to_string_pretty(&data)
-            .map_err(|e| format!("cannot serialize config: {e}"))?;
-        std::fs::write(path, serialized)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        Self::write_pretty(&data, path)
     }
 
     /// Insert (or overwrite) one entry in the `mcp_servers` object of the target
@@ -560,6 +550,8 @@ impl ConfigStore {
     }
 
     /// Pretty-serialize `data` and write it to `path`, creating parent dirs.
+    /// Written atomically (temp file in the same dir + rename) so a crash or
+    /// concurrent reader never sees a half-written settings file.
     fn write_pretty(data: &serde_json::Value, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -567,8 +559,15 @@ impl ConfigStore {
         }
         let serialized = serde_json::to_string_pretty(data)
             .map_err(|e| format!("cannot serialize config: {e}"))?;
-        std::fs::write(path, serialized)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        // Temp file lives beside the target (same filesystem) so the rename is
+        // atomic; the pid keeps concurrent writers from sharing one temp path.
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        std::fs::write(&tmp, serialized)
+            .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("cannot write {}: {e}", path.display())
+        })
     }
 
     /// Human-readable summary of the merged config for `/config show`.
@@ -889,6 +888,17 @@ mod tests {
 
         // Removing a non-existent server reports false, doesn't error.
         assert!(!ConfigStore::remove_mcp_server("nope", &path).expect("noop remove"));
+
+        // The atomic writer leaves no temp file behind in the target dir.
+        let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("read dir")
+            .flatten()
+            .filter(|e| e.file_name() != "settings.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "atomic write must not leave temp files: {leftovers:?}"
+        );
     }
 
     #[test]
