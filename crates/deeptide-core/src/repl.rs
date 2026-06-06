@@ -1368,8 +1368,10 @@ impl ReplSession {
     /// Run a user-authored markdown slash command: read `<name>.md`, drop its
     /// YAML frontmatter, substitute `$ARGUMENTS` / `$1..$11` from the command
     /// tail (reusing the built-in skill expander), and submit the result as a
-    /// normal agent turn. The body becomes a *prompt*, not a nested slash
-    /// command, so there's no command-recursion to guard against.
+    /// normal agent turn. The body is treated as a *prompt*: if it happens to
+    /// begin with `/` it is sent straight to the agent rather than re-dispatched
+    /// as a slash command, so a body can't invoke another command or recurse
+    /// into itself until the stack overflows.
     fn execute_custom_command(&mut self, name: &str, args: &str) -> Vec<ReplEvent> {
         let Some(path) = find_command_file(&self.tool_context.cwd, name) else {
             // Raced away between dispatch and here; fall back to the usage line.
@@ -1393,6 +1395,17 @@ impl ReplSession {
         }
         let args = args.trim();
         let expanded = crate::tools::expand_skill_prompt(&body, (!args.is_empty()).then_some(args));
+        // A body starting with `/` would be re-dispatched as a slash command by
+        // `submit` (enabling command-injection / self-recursion), so send it
+        // straight to the agent as the literal prompt it is meant to be.
+        if expanded.trim_start().starts_with('/') {
+            return self
+                .agent_loop
+                .run(&expanded)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event)
+                .collect();
+        }
         self.submit(&expanded)
     }
 
@@ -5941,7 +5954,12 @@ fn discover_command_names(cwd: &std::path::Path) -> Vec<String> {
                 continue;
             }
             if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-                names.push(stem.to_owned());
+                // Only register names that `find_command_file` can actually
+                // resolve, so a file like `foo bar.md` never shows in /help or
+                // completion as a command that then fails to run.
+                if is_valid_command_name(stem) {
+                    names.push(stem.to_owned());
+                }
             }
         }
     }
@@ -5950,15 +5968,20 @@ fn discover_command_names(cwd: &std::path::Path) -> Vec<String> {
     names
 }
 
-/// Resolve a custom-command name to its `.md` file, honouring `command_dirs`
-/// precedence (first match wins). Command names are restricted to a safe
-/// charset so a `/..%2f`-style name can't escape the commands directory.
-fn find_command_file(cwd: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
-    if name.is_empty()
-        || !name
+/// Command names are restricted to a safe charset so a `/..%2f`-style name
+/// can't escape the commands directory, and so discovery and resolution agree
+/// on exactly which files are runnable commands.
+fn is_valid_command_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+}
+
+/// Resolve a custom-command name to its `.md` file, honouring `command_dirs`
+/// precedence (first match wins).
+fn find_command_file(cwd: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    if !is_valid_command_name(name) {
         return None;
     }
     for dir in command_dirs(cwd) {

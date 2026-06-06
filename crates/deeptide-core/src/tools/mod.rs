@@ -2149,10 +2149,37 @@ pub(crate) fn expand_skill_prompt(prompt: &str, args: Option<&str>) -> String {
     };
     let parts = args.splitn(11, ' ').collect::<Vec<_>>();
     let mut expanded = prompt.replace("$ARGUMENTS", args);
-    for (index, part) in parts.iter().enumerate() {
+    // Substitute highest index first: `$1` is a prefix of `$10`/`$11`, so
+    // replacing `$1` before them would corrupt the two-digit placeholders.
+    for (index, part) in parts.iter().enumerate().rev() {
         expanded = expanded.replace(&format!("${}", index + 1), part);
     }
     expanded
+}
+
+#[cfg(test)]
+mod expand_skill_prompt_tests {
+    use super::expand_skill_prompt;
+
+    #[test]
+    fn substitutes_arguments_and_single_digit_positionals() {
+        let out = expand_skill_prompt("[$ARGUMENTS] first=$1 second=$2", Some("alpha beta"));
+        assert_eq!(out, "[alpha beta] first=alpha second=beta");
+    }
+
+    #[test]
+    fn two_digit_positionals_are_not_corrupted_by_the_dollar_one_prefix() {
+        // `$1` is a prefix of `$10`/`$11`; replacing it first used to mangle the
+        // two-digit placeholders. Reverse-order substitution keeps them intact.
+        let args = "a b c d e f g h i j k";
+        let out = expand_skill_prompt("$1 | $10 | $11", Some(args));
+        assert_eq!(out, "a | j | k");
+    }
+
+    #[test]
+    fn empty_args_blank_out_arguments_token() {
+        assert_eq!(expand_skill_prompt("x$ARGUMENTSy", None), "xy");
+    }
 }
 
 fn edit_notebook(

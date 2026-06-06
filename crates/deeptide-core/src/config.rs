@@ -503,8 +503,10 @@ impl ConfigStore {
 
     /// Insert (or overwrite) one entry in the `mcp_servers` object of the target
     /// settings file, preserving every other key. Round-trips through a raw
-    /// `serde_json::Value` so unknown top-level fields and other servers survive.
-    /// Creates the file and `mcp_servers` object if absent.
+    /// `serde_json::Value` so unknown top-level fields and other servers survive
+    /// (values are kept intact; key order is normalized by the serializer, since
+    /// `serde_json` is built without `preserve_order` here — matching the other
+    /// config writers). Creates the file and `mcp_servers` object if absent.
     pub fn set_mcp_server(name: &str, server: &McpServerConfig, path: &Path) -> Result<(), String> {
         let mut data: serde_json::Value = if path.exists() {
             let raw = std::fs::read_to_string(path)

@@ -1391,6 +1391,30 @@ fn custom_command_does_not_shadow_a_builtin() {
 }
 
 #[test]
+fn custom_command_body_starting_with_slash_is_not_re_dispatched() {
+    // A body whose first char is `/` must reach the agent as a literal prompt,
+    // not be executed as a slash command (which would allow command-injection
+    // or self-recursion until the stack overflows).
+    let project = tempfile::tempdir().expect("project");
+    let commands = project.path().join(".deeptide").join("commands");
+    std::fs::create_dir_all(&commands).expect("commands dir");
+    std::fs::write(commands.join("slashy.md"), "/help me understand $ARGUMENTS").expect("write");
+
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mut repl = ReplSession::new(Box::new(CapturePromptBackend {
+        captured: captured.clone(),
+    }))
+    .with_cwd(project.path());
+
+    let _ = repl.submit("/slashy the tool");
+    let prompt = captured.lock().expect("lock").clone();
+    assert!(
+        prompt.contains("/help me understand the tool"),
+        "body must reach the agent verbatim, not run as /help: {prompt}"
+    );
+}
+
+#[test]
 fn custom_command_appears_in_help_and_completion() {
     let project = tempfile::tempdir().expect("project");
     let commands = project.path().join(".deeptide").join("commands");
