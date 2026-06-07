@@ -534,6 +534,40 @@ pub fn todo_summary() -> TodoSummary {
     summary
 }
 
+/// Render the current todo backlog as display lines, one per non-deleted item,
+/// each prefixed with its status icon. In-progress items lead, then pending,
+/// then completed — the order a user wants when expanding the status-bar count.
+/// Public so the REPL `/todo` command can list the backlog the status bar only
+/// summarizes; the underlying `TodoItem` stays private.
+pub fn todo_lines() -> Vec<String> {
+    let Ok(todos) = todo_storage().lock() else {
+        return Vec::new();
+    };
+    let rank = |status: TodoStatus| match status {
+        TodoStatus::InProgress => 0,
+        TodoStatus::Pending => 1,
+        TodoStatus::Completed => 2,
+        TodoStatus::Deleted => 3,
+    };
+    let mut visible: Vec<&TodoItem> = todos
+        .iter()
+        .filter(|item| item.status != TodoStatus::Deleted)
+        .collect();
+    visible.sort_by_key(|item| rank(item.status));
+    visible
+        .iter()
+        .map(|item| {
+            // In-progress items show their active form ("Migrating…") when set,
+            // matching how an agent narrates the step it's on.
+            let text = match (item.status, &item.active_form) {
+                (TodoStatus::InProgress, Some(active)) => active.as_str(),
+                _ => item.content.as_str(),
+            };
+            format!("{} {text}", item.status.icon())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod todo_summary_tests {
     #![allow(clippy::unwrap_used)]
@@ -600,5 +634,47 @@ mod todo_summary_tests {
         let s = todo_summary();
         assert_eq!(s.total(), 0);
         reset_storage();
+    }
+
+    #[test]
+    fn todo_lines_orders_in_progress_first_and_skips_deleted() {
+        reset_storage();
+        replace_todos(vec![
+            TodoItem {
+                content: "write the docs".into(),
+                status: TodoStatus::Pending,
+                active_form: None,
+            },
+            TodoItem {
+                content: "migrate the worker".into(),
+                status: TodoStatus::InProgress,
+                active_form: Some("Migrating the worker".into()),
+            },
+            TodoItem {
+                content: "land the PR".into(),
+                status: TodoStatus::Completed,
+                active_form: None,
+            },
+            TodoItem {
+                content: "ghost".into(),
+                status: TodoStatus::Deleted,
+                active_form: None,
+            },
+        ]);
+        let lines = todo_lines();
+        assert_eq!(lines.len(), 3, "deleted item must be skipped: {lines:?}");
+        // In-progress leads and uses its active form.
+        assert!(lines[0].contains("Migrating the worker"), "{lines:?}");
+        assert_eq!(&lines[0][..3], TodoStatus::InProgress.icon());
+        // Pending next, completed last.
+        assert!(lines[1].contains("write the docs"), "{lines:?}");
+        assert!(lines[2].contains("land the PR"), "{lines:?}");
+        reset_storage();
+    }
+
+    #[test]
+    fn todo_lines_is_empty_when_no_todos() {
+        reset_storage();
+        assert!(todo_lines().is_empty());
     }
 }

@@ -27,6 +27,12 @@ pub enum HookEvent {
     SessionStart,
     SessionEnd,
     PreCompact,
+    /// Fires once when the agent finishes responding to a user turn (the agent
+    /// loop returns). Useful for turn-end automation: auto-format, auto-commit,
+    /// notify. Observational — the result does not block.
+    Stop,
+    /// Fires once when a sub-agent (the `Agent` tool) finishes its own loop.
+    SubagentStop,
 }
 
 impl HookEvent {
@@ -38,6 +44,8 @@ impl HookEvent {
             HookEvent::SessionStart => "SessionStart",
             HookEvent::SessionEnd => "SessionEnd",
             HookEvent::PreCompact => "PreCompact",
+            HookEvent::Stop => "Stop",
+            HookEvent::SubagentStop => "SubagentStop",
         }
     }
 }
@@ -90,6 +98,8 @@ impl HookEngine {
             HookEvent::SessionStart => &self.hooks.session_start,
             HookEvent::SessionEnd => &self.hooks.session_end,
             HookEvent::PreCompact => &self.hooks.pre_compact,
+            HookEvent::Stop => &self.hooks.stop,
+            HookEvent::SubagentStop => &self.hooks.subagent_stop,
         };
         group.as_deref().unwrap_or(&[])
     }

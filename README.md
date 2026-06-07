@@ -212,6 +212,10 @@ tools, observes results, and adapts. Out of the box:
 - **Hooks engine** — pre/post tool, user-prompt, session, compaction shell hooks
 - **Memory system** — persistent project memory across sessions
 - **Sub-agents from markdown** — define custom agents in your project
+- **Custom slash commands from markdown** — drop a `<name>.md` under
+  `.deeptide/commands/` (or `~/.deeptide/commands/`) and run it as `/<name>`;
+  the body becomes a prompt with `$ARGUMENTS` / `$1`…`$11` substitution. Built-in
+  commands always take precedence.
 - **Plan mode** — design before you code, get approval before execution
 - **Web research** — `/deep-seek <question>` uses the model's built-in
   knowledge to propose likely official/canonical URLs, then verifies them with

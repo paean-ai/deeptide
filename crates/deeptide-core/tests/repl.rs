@@ -294,6 +294,38 @@ fn repl_executes_help_command() {
     assert!(output.contains("/exit"));
     assert!(output.contains("/cost"));
     assert!(output.contains("/read"));
+    // /todo, /mcp, /explain, /changelog are registered and listed in help.
+    assert!(output.contains("/todo"));
+    assert!(output.contains("/mcp"));
+    assert!(output.contains("/explain"));
+    assert!(output.contains("/changelog"));
+}
+
+#[test]
+fn repl_todo_command_reports_empty_then_lists_after_todowrite() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+
+    // With no backlog, /todo explains how the list gets populated.
+    let empty = only_output(repl.submit("/todo"));
+    assert!(empty.contains("No active todos"), "got: {empty}");
+
+    // Drive the TodoWrite tool the way the agent would (it writes to the same
+    // global todo storage /todo reads), then /todo lists them.
+    use deeptide_core::{TodoWriteTool, Tool, ToolContext};
+    let _ = TodoWriteTool.call(
+        serde_json::json!({"todos": [
+            {"content": "write the parser", "status": "in_progress", "activeForm": "Writing the parser"},
+            {"content": "add tests", "status": "pending"}
+        ]}),
+        &ToolContext::new("."),
+    );
+    let listed = only_output(repl.submit("/todo"));
+    assert!(listed.contains("Writing the parser"), "got: {listed}");
+    assert!(listed.contains("add tests"), "got: {listed}");
+    assert!(
+        listed.contains("in progress") && listed.contains("pending"),
+        "got: {listed}"
+    );
 }
 
 #[test]
@@ -1300,6 +1332,143 @@ fn deep_seek_prompt_requires_evidence_labels() {
         prompt.contains("Do not pretend a source was fetched"),
         "prompt should prohibit representing unfetched sources as verified: {prompt}"
     );
+}
+
+#[test]
+fn custom_markdown_command_expands_body_and_runs_as_a_turn() {
+    let project = tempfile::tempdir().expect("project");
+    let commands = project.path().join(".deeptide").join("commands");
+    std::fs::create_dir_all(&commands).expect("commands dir");
+    // Use a name that is NOT a built-in command (so this exercises the custom
+    // path, not built-in precedence — which has its own test below).
+    std::fs::write(
+        commands.join("releasenotes.md"),
+        "---\ndescription: Draft release notes\n---\nSummarize the git log for $ARGUMENTS into release notes.\n",
+    )
+    .expect("write command");
+
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mut repl = ReplSession::new(Box::new(CapturePromptBackend {
+        captured: captured.clone(),
+    }))
+    .with_cwd(project.path());
+
+    let _ = repl.submit("/releasenotes v1.2.0");
+    let prompt = captured.lock().expect("lock").clone();
+    // Body ran as a turn with $ARGUMENTS substituted; frontmatter stripped.
+    assert!(
+        prompt.contains("Summarize the git log for v1.2.0 into release notes"),
+        "expanded body should reach the agent: {prompt}"
+    );
+    assert!(
+        !prompt.contains("description:"),
+        "frontmatter must be stripped: {prompt}"
+    );
+}
+
+#[test]
+fn custom_command_does_not_shadow_a_builtin() {
+    // A file named like a built-in (`status`) must NOT hijack the built-in.
+    let project = tempfile::tempdir().expect("project");
+    let commands = project.path().join(".deeptide").join("commands");
+    std::fs::create_dir_all(&commands).expect("commands dir");
+    std::fs::write(commands.join("status.md"), "HIJACKED PROMPT").expect("write");
+
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mut repl = ReplSession::new(Box::new(CapturePromptBackend {
+        captured: captured.clone(),
+    }))
+    .with_cwd(project.path());
+
+    let out = only_output(repl.submit("/status"));
+    // The built-in /status ran (its output), and the hijack prompt never reached
+    // the backend.
+    assert!(!out.contains("HIJACKED"), "got: {out}");
+    assert!(
+        captured.lock().expect("lock").is_empty(),
+        "built-in must win; no custom prompt submitted"
+    );
+}
+
+#[test]
+fn custom_command_body_starting_with_slash_is_not_re_dispatched() {
+    // A body whose first char is `/` must reach the agent as a literal prompt,
+    // not be executed as a slash command (which would allow command-injection
+    // or self-recursion until the stack overflows).
+    let project = tempfile::tempdir().expect("project");
+    let commands = project.path().join(".deeptide").join("commands");
+    std::fs::create_dir_all(&commands).expect("commands dir");
+    std::fs::write(commands.join("slashy.md"), "/help me understand $ARGUMENTS").expect("write");
+
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mut repl = ReplSession::new(Box::new(CapturePromptBackend {
+        captured: captured.clone(),
+    }))
+    .with_cwd(project.path());
+
+    let _ = repl.submit("/slashy the tool");
+    let prompt = captured.lock().expect("lock").clone();
+    assert!(
+        prompt.contains("/help me understand the tool"),
+        "body must reach the agent verbatim, not run as /help: {prompt}"
+    );
+}
+
+#[test]
+fn custom_command_appears_in_help_and_completion() {
+    let project = tempfile::tempdir().expect("project");
+    let commands = project.path().join(".deeptide").join("commands");
+    std::fs::create_dir_all(&commands).expect("commands dir");
+    // A non-built-in name, so a hit in /help proves the CUSTOM command was
+    // registered (not a coincidentally-named built-in).
+    std::fs::write(commands.join("standup.md"), "Summarize $ARGUMENTS").expect("write");
+
+    let mut repl = ReplSession::new(Box::new(StaticBackend)).with_cwd(project.path());
+    let help = only_output(repl.submit("/help"));
+    assert!(
+        help.contains("/standup"),
+        "custom command should list in help: {help}"
+    );
+}
+
+#[test]
+fn explain_without_a_target_shows_usage() {
+    let mut repl = ReplSession::new(Box::new(StaticBackend));
+    let out = only_output(repl.submit("/explain"));
+    assert!(out.contains("Usage: /explain"), "got: {out}");
+}
+
+#[test]
+fn explain_expands_the_skill_prompt_with_the_target() {
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mut repl = ReplSession::new(Box::new(CapturePromptBackend {
+        captured: captured.clone(),
+    }));
+    let _ = repl.submit("/explain src/repl.rs");
+    let prompt = captured.lock().expect("lock").clone();
+    assert!(
+        prompt.contains("src/repl.rs"),
+        "target substituted: {prompt}"
+    );
+    assert!(
+        prompt.contains("read-only") || prompt.contains("do NOT edit"),
+        "explain must be framed read-only: {prompt}"
+    );
+}
+
+#[test]
+fn changelog_expands_the_skill_prompt() {
+    let captured = Arc::new(Mutex::new(String::new()));
+    let mut repl = ReplSession::new(Box::new(CapturePromptBackend {
+        captured: captured.clone(),
+    }));
+    let _ = repl.submit("/changelog v1.0.0..HEAD");
+    let prompt = captured.lock().expect("lock").clone();
+    assert!(
+        prompt.contains("v1.0.0..HEAD"),
+        "range substituted: {prompt}"
+    );
+    assert!(prompt.contains("git log"), "should drive git log: {prompt}");
 }
 
 fn tool_rejection_recorded(repl: &ReplSession) -> bool {

@@ -2110,6 +2110,18 @@ fn builtin_skills() -> &'static [BuiltinSkill] {
             when_to_use: None,
             prompt: "Help the user configure their Deeptide CLI settings.\n\nAvailable settings:\n- model: The DeepSeek model to use (e.g., deepseek-v4-flash, deepseek-v4-pro)\n- api_key: DeepSeek API key\n- max_turns: Maximum agentic turns per session (default: 25)\n- max_tokens: Maximum output tokens per request (default: 4096)\n- permission_mode: default, accept-edits, plan, bypass\n- thinking: enabled, auto, disabled\n- effort: low, medium, high\n- fast_mode: true/false\n\nUse `tide config --set <key>=<value>` for global settings, or `tide config --set <key>=<value> --project` for project-specific settings.\nUse `tide config --show` to see current configuration.\n\n$ARGUMENTS",
         },
+        BuiltinSkill {
+            name: "explain",
+            description: "Explain a file, symbol, or area of the codebase",
+            when_to_use: None,
+            prompt: "Explain the following part of this codebase clearly and concisely:\n\nTARGET: $ARGUMENTS\n\nMethod:\n- Resolve the target: if it's a path, Read it; if it's a symbol or concept, use Grep/Glob to locate the relevant definitions and call sites first, then Read them.\n- Read enough surrounding context to be accurate — follow imports and key callers, but stay focused on the target.\n\nProduce a focused explanation:\n- A one-paragraph summary of what it is and what it's for.\n- How it works: the key flow, important branches, and any non-obvious logic.\n- How it connects: who calls it / what it depends on.\n- Gotchas: edge cases, invariants, or fragile assumptions worth knowing.\n\nRules:\n- Reference concrete code as `path:line` so the user can jump to it.\n- This is read-only: do NOT edit files, run shell mutations, or change config. Inspect and explain only.\n- If the target is ambiguous or not found, say so and list the closest matches.",
+        },
+        BuiltinSkill {
+            name: "changelog",
+            description: "Draft release notes from the git history",
+            when_to_use: None,
+            prompt: "Draft release notes / a changelog from this repository's git history.\n\nRANGE: $ARGUMENTS  (a git revision range like `v1.2.0..HEAD`, a tag, or empty)\n\nMethod:\n- If RANGE is empty, determine a sensible range: `git describe --tags --abbrev=0` for the latest tag, then `<tag>..HEAD`; if there are no tags, use the last ~30 commits.\n- Run `git log --no-merges --pretty=format:'%h %s' <range>` to read the commits.\n- Group changes by type (Features, Fixes, Performance, Docs, Refactor, Breaking changes), inferring from Conventional-Commit prefixes (feat/fix/perf/docs/refactor/…) when present, else from the message.\n\nProduce Markdown release notes:\n- A short headline summary (1–2 sentences) of the release's theme.\n- Grouped bullet lists; each bullet is user-facing and concise, with the short SHA in parentheses.\n- A **Breaking changes** section first if any commit indicates one (`!` or `BREAKING CHANGE`).\n- Omit empty groups.\n\nRules:\n- Read-only: only run `git log` / `git describe` / `git tag` style inspection — do NOT edit files or write the changelog to disk unless the user explicitly asks.\n- Don't invent changes not present in the log; if the range is empty, say so.",
+        },
     ]
 }
 
@@ -2131,16 +2143,43 @@ fn builtin_skill_descriptions() -> String {
         .join("\n")
 }
 
-fn expand_skill_prompt(prompt: &str, args: Option<&str>) -> String {
+pub(crate) fn expand_skill_prompt(prompt: &str, args: Option<&str>) -> String {
     let Some(args) = args.filter(|value| !value.is_empty()) else {
         return prompt.replace("$ARGUMENTS", "");
     };
     let parts = args.splitn(11, ' ').collect::<Vec<_>>();
     let mut expanded = prompt.replace("$ARGUMENTS", args);
-    for (index, part) in parts.iter().enumerate() {
+    // Substitute highest index first: `$1` is a prefix of `$10`/`$11`, so
+    // replacing `$1` before them would corrupt the two-digit placeholders.
+    for (index, part) in parts.iter().enumerate().rev() {
         expanded = expanded.replace(&format!("${}", index + 1), part);
     }
     expanded
+}
+
+#[cfg(test)]
+mod expand_skill_prompt_tests {
+    use super::expand_skill_prompt;
+
+    #[test]
+    fn substitutes_arguments_and_single_digit_positionals() {
+        let out = expand_skill_prompt("[$ARGUMENTS] first=$1 second=$2", Some("alpha beta"));
+        assert_eq!(out, "[alpha beta] first=alpha second=beta");
+    }
+
+    #[test]
+    fn two_digit_positionals_are_not_corrupted_by_the_dollar_one_prefix() {
+        // `$1` is a prefix of `$10`/`$11`; replacing it first used to mangle the
+        // two-digit placeholders. Reverse-order substitution keeps them intact.
+        let args = "a b c d e f g h i j k";
+        let out = expand_skill_prompt("$1 | $10 | $11", Some(args));
+        assert_eq!(out, "a | j | k");
+    }
+
+    #[test]
+    fn empty_args_blank_out_arguments_token() {
+        assert_eq!(expand_skill_prompt("x$ARGUMENTSy", None), "xy");
+    }
 }
 
 fn edit_notebook(

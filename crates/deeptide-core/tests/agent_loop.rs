@@ -738,6 +738,58 @@ fn agent_loop_user_prompt_submit_hook_fires_on_run() {
     assert_eq!(recorded, "UserPromptSubmit");
 }
 
+#[test]
+fn agent_loop_stop_hook_fires_when_a_turn_finishes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("stopped.txt");
+    let hooks = SettingsHooks {
+        stop: Some(vec![HookEntry {
+            matcher: String::from("*"),
+            command: format!("printf '%s' \"$TIDE_EVENT\" > {}", marker.display()),
+            timeout_ms: Some(5_000),
+            disabled: None,
+            name: Some(String::from("record-stop")),
+        }]),
+        ..Default::default()
+    };
+    let engine = HookEngine::new(hooks, dir.path());
+    let mut loop_ = AgentLoop::new(Box::new(StaticBackend::new("done")))
+        .with_hooks(engine)
+        .with_max_turns(2);
+
+    let _ = loop_.run("do the thing");
+
+    let recorded = std::fs::read_to_string(&marker).expect("Stop hook should run on turn end");
+    assert_eq!(recorded, "Stop");
+}
+
+#[test]
+fn agent_loop_subagent_stop_hook_fires_when_a_subagent_finishes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("subagent-stopped.txt");
+    let hooks = SettingsHooks {
+        subagent_stop: Some(vec![HookEntry {
+            matcher: String::from("*"),
+            command: format!("printf '%s' \"$TIDE_EVENT\" > {}", marker.display()),
+            timeout_ms: Some(5_000),
+            disabled: None,
+            name: Some(String::from("record-subagent-stop")),
+        }]),
+        ..Default::default()
+    };
+    let mut loop_ = AgentLoop::new(Box::new(AgentCallingBackend::default()))
+        .with_permission_mode(PermissionMode::Bypass)
+        .with_hooks(HookEngine::new(hooks, dir.path()))
+        .with_subagent_backend_factory(|_model| Box::new(StaticBackend::new("sub result")))
+        .with_max_turns(3);
+
+    let _ = loop_.run("delegate exploration");
+
+    let recorded =
+        std::fs::read_to_string(&marker).expect("SubagentStop hook should run after the subagent");
+    assert_eq!(recorded, "SubagentStop");
+}
+
 fn tiny_context_window() -> ContextWindowConfig {
     // Soft threshold of 1 token forces compaction almost immediately, while the
     // generous 200-token hard limit keeps these runs off the blocking path.

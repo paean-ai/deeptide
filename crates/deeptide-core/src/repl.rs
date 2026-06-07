@@ -562,6 +562,29 @@ impl ReplSession {
         CommandResult::Text(body)
     }
 
+    /// `/todo` (aliases `/todos`, `/tasklist`) — expand the TODO backlog the
+    /// status bar only summarizes as `todo N/M`. Read-only; the agent owns the
+    /// list via the `TodoWrite` tool.
+    fn execute_todo_command(&self) -> CommandResult {
+        let lines = crate::tools::todo_lines();
+        if lines.is_empty() {
+            return CommandResult::Text(String::from(
+                "No active todos. The agent populates this list with the TodoWrite tool as it works through a multi-step task.",
+            ));
+        }
+        let summary = crate::tools::todo_summary();
+        let mut body = format!(
+            "Todo backlog ({} in progress · {} pending · {} done):\n",
+            summary.in_progress, summary.pending, summary.completed
+        );
+        for line in lines {
+            body.push_str("  ");
+            body.push_str(&line);
+            body.push('\n');
+        }
+        CommandResult::Text(body.trim_end().to_owned())
+    }
+
     /// CLI-facing entry for `/import` — same arg grammar as the slash command
     /// (`<tool> [<id>|--latest] [--as memory|context]`). Returns the events the
     /// REPL would emit so the caller can render them identically.
@@ -1267,12 +1290,14 @@ impl ReplSession {
             "import" => return self.execute_import_command(args),
             "continue" | "handoff" => return self.execute_continue_command(args),
             "version" | "ver" => self.execute_version_command(),
+            "todo" | "todos" | "tasklist" => self.execute_todo_command(),
             "suggest" | "suggestions" => self.execute_suggest_command(args),
             "open" => self.execute_open_command(args),
             "paste" | "p" => self.execute_paste_command(args),
             "doctor" => self.execute_doctor_command(args),
             "config" => self.execute_config_command(args),
             "hooks" => self.execute_hooks_command(args),
+            "mcp" => self.execute_mcp_command(args),
             "init" => self.execute_init_command(args),
             "update" | "upgrade" => self.execute_update_command(args),
             "vim" | "edit" | "e" | "compose" => return self.execute_vim_command(args),
@@ -1284,6 +1309,8 @@ impl ReplSession {
             "commit" => return self.execute_commit_command(args),
             "review" => return self.execute_review_command(args),
             "simplify" => return self.execute_simplify_command(args),
+            "explain" => return self.execute_explain_command(args),
+            "changelog" => return self.execute_changelog_command(args),
             "skills" | "skill" => self.execute_skills_command(args),
             "reminder" | "anchor" | "reorient" => return self.execute_reminder_command(args),
             "dream" => return self.execute_dream_command(args),
@@ -1322,6 +1349,13 @@ impl ReplSession {
             // synchronously (`--run`). See `execute_toolchain_command`.
             "test" | "tests" => self.execute_toolchain_command(args, ToolchainAction::Test),
             "lint" | "check" => self.execute_toolchain_command(args, ToolchainAction::Lint),
+            // A user-authored markdown command (`<name>.md` under a commands/
+            // dir) expands to a prompt and runs as a normal turn. Checked only
+            // after every built-in handler, so a built-in always wins over a
+            // same-named file (no shadowing of core commands).
+            _ if find_command_file(&self.tool_context.cwd, &name).is_some() => {
+                return self.execute_custom_command(&name, args);
+            }
             _ => CommandResult::Text(crate::commands::render_unknown_command(
                 &name,
                 &context.all_commands(),
@@ -1329,6 +1363,50 @@ impl ReplSession {
         };
 
         command_result_to_repl_events(result)
+    }
+
+    /// Run a user-authored markdown slash command: read `<name>.md`, drop its
+    /// YAML frontmatter, substitute `$ARGUMENTS` / `$1..$11` from the command
+    /// tail (reusing the built-in skill expander), and submit the result as a
+    /// normal agent turn. The body is treated as a *prompt*: if it happens to
+    /// begin with `/` it is sent straight to the agent rather than re-dispatched
+    /// as a slash command, so a body can't invoke another command or recurse
+    /// into itself until the stack overflows.
+    fn execute_custom_command(&mut self, name: &str, args: &str) -> Vec<ReplEvent> {
+        let Some(path) = find_command_file(&self.tool_context.cwd, name) else {
+            // Raced away between dispatch and here; fall back to the usage line.
+            return vec![ReplEvent::Output(crate::commands::render_unknown_command(
+                name,
+                &self.command_context().all_commands(),
+            ))];
+        };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return vec![ReplEvent::Output(format!(
+                "Could not read custom command `/{name}` at {}.",
+                path.display()
+            ))];
+        };
+        let body = crate::memory::strip_frontmatter(&raw);
+        if body.trim().is_empty() {
+            return vec![ReplEvent::Output(format!(
+                "Custom command `/{name}` ({}) has no body to run.",
+                path.display()
+            ))];
+        }
+        let args = args.trim();
+        let expanded = crate::tools::expand_skill_prompt(&body, (!args.is_empty()).then_some(args));
+        // A body starting with `/` would be re-dispatched as a slash command by
+        // `submit` (enabling command-injection / self-recursion), so send it
+        // straight to the agent as the literal prompt it is meant to be.
+        if expanded.trim_start().starts_with('/') {
+            return self
+                .agent_loop
+                .run(&expanded)
+                .into_iter()
+                .filter_map(agent_event_to_repl_event)
+                .collect();
+        }
+        self.submit(&expanded)
     }
 
     fn execute_read_command(&self, args: &str) -> CommandResult {
@@ -2610,9 +2688,123 @@ impl ReplSession {
         if let Some(ref v) = hooks.pre_compact {
             add("PreCompact", v);
         }
+        if let Some(ref v) = hooks.stop {
+            add("Stop", v);
+        }
+        if let Some(ref v) = hooks.subagent_stop {
+            add("SubagentStop", v);
+        }
 
         if lines.len() == 1 {
             lines.push(String::from("  (all hooks are disabled)"));
+        }
+        CommandResult::Text(lines.join("\n"))
+    }
+
+    /// `/mcp` — list, add, or remove MCP servers in the global settings file.
+    ///   `/mcp`                                  list configured servers
+    ///   `/mcp add <name> <command> [args…]`     add a stdio server
+    ///   `/mcp add <name> --url <url>`           add an HTTP/SSE server
+    ///   `/mcp remove <name>`                    remove a server
+    /// Writes to the user-global `settings.json`; takes effect next launch.
+    fn execute_mcp_command(&self, args: &str) -> CommandResult {
+        use crate::config::{ConfigStore, McpServerConfig};
+
+        let mut tokens = args.split_whitespace();
+        let Some(sub) = tokens.next() else {
+            return self.mcp_list();
+        };
+        match sub {
+            "list" | "ls" => self.mcp_list(),
+            "add" => {
+                let Some(name) = tokens.next() else {
+                    return CommandResult::Text(String::from(
+                        "Usage: /mcp add <name> <command> [args…]   (stdio)\n   or: /mcp add <name> --url <url>          (HTTP/SSE)",
+                    ));
+                };
+                let rest: Vec<&str> = tokens.collect();
+                let server = if let Some(pos) = rest.iter().position(|t| *t == "--url") {
+                    let Some(url) = rest.get(pos + 1) else {
+                        return CommandResult::Text(String::from("`--url` needs a URL."));
+                    };
+                    McpServerConfig {
+                        command: None,
+                        args: None,
+                        env: None,
+                        url: Some((*url).to_owned()),
+                        name: Some(name.to_owned()),
+                    }
+                } else {
+                    let Some((command, cmd_args)) = rest.split_first() else {
+                        return CommandResult::Text(String::from(
+                            "An stdio server needs a command, e.g. `/mcp add fs npx -y @modelcontextprotocol/server-filesystem .`",
+                        ));
+                    };
+                    McpServerConfig {
+                        command: Some((*command).to_owned()),
+                        args: (!cmd_args.is_empty())
+                            .then(|| cmd_args.iter().map(|s| (*s).to_owned()).collect()),
+                        env: None,
+                        url: None,
+                        name: Some(name.to_owned()),
+                    }
+                };
+                let path = ConfigStore::global_path();
+                match ConfigStore::set_mcp_server(name, &server, &path) {
+                    Ok(()) => CommandResult::Text(format!(
+                        "Added MCP server `{name}` to {}. It loads on the next launch.",
+                        path.display()
+                    )),
+                    Err(error) => CommandResult::Text(format!("Could not add `{name}`: {error}")),
+                }
+            }
+            "remove" | "rm" | "delete" => {
+                let Some(name) = tokens.next() else {
+                    return CommandResult::Text(String::from("Usage: /mcp remove <name>"));
+                };
+                let path = ConfigStore::global_path();
+                match ConfigStore::remove_mcp_server(name, &path) {
+                    Ok(true) => CommandResult::Text(format!(
+                        "Removed MCP server `{name}` from {}.",
+                        path.display()
+                    )),
+                    Ok(false) => CommandResult::Text(format!(
+                        "No MCP server named `{name}` in {}.",
+                        path.display()
+                    )),
+                    Err(error) => {
+                        CommandResult::Text(format!("Could not remove `{name}`: {error}"))
+                    }
+                }
+            }
+            other => CommandResult::Text(format!(
+                "Unknown /mcp subcommand `{other}`. Use `/mcp`, `/mcp add …`, or `/mcp remove <name>`."
+            )),
+        }
+    }
+
+    /// Render the merged MCP server list for `/mcp` (and `/mcp list`).
+    fn mcp_list(&self) -> CommandResult {
+        let servers = crate::config::ConfigStore::load(&self.tool_context.cwd).mcp_servers;
+        let Some(servers) = servers.filter(|m| !m.is_empty()) else {
+            return CommandResult::Text(String::from(
+                "No MCP servers configured. Add one with `/mcp add <name> <command> [args…]` or `/mcp add <name> --url <url>`.",
+            ));
+        };
+        let mut names: Vec<&String> = servers.keys().collect();
+        names.sort();
+        let mut lines = vec![format!("MCP servers ({}):", names.len())];
+        for name in names {
+            let cfg = &servers[name];
+            let transport = if let Some(url) = &cfg.url {
+                format!("http {url}")
+            } else if let Some(command) = &cfg.command {
+                let args = cfg.args.as_ref().map(|a| a.join(" ")).unwrap_or_default();
+                format!("stdio {command} {args}").trim_end().to_owned()
+            } else {
+                String::from("(no transport configured)")
+            };
+            lines.push(format!("  {name} — {transport}"));
         }
         CommandResult::Text(lines.join("\n"))
     }
@@ -2929,16 +3121,31 @@ impl ReplSession {
     }
 
     fn execute_commit_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        self.dispatch_skill_command("commit", "/commit", "commit", args)
+    }
+
+    /// Expand a built-in skill via the Skill tool and run the resulting prompt as
+    /// a turn. Shared by the thin skill-backed slash commands (`/commit`,
+    /// `/explain`, `/changelog`, …): `skill` is the registry skill name,
+    /// `command` the user-facing name for error messages, and `label` the verb
+    /// shown in the "Dispatching …" status line.
+    fn dispatch_skill_command(
+        &mut self,
+        skill: &str,
+        command: &str,
+        label: &str,
+        args: &str,
+    ) -> Vec<ReplEvent> {
         let result = self.tool_registry.call(
             "Skill",
-            serde_json::json!({"skill": "commit", "args": args}),
+            serde_json::json!({"skill": skill, "args": args}),
             &self.tool_context,
         );
         if result.is_error {
-            return vec![ReplEvent::Output(format!("/commit: {}", result.content))];
+            return vec![ReplEvent::Output(format!("{command}: {}", result.content))];
         }
-        let mut events = vec![ReplEvent::Output(String::from(
-            "Dispatching commit skill to the model.",
+        let mut events = vec![ReplEvent::Output(format!(
+            "Dispatching {label} skill to the model."
         ))];
         events.extend(
             self.agent_loop
@@ -2947,6 +3154,21 @@ impl ReplSession {
                 .filter_map(agent_event_to_repl_event),
         );
         events
+    }
+
+    /// `/explain <file|symbol|area>` — read-only codebase explanation.
+    fn execute_explain_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        if args.trim().is_empty() {
+            return vec![ReplEvent::Output(String::from(
+                "Usage: /explain <file path, symbol, or area to explain>",
+            ))];
+        }
+        self.dispatch_skill_command("explain", "/explain", "explain", args)
+    }
+
+    /// `/changelog [range]` — draft release notes from the git history.
+    fn execute_changelog_command(&mut self, args: &str) -> Vec<ReplEvent> {
+        self.dispatch_skill_command("changelog", "/changelog", "changelog", args)
     }
 
     fn execute_review_command(&mut self, args: &str) -> Vec<ReplEvent> {
@@ -4104,11 +4326,33 @@ impl ReplSession {
         let set_cost_display_enabled = Arc::clone(&self.cost_display_enabled);
         let summary = self.agent_loop.cost_tracker().summary();
         let cwd = self.tool_context.cwd.clone();
+        let commands_cwd = cwd.clone();
 
         CommandContext::builder()
             .clear_conversation(|| Some(String::new()))
             .compact_conversation(|| {})
-            .all_commands(repl_command_sources)
+            // Built-in command list plus any user-authored markdown commands
+            // discovered for this cwd, so the latter tab-complete and show in
+            // /help just like the built-ins.
+            .all_commands(move || {
+                let mut sources = repl_command_sources();
+                for name in discover_command_names(&commands_cwd) {
+                    // A custom command never shadows a built-in in completion.
+                    if sources
+                        .iter()
+                        .any(|s| s.name == name || s.aliases.iter().any(|a| a == &name))
+                    {
+                        continue;
+                    }
+                    sources.push(CommandCompletionSource::new(
+                        name,
+                        Vec::<&str>::new(),
+                        "Custom command (project .deeptide/commands)",
+                        "",
+                    ));
+                }
+                sources
+            })
             .cost_summary(move || summary.clone())
             .cost_display_enabled(move || cost_display_enabled.load(Ordering::SeqCst))
             .set_cost_display_enabled(move |enabled| {
@@ -4850,6 +5094,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             "/version",
         ),
         CommandCompletionSource::new(
+            "todo",
+            ["todos", "tasklist"],
+            "List the agent's current todo backlog (status-bar count, expanded)",
+            "/todo",
+        ),
+        CommandCompletionSource::new(
             "suggest",
             ["suggestions"],
             "Toggle or re-show follow-up suggestions",
@@ -4884,6 +5134,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             Vec::<&str>::new(),
             "List configured hooks",
             "/hooks",
+        ),
+        CommandCompletionSource::new(
+            "mcp",
+            Vec::<&str>::new(),
+            "List, add, or remove MCP servers in settings.json",
+            "/mcp [add <name> <cmd…>|add <name> --url <url>|remove <name>]",
         ),
         CommandCompletionSource::new(
             "init",
@@ -4940,6 +5196,18 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             Vec::<&str>::new(),
             "Review changed code for reuse, quality, and efficiency",
             "/simplify [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "explain",
+            Vec::<&str>::new(),
+            "Explain a file, symbol, or area of the codebase (read-only)",
+            "/explain <file|symbol|area>",
+        ),
+        CommandCompletionSource::new(
+            "changelog",
+            Vec::<&str>::new(),
+            "Draft release notes from the git history",
+            "/changelog [git-range]",
         ),
         CommandCompletionSource::new(
             "skills",
@@ -5651,6 +5919,78 @@ fn discover_agent_names(cwd: &std::path::Path) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+/// Directories searched for user-authored slash commands (`<name>.md`), in
+/// precedence order: project-scoped config, global config, in-repo `.deeptide`,
+/// then home `.deeptide`. Mirrors the agent-discovery layout so a project can
+/// ship commands alongside its agents.
+fn command_dirs(cwd: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![
+        MemorySystem::tide_config_dir()
+            .join("projects")
+            .join(MemorySystem::project_slug(cwd))
+            .join("commands"),
+        MemorySystem::tide_config_dir().join("commands"),
+        cwd.join(".deeptide").join("commands"),
+    ];
+    if let Some(home) = home_dir() {
+        dirs.push(home.join(".deeptide").join("commands"));
+    }
+    dirs
+}
+
+/// Names of all discoverable custom slash commands for `cwd`, deduped + sorted.
+/// Used to register them for tab-completion and `/help`.
+fn discover_command_names(cwd: &std::path::Path) -> Vec<String> {
+    let mut names = Vec::new();
+    for dir in command_dirs(cwd) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                // Only register names that `find_command_file` can actually
+                // resolve, so a file like `foo bar.md` never shows in /help or
+                // completion as a command that then fails to run.
+                if is_valid_command_name(stem) {
+                    names.push(stem.to_owned());
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Command names are restricted to a safe charset so a `/..%2f`-style name
+/// can't escape the commands directory, and so discovery and resolution agree
+/// on exactly which files are runnable commands.
+fn is_valid_command_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Resolve a custom-command name to its `.md` file, honouring `command_dirs`
+/// precedence (first match wins).
+fn find_command_file(cwd: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    if !is_valid_command_name(name) {
+        return None;
+    }
+    for dir in command_dirs(cwd) {
+        let candidate = dir.join(format!("{name}.md"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn home_dir() -> Option<std::path::PathBuf> {

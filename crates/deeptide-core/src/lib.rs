@@ -118,7 +118,7 @@ pub use tools::{
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
     TodoSummary, TodoWriteTool, Tool, ToolContext, ToolMetadata, ToolRegistry, ToolResult,
     ToolSearchTool, VerifyPlanExecutionTool, VideoTranscribeTool, VisionTool, WebFetchTool,
-    WebSearchTool, WriteTool, todo_summary,
+    WebSearchTool, WriteTool, todo_lines, todo_summary,
 };
 pub use tps::{TpsRecord, TpsSample};
 pub use tui::{
