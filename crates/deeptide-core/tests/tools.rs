@@ -1824,14 +1824,11 @@ fn publish_tool_renders_status_and_validates_option_conflicts() {
         "status cannot be combined with publish/delete options."
     );
 
-    let handle_conflict = PublishTool.call(
-        serde_json::json!({"random": true, "handle": "demo"}),
-        &context,
-    );
+    let handle_conflict = PublishTool.call(serde_json::json!({"handle": "demo"}), &context);
     assert!(handle_conflict.is_error);
     assert_eq!(
         handle_conflict.content,
-        "Use either random or handle, not both."
+        "handle is only valid with delete for legacy direct publishes."
     );
 }
 
@@ -1851,15 +1848,21 @@ fn publish_tool_dry_run_detects_static_output_and_writes_safety_ignore() {
     std::fs::write(dist.join("node_modules/pkg/private.js"), "ignored").expect("ignored");
 
     let result = PublishTool.call(
-        serde_json::json!({"dry_run": true, "handle": "demo"}),
+        serde_json::json!({"dry_run": true, "title": "Demo App"}),
         &ToolContext::new(temp.path()),
     );
 
     assert!(!result.is_error, "{}", result.content);
     assert!(result.content.contains("Publish dry run: ready"));
     assert!(result.content.contains("Directory:  dist"));
-    assert!(result.content.contains("Handle:     demo"));
+    assert!(
+        result
+            .content
+            .contains("Target:     Paean Apps Square public listing + *.clide.app")
+    );
+    assert!(result.content.contains("Title:      Demo App"));
     assert!(result.content.contains("Index:      yes"));
+    assert!(result.content.contains("Secrets:    passed"));
     assert!(!result.content.contains("app.js.map"));
     assert!(!result.content.contains("Source maps are included"));
     assert!(!result.content.contains("private.js"));
@@ -1873,8 +1876,12 @@ fn publish_tool_dry_run_detects_static_output_and_writes_safety_ignore() {
 #[test]
 fn publish_tool_reports_missing_output_and_missing_auth() {
     let _guard = publish_env_guard();
-    clear_publish_env();
     let temp = tempfile::tempdir().expect("tempdir");
+    clear_publish_env();
+    unsafe {
+        std::env::set_var("HOME", temp.path().join("home"));
+        std::env::set_var("TIDE_CONFIG_DIR", temp.path().join("tide-config"));
+    }
     let missing = PublishTool.call(
         serde_json::json!({"dry_run": true}),
         &ToolContext::new(temp.path()),
@@ -1904,25 +1911,32 @@ fn publish_tool_uploads_archive_and_saves_state() {
     std::fs::write(public.join("app.js"), "console.log('ok');").expect("asset");
 
     let base_url = serve_publish_sequence(vec![
-        (200, r#"{"success":true}"#),
+        (200, r#"{"workspace":{"hashKey":"wk_123"}}"#),
+        (200, r#"{"success":true,"fileCount":2,"totalBytes":31}"#),
         (
             200,
-            r#"{"success":true,"data":{"handle":"demo","assignedHandle":null,"url":"https://demo.clide.app","shortUrl":"https://demo.clide.app","fileCount":2,"totalBytes":31,"overwritten":false,"archiveUrl":"https://example.com/site.zip"}}"#,
+            r#"{"success":true,"data":{"hashKey":"sq_123","playUrl":"https://abcdefghi.clide.app/","status":"listed"}}"#,
         ),
     ]);
     install_publish_env(&base_url);
 
     let result = PublishTool.call(
-        serde_json::json!({"handle": "demo"}),
+        serde_json::json!({"title": "Demo App", "category": "games", "tags": ["pixel,roguelike"]}),
         &ToolContext::new(temp.path()),
     );
 
     assert!(!result.is_error, "{}", result.content);
-    assert!(result.content.contains("Published: https://demo.clide.app"));
-    assert!(result.content.contains("Handle:     demo"));
+    assert!(
+        result
+            .content
+            .contains("Published: https://abcdefghi.clide.app/")
+    );
+    assert!(result.content.contains("Workspace:  wk_123"));
+    assert!(result.content.contains("Square app: sq_123"));
     let state = std::fs::read_to_string(temp.path().join(".clide/publish.json")).expect("state");
-    assert!(state.contains("\"handle\": \"demo\""));
-    assert!(state.contains("\"url\": \"https://demo.clide.app\""));
+    assert!(state.contains("\"workspaceHashKey\": \"wk_123\""));
+    assert!(state.contains("\"squareAppHashKey\": \"sq_123\""));
+    assert!(state.contains("\"url\": \"https://abcdefghi.clide.app/\""));
 }
 
 #[test]
@@ -1935,13 +1949,10 @@ fn publish_tool_deletes_saved_handle_and_marks_state() {
         r#"{"handle":"demo","url":"https://demo.clide.app"}"#,
     )
     .expect("state");
-    let base_url = serve_publish_sequence(vec![
-        (200, r#"{"success":true}"#),
-        (
-            200,
-            r#"{"success":true,"handle":"demo","deletedObjects":3}"#,
-        ),
-    ]);
+    let base_url = serve_publish_sequence(vec![(
+        200,
+        r#"{"success":true,"handle":"demo","deletedObjects":3}"#,
+    )]);
     install_publish_env(&base_url);
 
     let result = PublishTool.call(
@@ -3499,9 +3510,22 @@ fn install_publish_env(base_url: &str) {
     unsafe {
         std::env::set_var("PAEAN_API_TOKEN", "fixture-credential");
         std::env::set_var("PAEAN_API_BASE_URL", base_url);
+        std::env::set_var(
+            "HOME",
+            std::env::temp_dir().join("deeptide-publish-test-home"),
+        );
+        std::env::set_var(
+            "TIDE_CONFIG_DIR",
+            std::env::temp_dir().join("deeptide-publish-test-config"),
+        );
         std::env::remove_var("PAEAN_TOKEN");
+        std::env::remove_var("PAEAN_AUTH_TOKEN");
+        std::env::remove_var("PAEAN_API_KEY");
         std::env::remove_var("CLIDE_API_TOKEN");
         std::env::remove_var("CLIDE_API_BASE_URL");
+        std::env::remove_var("PAEAN_API_BASE");
+        std::env::remove_var("ZERO_API_BASE");
+        std::env::remove_var("ZERO_CLI_BASE_URL");
     }
 }
 
@@ -3509,9 +3533,14 @@ fn clear_publish_env() {
     unsafe {
         std::env::remove_var("PAEAN_API_TOKEN");
         std::env::remove_var("PAEAN_TOKEN");
+        std::env::remove_var("PAEAN_AUTH_TOKEN");
+        std::env::remove_var("PAEAN_API_KEY");
         std::env::remove_var("CLIDE_API_TOKEN");
         std::env::remove_var("PAEAN_API_BASE_URL");
         std::env::remove_var("CLIDE_API_BASE_URL");
+        std::env::remove_var("PAEAN_API_BASE");
+        std::env::remove_var("ZERO_API_BASE");
+        std::env::remove_var("ZERO_CLI_BASE_URL");
     }
 }
 

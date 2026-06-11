@@ -10,10 +10,9 @@
 //! (`TIDE_EVENT`, `TIDE_INPUT_JSON`, `TIDE_CWD`, … plus `DEEPTIDE_*` aliases).
 //! A per-hook timeout bounds runaway commands.
 
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
+use std::io;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::config::{HookEntry, SettingsHooks};
 
@@ -172,7 +171,7 @@ impl HookEngine {
             .env("DEEPTIDE_INPUT_JSON", input_json.unwrap_or(""))
             .env("DEEPTIDE_CWD", &self.cwd);
 
-        let child = match command.spawn() {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 return HookOutcome {
@@ -185,43 +184,110 @@ impl HookEngine {
             }
         };
 
-        // Wait for completion on a worker thread so a per-hook timeout can be
-        // enforced. On timeout the child is left to finish in the background;
-        // the outcome is reported as blocked.
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = tx.send(child.wait_with_output());
-        });
-
-        match rx.recv_timeout(Duration::from_millis(entry.effective_timeout_ms())) {
-            Ok(Ok(output)) => {
-                let exit_code = output.status.code().unwrap_or(-1);
-                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                text.push_str(&String::from_utf8_lossy(&output.stderr));
+        match wait_for_child(
+            &mut child,
+            Duration::from_millis(entry.effective_timeout_ms()),
+        ) {
+            Ok(WaitStatus::Exited) => match child.wait_with_output() {
+                Ok(output) => {
+                    let exit_code = output.status.code().unwrap_or(-1);
+                    HookOutcome {
+                        name,
+                        matcher: entry.matcher.clone(),
+                        exit_code,
+                        blocked: exit_code != 0,
+                        output: output_text(&output),
+                    }
+                }
+                Err(error) => HookOutcome {
+                    name,
+                    matcher: entry.matcher.clone(),
+                    exit_code: -1,
+                    blocked: true,
+                    output: format!("hook error: {error}"),
+                },
+            },
+            Ok(WaitStatus::TimedOut) => {
+                terminate_hook_process(&mut child);
+                let partial = child
+                    .wait_with_output()
+                    .as_ref()
+                    .map(output_text)
+                    .unwrap_or_else(|error| format!("hook error while collecting output: {error}"));
+                let mut output = format!("hook timed out after {}ms", entry.effective_timeout_ms());
+                if !partial.is_empty() {
+                    output.push_str(": ");
+                    output.push_str(&partial);
+                }
                 HookOutcome {
                     name,
                     matcher: entry.matcher.clone(),
-                    exit_code,
-                    blocked: exit_code != 0,
-                    output: text.trim().to_owned(),
+                    exit_code: -1,
+                    blocked: true,
+                    output,
                 }
             }
-            Ok(Err(error)) => HookOutcome {
-                name,
-                matcher: entry.matcher.clone(),
-                exit_code: -1,
-                blocked: true,
-                output: format!("hook error: {error}"),
-            },
-            Err(_) => HookOutcome {
-                name,
-                matcher: entry.matcher.clone(),
-                exit_code: -1,
-                blocked: true,
-                output: format!("hook timed out after {}ms", entry.effective_timeout_ms()),
-            },
+            Err(error) => {
+                terminate_hook_process(&mut child);
+                HookOutcome {
+                    name,
+                    matcher: entry.matcher.clone(),
+                    exit_code: -1,
+                    blocked: true,
+                    output: format!("hook error: {error}"),
+                }
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitStatus {
+    Exited,
+    TimedOut,
+}
+
+fn wait_for_child(child: &mut Child, timeout: Duration) -> io::Result<WaitStatus> {
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(WaitStatus::Exited);
+        }
+        if started.elapsed() >= timeout {
+            return Ok(WaitStatus::TimedOut);
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
+
+fn output_text(output: &Output) -> String {
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    text.trim().to_owned()
+}
+
+#[cfg(unix)]
+fn terminate_hook_process(child: &mut Child) {
+    let pgid = child.id() as libc::pid_t;
+    // SAFETY: the hook shell is spawned in its own process group below, so a
+    // negative pid targets only that hook's process group.
+    unsafe {
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+    if wait_for_child(child, Duration::from_millis(200)).ok() == Some(WaitStatus::Exited) {
+        return;
+    }
+    // SAFETY: same process-group invariant as above; SIGKILL is the final
+    // fallback for hooks that ignore graceful termination.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn terminate_hook_process(child: &mut Child) {
+    let _ = child.kill();
 }
 
 fn matcher_matches(matcher: &str, tool: Option<&str>) -> bool {
@@ -258,8 +324,11 @@ fn make_input_payload(tool: Option<&str>, input_json: Option<&str>) -> String {
 
 #[cfg(unix)]
 fn shell_command(command: &str) -> Command {
+    use std::os::unix::process::CommandExt;
+
     let mut c = Command::new("/bin/sh");
     c.arg("-c").arg(command);
+    c.process_group(0);
     c
 }
 
@@ -324,6 +393,31 @@ mod tests {
         assert!(reason.is_some(), "Read should be blocked");
         // Write matches only its own (exit 0) and `*` (exit 0) -> not blocked.
         assert!(engine.pre_tool_block_reason("Write", None).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_hooks_are_terminated_and_reported() {
+        let mut entry = hook("*", "printf started; sleep 5");
+        entry.timeout_ms = Some(50);
+        let hooks = SettingsHooks {
+            pre_tool_use: Some(vec![entry]),
+            ..Default::default()
+        };
+        let engine = HookEngine::new(hooks, std::env::temp_dir());
+        let started = Instant::now();
+
+        let outcomes = engine.run(HookEvent::PreToolUse, Some("Read"), None);
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout should return promptly"
+        );
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].blocked);
+        assert_eq!(outcomes[0].exit_code, -1);
+        assert!(outcomes[0].output.contains("timed out after 50ms"));
+        assert!(outcomes[0].output.contains("started"));
     }
 
     #[cfg(unix)]

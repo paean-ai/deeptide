@@ -19,6 +19,9 @@ time.workspace = true
 unicode-width.workspace = true
 zip.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 
