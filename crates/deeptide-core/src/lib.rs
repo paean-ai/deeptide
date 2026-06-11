@@ -1,6 +1,7 @@
 pub mod agent_loop;
 pub mod api;
 pub mod at_references;
+pub mod auth;
 pub mod background_shell;
 pub mod checkpoints;
 pub mod commands;
@@ -53,6 +54,11 @@ pub use api::{
 pub use at_references::{
     AtExpansionOptions, AtReference, AttachedFile, ExpansionResult, ExpansionStatus, ImageKind,
     expand_at_references, parse_at_references,
+};
+pub use auth::{
+    PAEAN_API_BASE_URL, PAEAN_WEB_BASE_URL, PaeanCredentials, clear_paean_credentials,
+    effective_paean_token, has_paean_token, load_paean_credentials, paean_credentials_path,
+    save_paean_credentials,
 };
 pub use checkpoints::{Checkpoint, CheckpointStore, MAX_CHECKPOINTS, SelectorOutcome};
 pub use commands::{

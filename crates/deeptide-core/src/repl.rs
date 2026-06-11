@@ -1307,6 +1307,9 @@ impl ReplSession {
             "remember" => RememberCommand.execute(args, &context),
             "permission" | "perm" | "permissions" => self.execute_permission_command(args),
             "commit" => return self.execute_commit_command(args),
+            "publish" => {
+                return self.dispatch_skill_command("publish", "/publish", "publish", args);
+            }
             "review" => return self.execute_review_command(args),
             "simplify" => return self.execute_simplify_command(args),
             "explain" => return self.execute_explain_command(args),
@@ -4824,6 +4827,7 @@ pub fn slash_command_invokes_agent(line: &str) -> bool {
         // Skill-shortcut commands all run the model after staging a
         // skill payload — see `execute_commit_command` etc.
         "commit",
+        "publish",
         "review",
         "simplify",
         "dream",
@@ -5146,6 +5150,12 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
             Vec::<&str>::new(),
             "Bootstrap project memory and guide files",
             "/init [extra context]",
+        ),
+        CommandCompletionSource::new(
+            "publish",
+            Vec::<&str>::new(),
+            "Publish a static frontend to Paean Apps Square and clide.app",
+            "/publish [--dir <dir>] [--title <title>] [--category <category>]",
         ),
         CommandCompletionSource::new(
             "update",
@@ -7080,6 +7090,8 @@ mod slash_command_classifier_tests {
             "/again",
             "/commit",
             "/commit -m feat",
+            "/publish",
+            "/publish --dir dist",
             "/review 42",
             "/simplify src/",
             "/dream",

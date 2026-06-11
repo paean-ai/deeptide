@@ -1478,15 +1478,19 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "Publish",
-            description: "Prepare, inspect, or delete a static frontend publish on clide.app.",
+            description: "Prepare, inspect, or publish a static frontend to Paean Apps Square and clide.app.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "dir": {"type": "string", "description": "Optional publish directory. Omit to auto-detect dist/build/out/.output/public/public/root."},
-                    "handle": {"type": "string", "description": "Optional custom clide.app handle or remote publish handle."},
-                    "random": {"type": "boolean", "description": "Set true only when the user explicitly asks for a new random handle."},
-                    "delete": {"type": "boolean", "description": "Set true to delete/unpublish the saved or specified remote publish."},
-                    "dry_run": {"type": "boolean", "description": "Inspect publish directory, handle, files, bytes, and ignore rules without uploading."},
+                    "title": {"type": "string", "description": "Optional Paean Apps Square title. Defaults to package.json name or project directory."},
+                    "summary": {"type": "string", "description": "Optional Paean Apps Square summary. Defaults to package.json description."},
+                    "category": {"type": "string", "description": "Optional Paean Apps Square category. Defaults to custom."},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional Paean Apps Square tags."},
+                    "allow_secrets": {"type": "boolean", "description": "Bypass high-confidence secret scan only when the user explicitly accepts the risk."},
+                    "handle": {"type": "string", "description": "Legacy direct-publish handle. Only valid with delete."},
+                    "delete": {"type": "boolean", "description": "Set true only to delete/unpublish a legacy direct publish handle."},
+                    "dry_run": {"type": "boolean", "description": "Inspect publish directory, metadata, files, bytes, ignore rules, and secret scan without uploading."},
                     "status": {"type": "boolean", "description": "Show saved .clide/publish.json state without contacting the publish API."}
                 }
             }),
