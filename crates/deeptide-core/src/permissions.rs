@@ -478,6 +478,7 @@ fn is_denied_in_plan_mode(tool_name: &str) -> bool {
             | "Skill"
             | "MCP"
             | "Publish"
+            | "Remix"
             | "RemoteTrigger"
             | "PushNotification"
             // SIGKILLs a background process — a side effect, blocked while planning.
@@ -608,6 +609,7 @@ fn is_destructive(tool_name: &str) -> bool {
             | "AskUserQuestion"
             | "MCP"
             | "Publish"
+            | "Remix"
             | "RemoteTrigger"
             | "PushNotification"
             // Terminating a process is impactful enough to confirm by default.
@@ -639,6 +641,7 @@ mod tests {
         "MemoryWrite",
         "Publish",
         "PushNotification",
+        "Remix",
         "RemoteTrigger",
         "Skill",
         "TaskCreate",
@@ -697,6 +700,7 @@ mod tests {
         "MemoryWrite",
         "Publish",
         "PushNotification",
+        "Remix",
         "RemoteTrigger",
         "Skill",
         "TaskCreate",

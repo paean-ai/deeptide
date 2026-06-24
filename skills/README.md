@@ -22,6 +22,13 @@ rediscovering the same product and engineering patterns.
   handoff, verification, and risk artifacts.
 - `research-brief-delivery` - produce decision-ready research briefs,
   comparison memos, evidence matrices, and action plans.
+- `publish` - publish a static frontend to Paean Apps Square and `*.clide.app`
+  via the native Publish tool, with good naming and complete metadata.
+- `remix` - remix one or more published Square games (by hash) into a new game
+  via the native Remix tool, recording the multi-parent remix lineage.
 
 These are documentation skills, not runtime dependencies. They should remain
 plain Markdown so agents can load them cheaply and apply them in any project.
+The `publish` and `remix` skills are the playbooks for Deeptide's built-in
+Publish and Remix tools (also exposed as the `/publish` and `/remix`
+slash-command skills).

@@ -1497,6 +1497,24 @@ fn tool_schemas() -> Vec<WireTool> {
             cache_control: None,
         },
         WireTool {
+            name: "Remix",
+            description: "Download the source of one or more published Paean Apps Square games by hash and scaffold a new game that remixes them.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "sources": {"type": "array", "items": {"type": "string"}, "description": "Published Square app references to remix. Each may be a bare hashKey, hash.8x.gg, hash.clide.app, an https URL, or hash=role to tag the borrowed aspect (e.g. h1=gameplay, h2=art, h3=theme)."},
+                    "dir": {"type": "string", "description": "Optional target directory for the new project. Auto-derived from the title when omitted."},
+                    "title": {"type": "string", "description": "Optional title for the new game (seeds clide.json)."},
+                    "summary": {"type": "string", "description": "Optional summary (seeds clide.json)."},
+                    "category": {"type": "string", "description": "Optional category (seeds clide.json)."},
+                    "license": {"type": "string", "description": "Optional SPDX license id for the new project. Defaults to MIT."},
+                    "dry_run": {"type": "boolean", "description": "Resolve and preview each source's metadata, target directory, and remix graph without downloading or writing files."}
+                },
+                "required": ["sources"]
+            }),
+            cache_control: None,
+        },
+        WireTool {
             name: "RemoteTrigger",
             description: "POST a JSON payload to a configured remote webhook endpoint.",
             input_schema: serde_json::json!({
@@ -2456,6 +2474,7 @@ mod tests {
             "ReviewArtifact",
             "Skill",
             "Publish",
+            "Remix",
             "RemoteTrigger",
             "PushNotification",
             "NotebookEdit",

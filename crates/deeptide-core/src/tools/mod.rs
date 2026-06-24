@@ -44,6 +44,8 @@ mod lsp;
 pub use lsp::*;
 mod publish;
 pub use publish::*;
+mod remix;
+pub use remix::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
@@ -188,6 +190,7 @@ impl ToolRegistry {
         registry.register(Box::<SkillTool>::default());
         registry.register(Box::<DiscoverSkillsTool>::default());
         registry.register(Box::<PublishTool>::default());
+        registry.register(Box::<RemixTool>::default());
         registry.register(Box::<RemoteTriggerTool>::default());
         registry.register(Box::<PushNotificationTool>::default());
         registry.register(Box::<NotebookEditTool>::default());
@@ -2105,6 +2108,14 @@ fn builtin_skills() -> &'static [BuiltinSkill] {
             prompt: "Publish the current project's static frontend output into a Paean workspace, deploy it to a *.clide.app URL, and list it publicly in Paean Apps Square.\n\nCall the native Publish tool for the operation.\nDo NOT run `/publish` through Bash; slash commands are REPL-only.\nDo NOT run `tide publish`; the agent has the native Publish tool.\nDo NOT use WebSearch to discover how Clide publishing works.\n\nBefore real publishing:\n  * First call Publish with `dry_run: true` and any user-provided metadata.\n  * Tell the user publishing is public: the site will be reachable at *.clide.app and listed in Paean Apps Square.\n  * Ask for explicit confirmation before calling Publish without `dry_run`.\n\nPublish tool input:\n  * For generic requests like \"$ARGUMENTS\" or \"publish to clide.app\", call Publish with no arguments after confirmation.\n  * Set `dir` only when the user names a specific directory with top-level `index.html`.\n  * Set `title`, `summary`, `category`, or `tags` when the user provides Square metadata.\n  * Set `allow_secrets` only when the secret scanner blocks and the user explicitly accepts the risk.\n  * Set `delete` only for legacy direct-publish cleanup; current Square publishes are managed through the saved workspace/listing.\n\nBehavior:\n  * Requires a valid Paean AI login token from `tide auth login`, even if another provider is active.\n  * Prefers built output directories over source: `dist`, `build`, `out`, `.output/public`, then `public`.\n  * If no publishable output exists and `package.json` has a build script, run the project's build command first.\n  * The published directory must contain a top-level `index.html`.\n  * `.clideignore` is created or updated at the project root with safety defaults before zipping.\n  * Secrets, `.env`, credentials, `.git`, `node_modules`, `.clide/`, logs, source maps, editor files, and OS junk are excluded.\n  * Included text assets are scanned for high-confidence secrets before upload.\n  * A successful publish creates or reuses a Paean workspace, imports the zip, publishes a public Square listing, and saves `.clide/publish.json` with `workspaceHashKey`, `squareAppHashKey`, and `url`.\n\nAfter running, report the URL, Square app hash, workspace hash, file count, and state file path.\nIf authentication fails, tell the user to run `tide auth login`.\nIf no top-level `index.html` exists, explain that built apps should publish the build output directory, not the source directory.\n\n$ARGUMENTS",
         },
         BuiltinSkill {
+            name: "remix",
+            description: "Remix one or more published Paean Apps Square games into a new game, recording the multi-parent remix lineage",
+            when_to_use: Some(
+                "Use when the user asks to remix, fork, combine, or mash up one or more published Paean Apps Square / clide.app games into a new one, usually by hash. Examples: \"remix hash1 hash2\", \"remix h1.8x.gg h2.clide.app\", \"用 hash1 的玩法和 hash2 的美术做个新游戏\", \"混合这几个游戏重做一个\".",
+            ),
+            prompt: "Download the source of one or more published *.clide.app games (by hash) and use them as the basis for a brand-new game, recording the full remix lineage so upstream creators can be credited.\n\nCall the native Remix tool for the download + scaffold.\nDo NOT run `/remix` through Bash; slash commands are REPL-only.\nDo NOT use WebSearch to discover how Clide remixing works.\nDo NOT manually curl the API — the Remix tool keeps the Paean token in-process.\n\nBefore the real run:\n  * First call Remix with `dry_run: true` and the user's sources to resolve each hash to its Square app (title/category/author) and preview the target directory and remix graph.\n  * Tell the user that remixing records lineage for each source — it credits each upstream creator and counts as a remix on their listing.\n  * Ask for explicit confirmation before calling Remix without `dry_run`.\n\nRemix tool input:\n  * `sources`: an array of published Square app references. Each may be a bare hashKey, `hash.8x.gg`, `hash.clide.app`, a full `https://hash.clide.app/` URL, `https://8x.gg/hash`, or `hash=role` to tag the borrowed aspect (e.g. \"h1=gameplay\", \"h2=art\", \"h3=theme\").\n  * `dir`: optional target directory for the new project (auto-derived from the title when omitted).\n  * `title`, `summary`, `category`, `license`: optional metadata to seed clide.json.\n\nAfter the tool runs, the target directory contains:\n  * `.remix-sources/<hash>/` - the full downloaded source of each upstream game.\n  * `clide.json` - the project manifest with the remix graph (`remix.parent` for the primary upstream + `remix.parents[]` for every contributing source, each with its `role` and revenue `weight`).\n  * `LICENSE` and `.clideignore` (which excludes `.remix-sources/` from publishing).\n\nThen build the new game:\n  * Read the relevant files under each `.remix-sources/<hash>/` and compose a genuinely new game at the target directory's top level, honoring the aspect the user assigned to each source (the classic recipe is \"h1 gameplay + h2 art/visual style + h3 theme/subject\").\n  * Do NOT ship the upstream sources verbatim - synthesize a new `index.html` (and assets) that combines the chosen aspects. Keep `.remix-sources/` for reference only; it is not published.\n  * Update `clide.json`: set a fitting `title`, `summary`, `category`, and `tags`, and set each `remix.parents[].role` to the aspect actually borrowed (adjust `weight` for an uneven upstream split).\n  * When it runs, publish it with the Publish tool from the target directory; Publish reads `clide.json` for naming, metadata, and the remix lineage automatically.\n\nIf authentication fails, tell the user to run `tide auth login`.\nIf a source is not found / not listed / not remixable, the tool reports which hash failed before any download; fix or drop that source and retry.\n\n$ARGUMENTS",
+        },
+        BuiltinSkill {
             name: "update-config",
             description: "Configure Deeptide CLI settings",
             when_to_use: None,
@@ -3477,6 +3488,7 @@ fn tool_search_keywords(name: &str) -> Vec<&'static str> {
             "dry run",
             "unpublish",
         ],
+        "Remix" => vec!["remix", "fork", "combine", "mash up", "clide.app", "square"],
         "RemoteTrigger" => vec!["webhook", "remote", "trigger", "post", "automation"],
         "PushNotification" => vec![
             "notification",

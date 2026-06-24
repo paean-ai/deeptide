@@ -1740,6 +1740,7 @@ fn discover_skills_lists_every_builtin_skill_as_json() {
         "init",
         "batch",
         "publish",
+        "remix",
         "update-config",
         "explain",
         "changelog",
