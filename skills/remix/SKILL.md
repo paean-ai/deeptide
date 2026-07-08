@@ -18,10 +18,12 @@ upstream creator can be credited.
 ## Workflow
 
 1. **Dry run first.** Call Remix with `dry_run: true` and the user's `sources`.
-   Each source may be a bare hashKey, `hash.8x.gg`, `hash.clide.app`, an https
-   URL, or `hash=role` to tag the borrowed aspect (e.g. `h1=gameplay`,
-   `h2=art`, `h3=theme`). Review the resolved titles/authors and the planned
-   remix graph.
+   Each source must resolve to a Square `hashKey`: bare `hashKey`,
+   `hashKey.8x.gg`, `https://8x.gg/hashKey`, `https://x.8x.gg/pub/hashKey`, or
+   `hashKey=role` to tag the borrowed aspect (e.g. `h1=gameplay`, `h2=art`,
+   `h3=theme`). A `*.clide.app` URL is a deployed handle, not necessarily the
+   Square `hashKey`; ask for the hashKey or resolve it from the backend before
+   calling Remix. Review the resolved titles/authors and the planned remix graph.
 2. **Confirm.** Remixing records lineage for each source — it credits each
    upstream creator and counts as a remix on their listing. Get explicit
    confirmation.
@@ -32,6 +34,9 @@ upstream creator can be credited.
    new game at the target top level, honoring each source's assigned aspect. Do
    NOT ship the upstream sources verbatim — combine the chosen aspects into a
    new `index.html` (and assets). `.remix-sources/` stays local and unpublished.
+   Preserve compatible attribution/license notices, change project identity and
+   storage/save keys, and add top-level `favicon.svg` plus `banner.jpg` at
+   exactly 800x400 when possible.
 5. **Finalize `clide.json`.** Set a fitting `title`, `summary`, `category`, and
    `tags`, and set each `remix.parents[].role` to the aspect actually borrowed
    (adjust `weight` for an uneven upstream split).
@@ -43,13 +48,29 @@ upstream creator can be credited.
 Lineage is recorded in two compatible shapes at once:
 
 - `remix.parent` — the single primary upstream (tree form; mirrors the backend's
-  single-parent field).
+  `remixOfHashKey` field). Pick the strongest direct source, not a transitive
+  ancestor.
 - `remix.parents[]` — every direct upstream with its borrowed `role` and a
-  revenue `weight`. This is the adjacency list of the multi-parent remix DAG,
-  ready for upstream revenue-sharing.
+  revenue `weight`. Publish forwards these as backend `remixOfHashKeys`. This is
+  the adjacency list of the multi-parent remix DAG, ready for upstream
+  revenue-sharing. Include direct sources only; do not copy transitive ancestors
+  unless the remix directly used them.
+
+## Copyright and assets
+
+- Treat `.remix-sources/` as reference material. Do not publish it or copy an
+  upstream project unchanged as the new game.
+- Keep license-compatible attribution for borrowed art, code, sounds, writing,
+  mechanics, and recognizable style. If compatibility is unclear, ask before
+  publishing.
+- `favicon.svg` and 800x400 `banner.jpg` are expected Square listing assets for
+  remix and create workflows. Publish warns if they are missing, but it can still
+  submit after user confirmation.
 
 ## Failure handling
 
 - Auth missing/expired → run `tide auth login`.
 - A source that is not found / not listed / not remixable is reported before any
   download; fix or drop that source and retry.
+- If the user only gives a `*.clide.app` play URL, get the Square hashKey first;
+  the handle alone is not reliable lineage input.

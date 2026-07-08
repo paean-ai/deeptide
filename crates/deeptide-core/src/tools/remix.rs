@@ -101,7 +101,7 @@ impl RemixOptions {
 
         if sources.is_empty() {
             return Err(String::from(
-                "Remix needs at least one source. Pass `sources` as an array of published Square app hashes (each may be `hash` or `hash=role`, or a hash.clide.app / hash.8x.gg / URL form).",
+                "Remix needs at least one source. Pass `sources` as an array of published Square app hashKeys (each may be `hashKey`, `hashKey=role`, `hashKey.8x.gg`, or an 8x.gg URL). A *.clide.app play URL is a deployed handle, not necessarily the Square hashKey.",
             ));
         }
 
@@ -292,8 +292,10 @@ fn normalize_remix_token(token: &str) -> Result<String, String> {
     let lower = host.to_ascii_lowercase();
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
-    let hash = if let Some(stripped) = lower.strip_suffix(".clide.app") {
-        host[..stripped.len()].to_owned()
+    let hash = if lower.ends_with(".clide.app") {
+        return Err(format!(
+            "Invalid remix source: {token} is a clide.app play URL/handle, not necessarily a Square hashKey. Use the app's hashKey from Square or an 8x.gg hash URL."
+        ));
     } else if lower == "8x.gg" || lower == "www.8x.gg" || lower == "x.8x.gg" {
         let segs: &[&str] = if segments
             .first()
@@ -819,7 +821,7 @@ fn render_remix_success(
         lines.push(format!("  Wrote:    {}", written.join(", ")));
     }
     lines.push(String::from(
-        "Build the new game in the target directory using the downloaded sources under .remix-sources/, then run the Publish tool from there.",
+        "Build the new game in the target directory using the downloaded sources under .remix-sources/, add top-level favicon.svg and 800x400 banner.jpg when possible, then run the Publish tool from there.",
     ));
     lines.join("\n")
 }
@@ -839,14 +841,6 @@ mod tests {
             "aB3dEf12"
         );
         assert_eq!(
-            normalize_remix_token("aB3dEf12.clide.app").expect("remix test"),
-            "aB3dEf12"
-        );
-        assert_eq!(
-            normalize_remix_token("https://aB3dEf12.clide.app/play?x=1#f").expect("remix test"),
-            "aB3dEf12"
-        );
-        assert_eq!(
             normalize_remix_token("https://8x.gg/aB3dEf12").expect("remix test"),
             "aB3dEf12"
         );
@@ -856,6 +850,8 @@ mod tests {
         );
         assert!(normalize_remix_token("ab").is_err());
         assert!(normalize_remix_token("../etc/passwd").is_err());
+        assert!(normalize_remix_token("aB3dEf12.clide.app").is_err());
+        assert!(normalize_remix_token("https://aB3dEf12.clide.app/play?x=1#f").is_err());
         assert!(normalize_remix_token("").is_err());
     }
 
