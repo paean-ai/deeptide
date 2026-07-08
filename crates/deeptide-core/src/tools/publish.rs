@@ -248,6 +248,7 @@ struct PublishPlan {
     has_index: bool,
     sample_files: Vec<String>,
     secret_findings: Vec<PublishSecretFinding>,
+    asset_warnings: Vec<String>,
     notes: Vec<String>,
 }
 
@@ -257,6 +258,8 @@ struct PublishMetadata {
     summary: String,
     category: String,
     tags: Vec<String>,
+    remix_of_hash_key: Option<String>,
+    remix_of_hash_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -558,6 +561,7 @@ fn build_publish_plan(
         total_bytes = total_bytes.saturating_add(metadata.len());
     }
     let secret_findings = scan_publish_secrets(publish_dir, files);
+    let asset_warnings = publish_asset_warnings(publish_dir, files);
     if !allow_secrets && !secret_findings.is_empty() {
         return Err(render_secret_block_message(&secret_findings));
     }
@@ -578,6 +582,7 @@ fn build_publish_plan(
         has_index: files.iter().any(|file| file == "index.html"),
         sample_files: files.iter().take(6).cloned().collect(),
         secret_findings,
+        asset_warnings,
         notes,
     })
 }
@@ -619,6 +624,24 @@ fn render_publish_dry_run(plan: &PublishPlan) -> String {
     if !plan.sample_files.is_empty() {
         lines.push(format!("  Sample:     {}", plan.sample_files.join(", ")));
     }
+    if !plan.metadata.remix_of_hash_keys.is_empty() {
+        lines.push(format!(
+            "  Remix API:  remixOfHashKey={}, remixOfHashKeys={}",
+            plan.metadata
+                .remix_of_hash_key
+                .as_deref()
+                .unwrap_or_default(),
+            plan.metadata.remix_of_hash_keys.join(", ")
+        ));
+    }
+    if !plan.asset_warnings.is_empty() {
+        lines.push(String::from("  Asset warnings:"));
+        lines.extend(
+            plan.asset_warnings
+                .iter()
+                .map(|warning| format!("    - {warning}")),
+        );
+    }
     if !plan.notes.is_empty() {
         lines.push(String::from("  Notes:"));
         lines.extend(plan.notes.iter().map(|note| format!("    - {note}")));
@@ -631,12 +654,14 @@ fn build_publish_metadata(
     options: &PublishOptions,
 ) -> Result<PublishMetadata, String> {
     let package = read_package_json(project_root).ok();
+    let manifest = read_clide_json(project_root).ok();
     let title = options
         .title
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+        .or_else(|| manifest_string(&manifest, "title"))
         .or_else(|| {
             package
                 .as_ref()
@@ -661,6 +686,7 @@ fn build_publish_metadata(
     let summary = options
         .summary
         .clone()
+        .or_else(|| manifest_string(&manifest, "summary"))
         .or_else(|| {
             package
                 .as_ref()
@@ -669,15 +695,87 @@ fn build_publish_metadata(
                 .map(ToOwned::to_owned)
         })
         .unwrap_or_default();
+    let manifest_tags = manifest_tags(&manifest);
+    let remix_hashes = manifest_remix_hashes(&manifest);
     Ok(PublishMetadata {
         title,
         summary,
         category: options
             .category
             .clone()
+            .or_else(|| manifest_string(&manifest, "category"))
             .unwrap_or_else(|| String::from("custom")),
-        tags: dedupe_tags(&options.tags),
+        tags: if options.tags.is_empty() {
+            dedupe_tags(&manifest_tags)
+        } else {
+            dedupe_tags(&options.tags)
+        },
+        remix_of_hash_key: remix_hashes.first().cloned(),
+        remix_of_hash_keys: remix_hashes,
     })
+}
+
+fn read_clide_json(project_root: &Path) -> Result<serde_json::Value, String> {
+    let text = fs::read_to_string(project_root.join("clide.json"))
+        .map_err(|error| format!("Failed to read clide.json: {error}"))?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|error| format!("Failed to parse clide.json: {error}"))
+}
+
+fn manifest_string(manifest: &Option<serde_json::Value>, key: &str) -> Option<String> {
+    manifest
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn manifest_tags(manifest: &Option<serde_json::Value>) -> Vec<String> {
+    manifest
+        .as_ref()
+        .and_then(|value| value.get("tags"))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn manifest_remix_hashes(manifest: &Option<serde_json::Value>) -> Vec<String> {
+    let mut hashes = Vec::new();
+    let Some(remix) = manifest.as_ref().and_then(|value| value.get("remix")) else {
+        return hashes;
+    };
+    if let Some(parent) = remix
+        .get("parent")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        hashes.push(parent.to_owned());
+    }
+    if let Some(parents) = remix.get("parents").and_then(serde_json::Value::as_array) {
+        for parent in parents {
+            let hash = parent
+                .get("hashKey")
+                .or_else(|| parent.get("hash"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if let Some(hash) = hash {
+                hashes.push(hash.to_owned());
+            }
+        }
+    }
+    dedupe_tags(&hashes)
 }
 
 fn dedupe_tags(tags: &[String]) -> Vec<String> {
@@ -764,6 +862,83 @@ fn publish_secret_kind(text: &str) -> Option<String> {
             .filter(|regex| regex.is_match(text))
             .map(|_| (*name).to_owned())
     })
+}
+
+fn publish_asset_warnings(publish_dir: &Path, files: &[String]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !files.iter().any(|file| file == "favicon.svg") {
+        warnings.push(String::from(
+            "Recommended top-level `favicon.svg` is missing.",
+        ));
+    }
+    if !files.iter().any(|file| file == "banner.jpg") {
+        warnings.push(String::from(
+            "Recommended top-level `banner.jpg` is missing; Square prefers 800x400.",
+        ));
+        return warnings;
+    }
+    match read_jpeg_dimensions(&publish_dir.join("banner.jpg")) {
+        Some((800, 400)) => {}
+        Some((width, height)) => warnings.push(format!(
+            "`banner.jpg` is {width}x{height}; recommended size is exactly 800x400."
+        )),
+        None => warnings.push(String::from(
+            "Could not verify `banner.jpg` dimensions; recommended size is exactly 800x400.",
+        )),
+    }
+    warnings
+}
+
+fn read_jpeg_dimensions(path: &Path) -> Option<(u16, u16)> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 {
+        return None;
+    }
+    let mut i = 2usize;
+    while i + 9 < bytes.len() {
+        while i < bytes.len() && bytes[i] == 0xff {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return None;
+        }
+        let marker = bytes[i];
+        i += 1;
+        if marker == 0xd9 || marker == 0xda {
+            return None;
+        }
+        if i + 2 > bytes.len() {
+            return None;
+        }
+        let len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+        if len < 2 || i + len > bytes.len() {
+            return None;
+        }
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            if i + 7 >= bytes.len() {
+                return None;
+            }
+            let height = u16::from_be_bytes([bytes[i + 3], bytes[i + 4]]);
+            let width = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]);
+            return Some((width, height));
+        }
+        i += len;
+    }
+    None
 }
 
 fn render_secret_block_message(findings: &[PublishSecretFinding]) -> String {
@@ -888,7 +1063,12 @@ fn upload_publish(
             category: plan.metadata.category.clone(),
         };
         save_publish_state(context, &response, publish_dir)?;
-        Ok(render_publish_success(&response, context, publish_dir))
+        Ok(render_publish_success(
+            &response,
+            context,
+            publish_dir,
+            plan,
+        ))
     })();
     let _ = fs::remove_file(&zip_path);
     result
@@ -1079,7 +1259,18 @@ fn publish_square(
         #[serde(rename = "indexFile")]
         index_file: &'a str,
         visibility: &'a str,
+        #[serde(rename = "remixOfHashKey")]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        remix_of_hash_key: Option<&'a str>,
+        #[serde(rename = "remixOfHashKeys")]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        remix_of_hash_keys: Vec<&'a str>,
     }
+    let remix_of_hash_keys = metadata
+        .remix_of_hash_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     post_json(
         auth,
         "/square/publish",
@@ -1092,6 +1283,8 @@ fn publish_square(
             path_prefix: "",
             index_file: "index.html",
             visibility: "public",
+            remix_of_hash_key: metadata.remix_of_hash_key.as_deref(),
+            remix_of_hash_keys,
         },
         "Square publish",
     )
@@ -1279,6 +1472,7 @@ fn render_publish_success(
     result: &PublishResult,
     context: &ToolContext,
     publish_dir: &Path,
+    plan: &PublishPlan,
 ) -> String {
     let rel_dir = {
         let rel = relative_path_string(&context.cwd, publish_dir);
@@ -1288,7 +1482,7 @@ fn render_publish_success(
             rel
         }
     };
-    [
+    let mut lines = vec![
         format!("Published: {}", result.url),
         format!("  Workspace:  {}", result.workspace_hash_key),
         format!("  Square app: {}", result.square_app_hash_key),
@@ -1298,8 +1492,26 @@ fn render_publish_success(
         format!("  Files:      {}", result.file_count),
         format!("  Bytes:      {}", result.total_bytes),
         String::from("  State:      .clide/publish.json"),
-    ]
-    .join("\n")
+    ];
+    if !plan.metadata.remix_of_hash_keys.is_empty() {
+        lines.push(format!(
+            "  Remix API:  remixOfHashKey={}, remixOfHashKeys={}",
+            plan.metadata
+                .remix_of_hash_key
+                .as_deref()
+                .unwrap_or_default(),
+            plan.metadata.remix_of_hash_keys.join(", ")
+        ));
+    }
+    if !plan.asset_warnings.is_empty() {
+        lines.push(String::from("  Asset warnings:"));
+        lines.extend(
+            plan.asset_warnings
+                .iter()
+                .map(|warning| format!("    - {warning}")),
+        );
+    }
+    lines.join("\n")
 }
 
 fn render_delete_success(result: &DeletePublishResult, fallback_handle: &str) -> String {
@@ -1325,4 +1537,114 @@ fn parse_publish_error_message_from_value(value: &serde_json::Value) -> Option<S
         .or_else(|| value.get("reason"))
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_jpeg(width: u16, height: u16) -> Vec<u8> {
+        vec![
+            0xff,
+            0xd8,
+            0xff,
+            0xc0,
+            0x00,
+            0x11,
+            0x08,
+            (height >> 8) as u8,
+            height as u8,
+            (width >> 8) as u8,
+            width as u8,
+            0x03,
+            0x01,
+            0x11,
+            0x00,
+            0x02,
+            0x11,
+            0x00,
+            0x03,
+            0x11,
+            0x00,
+            0xff,
+            0xd9,
+        ]
+    }
+
+    #[test]
+    fn clide_json_metadata_and_remix_lineage_are_used() {
+        let dir = tempfile::tempdir().expect("publish test");
+        fs::write(
+            dir.path().join("clide.json"),
+            r#"{
+              "title": "Remix Title",
+              "summary": "From manifest",
+              "category": "arcade",
+              "tags": ["Fast", "fast", "neon"],
+              "remix": {
+                "parent": "parent1",
+                "parents": [
+                  {"hashKey": "parent1", "role": "gameplay"},
+                  {"hashKey": "parent2", "role": "art"}
+                ]
+              }
+            }"#,
+        )
+        .expect("publish test");
+
+        let options = PublishOptions {
+            dir: None,
+            handle: None,
+            title: None,
+            summary: None,
+            category: None,
+            tags: vec![],
+            allow_secrets: false,
+            delete: false,
+            dry_run: true,
+            status: false,
+        };
+        let metadata = build_publish_metadata(dir.path(), &options).expect("publish test");
+
+        assert_eq!(metadata.title, "Remix Title");
+        assert_eq!(metadata.summary, "From manifest");
+        assert_eq!(metadata.category, "arcade");
+        assert_eq!(metadata.tags, vec!["fast", "neon"]);
+        assert_eq!(metadata.remix_of_hash_key.as_deref(), Some("parent1"));
+        assert_eq!(metadata.remix_of_hash_keys, vec!["parent1", "parent2"]);
+    }
+
+    #[test]
+    fn asset_warnings_are_non_blocking_and_check_banner_dimensions() {
+        let dir = tempfile::tempdir().expect("publish test");
+        let files = vec![String::from("index.html")];
+        let warnings = publish_asset_warnings(dir.path(), &files);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("favicon.svg"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("banner.jpg"))
+        );
+
+        fs::write(dir.path().join("favicon.svg"), "<svg/>").expect("publish test");
+        fs::write(dir.path().join("banner.jpg"), minimal_jpeg(1024, 512)).expect("publish test");
+        let files = vec![
+            String::from("index.html"),
+            String::from("favicon.svg"),
+            String::from("banner.jpg"),
+        ];
+        let warnings = publish_asset_warnings(dir.path(), &files);
+        assert_eq!(
+            read_jpeg_dimensions(&dir.path().join("banner.jpg")),
+            Some((1024, 512))
+        );
+        assert!(warnings.iter().any(|warning| warning.contains("1024x512")));
+
+        fs::write(dir.path().join("banner.jpg"), minimal_jpeg(800, 400)).expect("publish test");
+        assert!(publish_asset_warnings(dir.path(), &files).is_empty());
+    }
 }

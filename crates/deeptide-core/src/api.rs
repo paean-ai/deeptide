@@ -1502,7 +1502,7 @@ fn tool_schemas() -> Vec<WireTool> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "sources": {"type": "array", "items": {"type": "string"}, "description": "Published Square app references to remix. Each may be a bare hashKey, hash.8x.gg, hash.clide.app, an https URL, or hash=role to tag the borrowed aspect (e.g. h1=gameplay, h2=art, h3=theme)."},
+                    "sources": {"type": "array", "items": {"type": "string"}, "description": "Published Square app references to remix. Each must resolve to a Square hashKey: bare hashKey, hashKey.8x.gg, 8x.gg URL, or hashKey=role to tag the borrowed aspect (e.g. h1=gameplay, h2=art, h3=theme). A *.clide.app play URL is a deployed handle, not necessarily the Square hashKey."},
                     "dir": {"type": "string", "description": "Optional target directory for the new project. Auto-derived from the title when omitted."},
                     "title": {"type": "string", "description": "Optional title for the new game (seeds clide.json)."},
                     "summary": {"type": "string", "description": "Optional summary (seeds clide.json)."},
