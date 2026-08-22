@@ -52,11 +52,22 @@ fn import_discovers_and_hands_off_a_claude_session() {
     let claude_dir = home.path().join(".claude").join("projects").join(&slug);
     std::fs::create_dir_all(&claude_dir).expect("claude dir");
     // An older session first, so the richer one below ends up newest.
+    let older_session = claude_dir.join("def67890.jsonl");
     std::fs::write(
-        claude_dir.join("def67890.jsonl"),
+        &older_session,
         "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"earlier work here\"}}\n",
     )
     .expect("write older session");
+    std::fs::File::options()
+        .write(true)
+        .open(&older_session)
+        .expect("open older session")
+        .set_times(
+            std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            ),
+        )
+        .expect("set older session timestamp");
     let session = r#"{"type":"ai-title","aiTitle":"Wire the queue worker","sessionId":"abc12345"}
 {"type":"user","sessionId":"abc12345","cwd":"/x","gitBranch":"main","message":{"role":"user","content":"Always use pnpm in this repo, never npm."}}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Understood — pnpm it is."},{"type":"tool_use","name":"Bash","input":{"command":"pnpm install"}}]}}
