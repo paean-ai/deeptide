@@ -1,71 +1,61 @@
-# Publish to Paean Apps Square
+# Publish to Clide Hosting or Paean Apps Square
 
-Use this skill when the user wants to publish, deploy, ship, or list a static
-frontend (a game or site with a top-level `index.html`) to **Paean Apps Square**
-and a `*.clide.app` URL.
+Use this skill when the user wants to host or publish a static frontend with a top-level
+`index.html` on `*.clide.app`, optionally with an Apps Square listing.
 
-Deeptide ships a native **Publish** tool — this skill is the playbook for using
-it well. Do not shell out, curl the API, or run `tide publish`; call the Publish
-tool so the Paean token stays in-process.
+Deeptide ships a native **Publish** tool. Use it directly so credentials stay in-process; do
+not shell out, curl the API, or run `tide publish`.
 
-## Goal
+## Select the mode
 
-Get the project's static output onto a public `*.clide.app` URL and into the
-Square gallery, under a name that reflects the content, with complete project
-metadata and no leaked secrets.
+| Intent | Publish input | Result |
+|---|---|---|
+| Clide hosting only; keep it out of the gallery | `hosting_only: true` | Public static site, no Paean workspace and no Apps Square row |
+| Explicit Apps Square/list/gallery request | omit `hosting_only` | Workspace, public Square listing, and Clide site |
+
+Do not turn a hosting request into a Square listing. Both modes create a public URL, so the
+user must confirm the selected mode immediately before a real upload.
 
 ## Workflow
 
-1. **Dry run first.** Call Publish with `dry_run: true`. Read back the resolved
-   publish directory, file/byte summary, the chosen title, secret scan, remix
-   API fields, and any asset warnings.
-2. **Name it well.** Don't publish under the bare directory name. From the
-   game's `index.html` title/heading, `clide.json`, or `package.json`, pick a
-   `title` that reflects the theme and gameplay (e.g. "Neon Drift Racer"). Add
-   `summary`, `category`, and `tags` when they improve the listing.
-3. **Confirm.** Publishing is public — the site is reachable at `*.clide.app`
-   and listed in Square. If `favicon.svg` or `banner.jpg` is missing, tell the
-   user these listing assets are recommended but non-blocking. Get explicit user
-   confirmation.
-4. **Publish.** Call Publish (no `dry_run`) with the chosen metadata.
-5. **Report** the `*.clide.app` URL, Square app hash, workspace hash, and file
-   count.
+1. Call Publish with `dry_run: true` plus the final `hosting_only`, `dir`, and `handle` values.
+2. Review the resolved directory, files/bytes, secret scan, destination, effective handle, and
+   runtime compatibility.
+3. Explain the exact public effect and get confirmation.
+4. Call Publish again without `dry_run`, preserving the reviewed mode and arguments.
+5. Report mode, URL, handle, file count, and `.clide/publish.json`. Report workspace/Square
+   hashes only in Square mode.
 
-## Behavior to rely on
+## Runtime boundary
 
-- Auth comes from `tide auth login` (or `PAEAN_AUTH_TOKEN`), even when another
-  model provider is active.
-- Built output is preferred over source: `dist`, `build`, `out`,
-  `.output/public`, then `public`; the published dir must hold a top-level
-  `index.html`. If there's no output but a build script exists, build first.
-- The published directory must contain top-level `index.html` and should contain
-  top-level `favicon.svg` plus `banner.jpg` at exactly 800x400. Missing or
-  wrong-size listing assets warn but do not block publish.
-- `.clideignore`, `clide.json`, and `LICENSE` are ensured before upload;
-  `clide.json` and `.remix-sources/` are not published.
-- Secrets, `.env`, credentials, `.git`, `node_modules`, logs, and source maps
-  are excluded, and text assets are scanned for high-confidence secrets.
-- If `clide.json` records a remix (from the **remix** skill), the publish
-  forwards the upstream lineage so original creators are credited:
-  `remix.parent` maps to backend `remixOfHashKey`; all direct entries in
-  `remix.parents[]` map to backend `remixOfHashKeys`.
+Publish uploads static browser files. It does not deploy Worker code, execute D1 migrations,
+create D1/R2/KV/Durable Object resources, or configure Worker bindings/routes.
 
-## Copyright and lineage
+Wrangler/Worker binding detection returns a blocked runtime status in dry-run and stops a real
+upload. Set `allow_static_only: true` only after the user explicitly accepts that the backend
+will not be deployed and the frontend may be non-functional. Prefer the project's Worker
+deployment workflow.
 
-- Publish only work the project is allowed to distribute. Keep compatible
-  upstream license notices and attribution when a remix borrows visible assets,
-  code structure, sounds, or gameplay.
-- Do not publish `.remix-sources/` or verbatim upstream code/assets as the new
-  top-level game. The top-level `index.html` and assets should be a new combined
-  work with its own title, storage keys, and identity.
-- `remix.parent` is the single primary parent: the most important direct source
-  for tree-style displays. `remix.parents[]` is the direct-parent DAG adjacency
-  list used for credit/revenue graphing. Include direct sources only; do not add
-  transitive ancestors unless the remix directly used them.
+## Handles and repeat deploys
 
-## Failure handling
+- `handle` requests a custom `*.clide.app` subdomain. The server decides validity,
+  availability, subscription eligibility, and credit cost.
+- Hosting-only repeat deploys reuse the handle saved in `.clide/publish.json` when `handle` is
+  omitted.
+- Passing a different handle for an already tracked hosting-only project is blocked rather
+  than silently creating a second site.
+- 400 means malformed/reserved, 402 means the account is not eligible, and 409 means taken.
+  Do not retry the same value unchanged.
 
-- Auth missing/expired → run `tide auth login`.
-- No top-level `index.html` → publish the build output, not the source.
-- Missing `favicon.svg` / `banner.jpg` → offer to generate them; publishing can
-  still proceed if the user confirms.
+## Packaging and security
+
+- Built output is preferred: `dist`, `build`, `out`, `.output/public`, then `public`; the
+  selected directory must contain top-level `index.html`.
+- `.clideignore` excludes credentials, `.env`, keys, `.git`, dependencies, local publish
+  state, logs, source maps, and editor/OS files.
+- Included text assets are scanned for high-confidence secrets. Use `allow_secrets` only after
+  the user accepts a concrete finding; excluding the file is preferred.
+- Square mode carries listing metadata, license, assets, and remix lineage. Hosting-only mode
+  never creates or updates an Apps Square listing.
+- Authentication comes from `tide auth login` or `PAEAN_AUTH_TOKEN`; never expose the token in
+  tool output or chat.

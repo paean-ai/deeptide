@@ -22,8 +22,9 @@ rediscovering the same product and engineering patterns.
   handoff, verification, and risk artifacts.
 - `research-brief-delivery` - produce decision-ready research briefs,
   comparison memos, evidence matrices, and action plans.
-- `publish` - publish a static frontend to Paean Apps Square and `*.clide.app`
-  via the native Publish tool, with good naming and complete metadata.
+- `publish` - deploy a static frontend to `*.clide.app` either as hosting-only
+  (no Apps Square row) or as a public Square listing, with custom handles,
+  secret scanning, and Worker/D1/R2 compatibility checks.
 - `remix` - remix one or more published Square games (by hash) into a new game
   via the native Remix tool, recording the multi-parent remix lineage.
 
