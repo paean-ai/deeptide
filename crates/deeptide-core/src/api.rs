@@ -1478,18 +1478,20 @@ fn tool_schemas() -> Vec<WireTool> {
         },
         WireTool {
             name: "Publish",
-            description: "Prepare, inspect, or publish a static frontend to Paean Apps Square and clide.app.",
+            description: "Prepare, inspect, or publish a static frontend to Clide hosting, optionally with an Apps Square listing.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "dir": {"type": "string", "description": "Optional publish directory. Omit to auto-detect dist/build/out/.output/public/public/root."},
-                    "title": {"type": "string", "description": "Optional Paean Apps Square title. Defaults to package.json name or project directory."},
+                    "hosting_only": {"type": "boolean", "description": "Set true to deploy to public *.clide.app static hosting without creating a Paean workspace or Apps Square listing."},
+                    "title": {"type": "string", "description": "Optional title. Used as Apps Square metadata in Square mode and saved local metadata in hosting-only mode."},
                     "summary": {"type": "string", "description": "Optional Paean Apps Square summary. Defaults to package.json description."},
                     "category": {"type": "string", "description": "Optional Paean Apps Square category. Defaults to custom."},
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional Paean Apps Square tags."},
                     "allow_secrets": {"type": "boolean", "description": "Bypass high-confidence secret scan only when the user explicitly accepts the risk."},
-                    "handle": {"type": "string", "description": "Legacy direct-publish handle. Only valid with delete."},
-                    "delete": {"type": "boolean", "description": "Set true only to delete/unpublish a legacy direct publish handle."},
+                    "allow_static_only": {"type": "boolean", "description": "Acknowledge that detected Worker/server bindings will not be deployed. Use only after the user accepts a potentially non-functional frontend-only upload."},
+                    "handle": {"type": "string", "description": "Optional custom *.clide.app subdomain for publishing, or the exact owned handle to delete."},
+                    "delete": {"type": "boolean", "description": "Set true only to delete/unpublish an owned direct Clide hosting handle."},
                     "dry_run": {"type": "boolean", "description": "Inspect publish directory, metadata, files, bytes, ignore rules, and secret scan without uploading."},
                     "status": {"type": "boolean", "description": "Show saved .clide/publish.json state without contacting the publish API."}
                 }

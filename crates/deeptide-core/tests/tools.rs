@@ -1822,19 +1822,26 @@ fn publish_tool_renders_status_and_validates_option_conflicts() {
     assert!(conflict.is_error);
     assert_eq!(
         conflict.content,
-        "status cannot be combined with publish/delete options."
+        "status cannot be combined with publish, delete, metadata, or safety override options."
     );
 
-    let handle_conflict = PublishTool.call(serde_json::json!({"handle": "demo"}), &context);
-    assert!(handle_conflict.is_error);
-    assert_eq!(
-        handle_conflict.content,
-        "handle is only valid with delete for legacy direct publishes."
+    let dist = temp.path().join("dist");
+    std::fs::create_dir_all(&dist).expect("mkdir");
+    std::fs::write(dist.join("index.html"), "<h1>Hello</h1>").expect("index");
+    let custom_handle = PublishTool.call(
+        serde_json::json!({"dry_run": true, "hosting_only": true, "handle": "paeaninsight"}),
+        &context,
+    );
+    assert!(!custom_handle.is_error, "{}", custom_handle.content);
+    assert!(
+        custom_handle
+            .content
+            .contains("URL:        https://paeaninsight.clide.app/")
     );
 }
 
 #[test]
-fn publish_tool_dry_run_detects_static_output_and_writes_safety_ignore() {
+fn publish_tool_dry_run_detects_static_output_without_writing_safety_ignore() {
     // PublishTool reads PAEAN_API_* / CLIDE_API_* env vars during dispatch.
     // Take the publish guard so we never observe a half-written env state
     // from sibling tests under `install_publish_env`/`clear_publish_env`.
@@ -1868,10 +1875,10 @@ fn publish_tool_dry_run_detects_static_output_and_writes_safety_ignore() {
     assert!(!result.content.contains("Source maps are included"));
     assert!(!result.content.contains("private.js"));
 
-    let ignore = std::fs::read_to_string(temp.path().join(".clideignore")).expect("ignore");
-    assert!(ignore.contains("# Added by Clide publish safety defaults"));
-    assert!(ignore.contains(".env"));
-    assert!(ignore.contains("node_modules/"));
+    assert!(
+        !temp.path().join(".clideignore").exists(),
+        "dry-run must not mutate local project state"
+    );
 }
 
 #[test]

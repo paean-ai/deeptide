@@ -5154,8 +5154,8 @@ fn repl_command_sources() -> Vec<CommandCompletionSource> {
         CommandCompletionSource::new(
             "publish",
             Vec::<&str>::new(),
-            "Publish a static frontend to Paean Apps Square and clide.app",
-            "/publish [--dir <dir>] [--title <title>] [--category <category>]",
+            "Publish a static frontend to Clide hosting or Paean Apps Square",
+            "/publish [hosting-only|square] [--dir <dir>] [--handle <subdomain>]",
         ),
         CommandCompletionSource::new(
             "update",
