@@ -258,7 +258,7 @@ struct Cli {
         long,
         env = "DEEPTIDE_PROVIDER",
         value_name = "NAME",
-        help = "Model provider preset: anthropic, openai, deepseek, moonshot, zhipu, openrouter, groq, ollama, lmstudio, vllm, mlx — or any name for a custom OpenAI-compatible endpoint. Selects the wire protocol and default base-url/model; explicit --base-url/--model/--api-key still win. See --list-providers."
+        help = "Model provider preset: anthropic, openai, deepseek, moonshot, zhipu, openrouter, atlascloud, groq, ollama, lmstudio, vllm, mlx — or any name for a custom OpenAI-compatible endpoint. Selects the wire protocol and default base-url/model; explicit --base-url/--model/--api-key still win. See --list-providers."
     )]
     provider: Option<String>,
 

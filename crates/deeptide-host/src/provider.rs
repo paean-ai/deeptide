@@ -129,6 +129,14 @@ pub fn resolve_provider(name: &str) -> ProviderPreset {
             true,
             "OpenRouter",
         ),
+        "atlascloud" | "atlas" => ProviderPreset::new(
+            "atlascloud",
+            Protocol::OpenAi,
+            "https://api.atlascloud.ai/v1",
+            "deepseek-ai/deepseek-v4-pro",
+            true,
+            "Atlas Cloud",
+        ),
         "groq" => ProviderPreset::new(
             "groq",
             Protocol::OpenAi,
@@ -265,6 +273,7 @@ pub fn known_provider_ids() -> &'static [&'static str] {
         "moonshot",
         "zhipu",
         "openrouter",
+        "atlascloud",
         "groq",
         "gemini",
         "ollama",
@@ -302,6 +311,18 @@ mod tests {
         assert_eq!(p.base_url, "https://api.deepseek.com/v1");
         assert_eq!(p.model, "deepseek-chat");
         assert!(p.requires_key);
+    }
+
+    #[test]
+    fn atlascloud_resolves_to_openai_compatible_endpoint() {
+        for name in ["atlascloud", "atlas", "  AtlasCloud  "] {
+            let p = resolve_provider(name);
+            assert_eq!(p.id, "atlascloud", "name={name:?}");
+            assert_eq!(p.protocol, Protocol::OpenAi);
+            assert_eq!(p.base_url, "https://api.atlascloud.ai/v1");
+            assert_eq!(p.model, "deepseek-ai/deepseek-v4-pro");
+            assert!(p.requires_key);
+        }
     }
 
     #[test]
@@ -387,6 +408,7 @@ mod tests {
         assert_eq!(resolve_provider("gpt").id, "openai");
         assert_eq!(resolve_provider("kimi").id, "moonshot");
         assert_eq!(resolve_provider("glm").id, "zhipu");
+        assert_eq!(resolve_provider("atlas").id, "atlascloud");
         assert_eq!(resolve_provider("google").id, "gemini");
     }
 
