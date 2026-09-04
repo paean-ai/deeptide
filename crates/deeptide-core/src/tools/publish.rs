@@ -13,7 +13,7 @@ impl Tool for PublishTool {
     }
 
     fn description(&self) -> &'static str {
-        "Prepare, inspect, or publish a static frontend to Paean Apps Square and clide.app."
+        "Prepare, inspect, or publish a static frontend to Clide hosting, optionally with an Apps Square listing."
     }
 
     fn is_read_only(&self) -> bool {
@@ -48,10 +48,14 @@ impl Tool for PublishTool {
             Ok(path) => path,
             Err(message) => return ToolResult::error(message),
         };
-        if let Err(message) = ensure_clideignore_safety_defaults(&context.cwd) {
-            return ToolResult::error(message);
-        }
-        let patterns = load_clideignore_patterns(&context.cwd);
+        let patterns = if options.dry_run {
+            effective_clideignore_patterns(&context.cwd)
+        } else {
+            if let Err(message) = ensure_clideignore_safety_defaults(&context.cwd) {
+                return ToolResult::error(message);
+            }
+            load_clideignore_patterns(&context.cwd)
+        };
         let files = match collect_publish_files(&context.cwd, &publish_dir, &patterns) {
             Ok(files) => files,
             Err(message) => return ToolResult::error(message),
@@ -65,6 +69,25 @@ impl Tool for PublishTool {
             return ToolResult::error("Publish archive would contain no files.");
         }
 
+        let prior_state = load_publish_state(context);
+        let prior_hosting_handle = prior_state
+            .as_ref()
+            .filter(|state| state.mode.as_deref() == Some("hosting-only"))
+            .and_then(|state| state.handle.clone());
+        if options.hosting_only
+            && prior_hosting_handle.is_some()
+            && options.handle.is_some()
+            && prior_hosting_handle != options.handle
+        {
+            return ToolResult::error(
+                "This project already has a saved hosting-only handle. Refusing to create a second site implicitly; rename or delete the existing deployment explicitly first.",
+            );
+        }
+        let effective_handle = if options.hosting_only {
+            options.handle.clone().or(prior_hosting_handle)
+        } else {
+            options.handle.clone()
+        };
         let metadata = match build_publish_metadata(&context.cwd, &options) {
             Ok(metadata) => metadata,
             Err(message) => return ToolResult::error(message),
@@ -74,7 +97,8 @@ impl Tool for PublishTool {
             &publish_dir,
             &files,
             metadata,
-            options.allow_secrets,
+            &options,
+            effective_handle.clone(),
         ) {
             Ok(plan) => plan,
             Err(message) => return ToolResult::error(message),
@@ -82,8 +106,17 @@ impl Tool for PublishTool {
         if options.dry_run {
             return ToolResult::text(render_publish_dry_run(&plan));
         }
+        if plan.runtime_compatibility.status == "blocked" {
+            return ToolResult::error(format!(
+                "Publish blocked: {} Use the project's Worker deployment workflow, or set allow_static_only only after the user accepts that backend/API features will not work.",
+                plan.runtime_compatibility
+                    .reason
+                    .as_deref()
+                    .unwrap_or("server runtime detected")
+            ));
+        }
 
-        match upload_publish(context, &publish_dir, &files, &plan) {
+        match upload_publish(context, &publish_dir, &files, &plan, &options) {
             Ok(result) => ToolResult::text(result),
             Err(message) => ToolResult::error(message),
         }
@@ -99,6 +132,8 @@ struct PublishOptions {
     category: Option<String>,
     tags: Vec<String>,
     allow_secrets: bool,
+    allow_static_only: bool,
+    hosting_only: bool,
     delete: bool,
     dry_run: bool,
     status: bool,
@@ -138,6 +173,14 @@ impl PublishOptions {
                 .get("allow_secrets")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
+            allow_static_only: input
+                .get("allow_static_only")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            hosting_only: input
+                .get("hosting_only")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
             delete: input
                 .get("delete")
                 .and_then(serde_json::Value::as_bool)
@@ -151,18 +194,13 @@ impl PublishOptions {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
         };
-        if !options.delete && options.handle.is_some() {
-            return Err(String::from(
-                "handle is only valid with delete for legacy direct publishes.",
-            ));
-        }
         if input
             .get("random")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
         {
             return Err(String::from(
-                "random handles are not used by Paean Apps Square publishing.",
+                "random is deprecated; omit handle to let the server assign a subdomain.",
             ));
         }
         if options.delete && options.dir.is_some() {
@@ -175,10 +213,12 @@ impl PublishOptions {
                 || options.summary.is_some()
                 || options.category.is_some()
                 || !options.tags.is_empty()
-                || options.allow_secrets)
+                || options.allow_secrets
+                || options.allow_static_only
+                || options.hosting_only)
         {
             return Err(String::from(
-                "metadata and allow_secrets are only valid when publishing, not deleting.",
+                "publish-mode, metadata, and safety override options are only valid when publishing, not deleting.",
             ));
         }
         if options.status
@@ -190,10 +230,12 @@ impl PublishOptions {
                 || options.summary.is_some()
                 || options.category.is_some()
                 || !options.tags.is_empty()
-                || options.allow_secrets)
+                || options.allow_secrets
+                || options.allow_static_only
+                || options.hosting_only)
         {
             return Err(String::from(
-                "status cannot be combined with publish/delete options.",
+                "status cannot be combined with publish, delete, metadata, or safety override options.",
             ));
         }
         Ok(options)
@@ -203,12 +245,17 @@ impl PublishOptions {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct PublishState {
     #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
     #[serde(rename = "playUrl")]
     #[serde(skip_serializing_if = "Option::is_none")]
     play_url: Option<String>,
+    #[serde(rename = "archiveUrl")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive_url: Option<String>,
     #[serde(rename = "workspaceHashKey")]
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_hash_key: Option<String>,
@@ -250,6 +297,17 @@ struct PublishPlan {
     secret_findings: Vec<PublishSecretFinding>,
     asset_warnings: Vec<String>,
     notes: Vec<String>,
+    hosting_only: bool,
+    effective_handle: Option<String>,
+    runtime_compatibility: RuntimeCompatibility,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeCompatibility {
+    status: String,
+    config_file: Option<String>,
+    features: Vec<String>,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,6 +361,9 @@ fn render_publish_status(context: &ToolContext) -> String {
         return String::from("No saved clide.app publish state at .clide/publish.json");
     };
     let mut lines = vec![String::from("Clide publish status")];
+    if let Some(mode) = state.mode {
+        lines.push(format!("  Mode:        {mode}"));
+    }
     if let Some(handle) = state.handle {
         lines.push(format!("  Handle:      {handle}"));
     }
@@ -311,6 +372,9 @@ fn render_publish_status(context: &ToolContext) -> String {
     }
     if let Some(play_url) = state.play_url {
         lines.push(format!("  Play URL:    {play_url}"));
+    }
+    if let Some(archive_url) = state.archive_url {
+        lines.push(format!("  Archive:     {archive_url}"));
     }
     if let Some(workspace) = state.workspace_hash_key {
         lines.push(format!("  Workspace:   {workspace}"));
@@ -388,6 +452,51 @@ fn resolve_publish_dir(
     ))
 }
 
+fn detect_server_runtime(project_root: &Path, allow_static_only: bool) -> RuntimeCompatibility {
+    for name in ["wrangler.jsonc", "wrangler.json", "wrangler.toml"] {
+        let path = project_root.join(name);
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let checks = [
+            ("Worker entrypoint", ["\"main\"", "main ="]),
+            ("D1 binding", ["\"d1_databases\"", "[[d1_databases]]"]),
+            ("R2 binding", ["\"r2_buckets\"", "[[r2_buckets]]"]),
+            ("KV binding", ["\"kv_namespaces\"", "[[kv_namespaces]]"]),
+            (
+                "Durable Object binding",
+                ["\"durable_objects\"", "[durable_objects]"],
+            ),
+            ("Service binding", ["\"services\"", "[[services]]"]),
+        ];
+        let features = checks
+            .iter()
+            .filter(|(_, needles)| needles.iter().any(|needle| source.contains(needle)))
+            .map(|(label, _)| (*label).to_owned())
+            .collect::<Vec<_>>();
+        if !features.is_empty() {
+            return RuntimeCompatibility {
+                status: if allow_static_only {
+                    String::from("static-only-acknowledged")
+                } else {
+                    String::from("blocked")
+                },
+                config_file: Some(name.to_owned()),
+                features,
+                reason: Some(String::from(
+                    "Clide static hosting uploads browser assets only; it does not deploy Worker code or provision D1/R2/KV/Durable Object/service bindings.",
+                )),
+            };
+        }
+    }
+    RuntimeCompatibility {
+        status: String::from("static-compatible"),
+        config_file: None,
+        features: Vec::new(),
+        reason: None,
+    }
+}
+
 fn package_json_has_build_script(project_root: &Path) -> bool {
     read_package_json(project_root)
         .ok()
@@ -447,6 +556,17 @@ fn load_clideignore_patterns(project_root: &Path) -> Vec<String> {
     fs::read_to_string(project_root.join(CLIDEIGNORE_FILE))
         .map(|text| load_clideignore_patterns_from_text(&text))
         .unwrap_or_default()
+}
+
+fn effective_clideignore_patterns(project_root: &Path) -> Vec<String> {
+    let mut patterns = load_clideignore_patterns(project_root);
+    for pattern in CLIDEIGNORE_SAFETY_PATTERNS {
+        let normalized = normalize_publish_ignore_pattern(pattern);
+        if !patterns.contains(&normalized) {
+            patterns.push(normalized);
+        }
+    }
+    patterns
 }
 
 fn load_clideignore_patterns_from_text(text: &str) -> Vec<String> {
@@ -552,7 +672,8 @@ fn build_publish_plan(
     publish_dir: &Path,
     files: &[String],
     metadata: PublishMetadata,
-    allow_secrets: bool,
+    options: &PublishOptions,
+    effective_handle: Option<String>,
 ) -> Result<PublishPlan, String> {
     let mut total_bytes = 0u64;
     for file in files {
@@ -561,14 +682,16 @@ fn build_publish_plan(
         total_bytes = total_bytes.saturating_add(metadata.len());
     }
     let secret_findings = scan_publish_secrets(publish_dir, files);
-    let asset_warnings = publish_asset_warnings(publish_dir, files);
-    if !allow_secrets && !secret_findings.is_empty() {
+    let asset_warnings = publish_asset_warnings(publish_dir, files, !options.hosting_only);
+    if !options.allow_secrets && !secret_findings.is_empty() {
         return Err(render_secret_block_message(&secret_findings));
     }
     let mut notes = Vec::new();
-    notes.push(String::from(
-        "Publishing is public: the app is listed in Paean Apps Square and reachable at *.clide.app.",
-    ));
+    notes.push(if options.hosting_only {
+        String::from("Hosting is public at *.clide.app; no Paean workspace or Apps Square listing will be created.")
+    } else {
+        String::from("Publishing is public: the app is listed in Paean Apps Square and reachable at *.clide.app.")
+    });
     if files.iter().any(|file| file.ends_with(".map")) {
         notes.push(String::from(
             "Source maps are included; add a .clideignore rule if they should stay private.",
@@ -584,6 +707,9 @@ fn build_publish_plan(
         secret_findings,
         asset_warnings,
         notes,
+        hosting_only: options.hosting_only,
+        effective_handle,
+        runtime_compatibility: detect_server_runtime(project_root, options.allow_static_only),
     })
 }
 
@@ -594,9 +720,31 @@ fn render_publish_dry_run(plan: &PublishPlan) -> String {
         &plan.publish_dir_relative
     };
     let mut lines = vec![
-        String::from("Publish dry run: ready"),
+        format!(
+            "Publish dry run: {}",
+            if plan.runtime_compatibility.status == "blocked" {
+                "blocked"
+            } else {
+                "ready"
+            }
+        ),
         format!("  Directory:  {rel_dir}"),
-        String::from("  Target:     Paean Apps Square public listing + *.clide.app"),
+        format!(
+            "  Mode:       {}",
+            if plan.hosting_only {
+                "hosting-only"
+            } else {
+                "square"
+            }
+        ),
+        format!(
+            "  Target:     {}",
+            if plan.hosting_only {
+                "Clide hosting only (*.clide.app; no Apps Square listing)"
+            } else {
+                "Paean Apps Square public listing + *.clide.app"
+            }
+        ),
         format!("  Title:      {}", plan.metadata.title),
         format!("  Category:   {}", plan.metadata.category),
         format!("  Files:      {}", plan.file_count),
@@ -617,6 +765,24 @@ fn render_publish_dry_run(plan: &PublishPlan) -> String {
     ];
     if !plan.metadata.summary.is_empty() {
         lines.push(format!("  Summary:    {}", plan.metadata.summary));
+    }
+    if let Some(handle) = &plan.effective_handle {
+        lines.push(format!("  Handle:     {handle}"));
+        lines.push(format!("  URL:        https://{handle}.clide.app/"));
+    }
+    lines.push(format!(
+        "  Runtime:    {}",
+        plan.runtime_compatibility.status
+    ));
+    if let Some(config_file) = &plan.runtime_compatibility.config_file {
+        lines.push(format!(
+            "  Detected:   {} ({})",
+            config_file,
+            plan.runtime_compatibility.features.join(", ")
+        ));
+    }
+    if let Some(reason) = &plan.runtime_compatibility.reason {
+        lines.push(format!("  Runtime note: {reason}"));
     }
     if !plan.metadata.tags.is_empty() {
         lines.push(format!("  Tags:       {}", plan.metadata.tags.join(", ")));
@@ -864,12 +1030,19 @@ fn publish_secret_kind(text: &str) -> Option<String> {
     })
 }
 
-fn publish_asset_warnings(publish_dir: &Path, files: &[String]) -> Vec<String> {
+fn publish_asset_warnings(
+    publish_dir: &Path,
+    files: &[String],
+    square_listing: bool,
+) -> Vec<String> {
     let mut warnings = Vec::new();
     if !files.iter().any(|file| file == "favicon.svg") {
         warnings.push(String::from(
             "Recommended top-level `favicon.svg` is missing.",
         ));
+    }
+    if !square_listing {
+        return warnings;
     }
     if !files.iter().any(|file| file == "banner.jpg") {
         warnings.push(String::from(
@@ -1007,11 +1180,14 @@ struct SquarePublishResult {
     hash_key: String,
     #[serde(rename = "playUrl")]
     play_url: String,
+    #[serde(rename = "publishedSiteHandle")]
+    published_site_handle: Option<String>,
     status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct PublishResult {
+    handle: Option<String>,
     #[serde(rename = "workspaceHashKey")]
     workspace_hash_key: String,
     #[serde(rename = "squareAppHashKey")]
@@ -1024,6 +1200,19 @@ struct PublishResult {
     total_bytes: u64,
     title: String,
     category: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostingPublishResult {
+    handle: String,
+    url: String,
+    #[serde(rename = "archiveUrl")]
+    archive_url: Option<String>,
+    #[serde(rename = "fileCount")]
+    file_count: Option<u64>,
+    #[serde(rename = "totalBytes")]
+    total_bytes: Option<u64>,
+    overwritten: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1041,18 +1230,35 @@ fn upload_publish(
     publish_dir: &Path,
     files: &[String],
     plan: &PublishPlan,
+    options: &PublishOptions,
 ) -> Result<String, String> {
     let auth = resolve_publish_auth()?;
     let zip_path = create_publish_zip(publish_dir, files)?;
     let result = (|| {
+        if options.hosting_only {
+            let hosted = publish_hosting_only(&auth, &zip_path, plan.effective_handle.as_deref())?;
+            save_hosting_publish_state(context, &hosted, publish_dir, plan)?;
+            return Ok(render_hosting_publish_success(
+                &hosted,
+                context,
+                publish_dir,
+                plan,
+            ));
+        }
         let state = load_publish_state(context);
         let workspace_hash_key = match state.and_then(|state| state.workspace_hash_key) {
             Some(hash_key) if !hash_key.trim().is_empty() => hash_key,
             _ => create_workspace(&auth, &plan.metadata)?,
         };
         let imported = import_zip(&auth, &workspace_hash_key, &zip_path)?;
-        let square = publish_square(&auth, &workspace_hash_key, &plan.metadata)?;
+        let square = publish_square(
+            &auth,
+            &workspace_hash_key,
+            &plan.metadata,
+            plan.effective_handle.as_deref(),
+        )?;
         let response = PublishResult {
+            handle: square.published_site_handle,
             workspace_hash_key,
             square_app_hash_key: square.hash_key,
             url: square.play_url,
@@ -1095,16 +1301,36 @@ fn resolve_publish_auth() -> Result<PublishAuth, String> {
                 "Paean login is missing or expired. Run `tide auth login` or set PAEAN_AUTH_TOKEN, then retry Publish.",
             )
         })?;
-    let base_url = std::env::var("PAEAN_API_BASE")
-        .or_else(|_| std::env::var("ZERO_API_BASE"))
-        .or_else(|_| std::env::var("ZERO_CLI_BASE_URL"))
-        .or_else(|_| std::env::var("PAEAN_API_BASE_URL"))
-        .or_else(|_| std::env::var("CLIDE_API_BASE_URL"))
-        .unwrap_or_else(|_| String::from("https://api.paean.ai"));
+    let base_url = resolve_publish_api_base();
     Ok(PublishAuth {
         base_url: normalize_publish_base_url(&base_url),
         token,
     })
+}
+
+fn resolve_publish_api_base() -> String {
+    for key in ["PAEAN_API_BASE", "PAEAN_API_BASE_URL", "CLIDE_API_BASE_URL"] {
+        if let Ok(value) = std::env::var(key)
+            && !value.trim().is_empty()
+        {
+            return value;
+        }
+    }
+    for key in ["ZERO_API_BASE", "ZERO_CLI_BASE_URL"] {
+        if let Ok(value) = std::env::var(key)
+            && publish_base_is_paean(&value)
+        {
+            return value;
+        }
+    }
+    String::from("https://api.paean.ai")
+}
+
+fn publish_base_is_paean(raw: &str) -> bool {
+    reqwest::Url::parse(raw)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+        .is_some_and(|host| host == "paean.ai" || host.ends_with(".paean.ai"))
 }
 
 fn normalize_publish_base_url(raw: &str) -> String {
@@ -1241,10 +1467,40 @@ fn import_zip_via_presign(
     )
 }
 
+fn publish_hosting_only(
+    auth: &PublishAuth,
+    zip_path: &Path,
+    handle: Option<&str>,
+) -> Result<HostingPublishResult, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("Failed to build Clide hosting HTTP client: {error}"))?;
+    let file = fs::File::open(zip_path)
+        .map_err(|error| format!("Failed to open publish archive: {error}"))?;
+    let part = reqwest::blocking::multipart::Part::reader(file)
+        .file_name("site.zip")
+        .mime_str("application/zip")
+        .map_err(|error| format!("Failed to prepare publish archive part: {error}"))?;
+    let mut form = reqwest::blocking::multipart::Form::new().part("archive", part);
+    if let Some(handle) = handle {
+        form = form.text("handle", handle.to_owned());
+    }
+    let response = client
+        .post(format!("{}/publish/clide", auth.base_url))
+        .bearer_auth(&auth.token)
+        .multipart(form)
+        .send()
+        .map_err(|error| format!("Clide hosting upload failed: {error}"))?;
+    read_json_response(response, "Clide hosting")
+        .map_err(|error| explain_handle_failure(error, handle))
+}
+
 fn publish_square(
     auth: &PublishAuth,
     workspace_hash_key: &str,
     metadata: &PublishMetadata,
+    handle: Option<&str>,
 ) -> Result<SquarePublishResult, String> {
     #[derive(Serialize)]
     struct SquareRequest<'a> {
@@ -1259,6 +1515,8 @@ fn publish_square(
         #[serde(rename = "indexFile")]
         index_file: &'a str,
         visibility: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle: Option<&'a str>,
         #[serde(rename = "remixOfHashKey")]
         #[serde(skip_serializing_if = "Option::is_none")]
         remix_of_hash_key: Option<&'a str>,
@@ -1283,11 +1541,35 @@ fn publish_square(
             path_prefix: "",
             index_file: "index.html",
             visibility: "public",
+            handle,
             remix_of_hash_key: metadata.remix_of_hash_key.as_deref(),
             remix_of_hash_keys,
         },
         "Square publish",
     )
+    .map_err(|error| explain_handle_failure(error, handle))
+}
+
+fn explain_handle_failure(error: String, handle: Option<&str>) -> String {
+    let Some(handle) = handle else {
+        return error;
+    };
+    if error.contains(" 402:") {
+        return format!(
+            "Choosing the subdomain \"{handle}\" requires an active Paean subscription. Publish again without a handle for an assigned URL. Server said: {error}"
+        );
+    }
+    if error.contains(" 409:") {
+        return format!(
+            "The subdomain \"{handle}\" is already taken. Choose another handle. Server said: {error}"
+        );
+    }
+    if error.contains(" 400:") {
+        return format!(
+            "The subdomain \"{handle}\" was rejected. Choose another handle. Server said: {error}"
+        );
+    }
+    error
 }
 
 fn post_json<T: for<'de> Deserialize<'de>, B: Serialize>(
@@ -1422,9 +1704,11 @@ fn save_publish_state(
     publish_dir: &Path,
 ) -> Result<(), String> {
     let state = PublishState {
-        handle: None,
+        mode: Some(String::from("square")),
+        handle: result.handle.clone(),
         url: Some(result.url.clone()),
         play_url: Some(result.url.clone()),
+        archive_url: None,
         workspace_hash_key: Some(result.workspace_hash_key.clone()),
         square_app_hash_key: Some(result.square_app_hash_key.clone()),
         publish_dir: Some({
@@ -1442,6 +1726,39 @@ fn save_publish_state(
         last_deleted_handle: None,
         title: Some(result.title.clone()),
         category: Some(result.category.clone()),
+    };
+    write_publish_state(context, &state)
+}
+
+fn save_hosting_publish_state(
+    context: &ToolContext,
+    result: &HostingPublishResult,
+    publish_dir: &Path,
+    plan: &PublishPlan,
+) -> Result<(), String> {
+    let state = PublishState {
+        mode: Some(String::from("hosting-only")),
+        handle: Some(result.handle.clone()),
+        url: Some(result.url.clone()),
+        play_url: Some(result.url.clone()),
+        archive_url: result.archive_url.clone(),
+        workspace_hash_key: None,
+        square_app_hash_key: None,
+        publish_dir: Some({
+            let rel = relative_path_string(&context.cwd, publish_dir);
+            if rel.is_empty() {
+                String::from(".")
+            } else {
+                rel
+            }
+        }),
+        file_count: Some(result.file_count.unwrap_or(plan.file_count as u64)),
+        total_bytes: Some(result.total_bytes.unwrap_or(plan.total_bytes)),
+        published_at: Some(format_cron_datetime(std::time::SystemTime::now())),
+        deleted_at: None,
+        last_deleted_handle: None,
+        title: Some(plan.metadata.title.clone()),
+        category: Some(plan.metadata.category.clone()),
     };
     write_publish_state(context, &state)
 }
@@ -1502,6 +1819,53 @@ fn render_publish_success(
                 .unwrap_or_default(),
             plan.metadata.remix_of_hash_keys.join(", ")
         ));
+    }
+    if !plan.asset_warnings.is_empty() {
+        lines.push(String::from("  Asset warnings:"));
+        lines.extend(
+            plan.asset_warnings
+                .iter()
+                .map(|warning| format!("    - {warning}")),
+        );
+    }
+    lines.join("\n")
+}
+
+fn render_hosting_publish_success(
+    result: &HostingPublishResult,
+    context: &ToolContext,
+    publish_dir: &Path,
+    plan: &PublishPlan,
+) -> String {
+    let rel = relative_path_string(&context.cwd, publish_dir);
+    let rel_dir = if rel.is_empty() { "." } else { rel.as_str() };
+    let mut lines = vec![
+        format!("Hosted: {}", result.url),
+        String::from("  Mode:        hosting-only"),
+        String::from("  Apps Square: not listed"),
+        format!("  Handle:      {}", result.handle),
+        format!(
+            "  Status:      {}",
+            if result.overwritten.unwrap_or(false) {
+                "updated"
+            } else {
+                "hosted"
+            }
+        ),
+        format!("  Title:       {}", plan.metadata.title),
+        format!("  Directory:   {rel_dir}"),
+        format!(
+            "  Files:       {}",
+            result.file_count.unwrap_or(plan.file_count as u64)
+        ),
+        format!(
+            "  Bytes:       {}",
+            result.total_bytes.unwrap_or(plan.total_bytes)
+        ),
+        String::from("  State:       .clide/publish.json"),
+    ];
+    if let Some(archive_url) = &result.archive_url {
+        lines.push(format!("  Archive:     {archive_url}"));
     }
     if !plan.asset_warnings.is_empty() {
         lines.push(String::from("  Asset warnings:"));
@@ -1600,6 +1964,8 @@ mod tests {
             category: None,
             tags: vec![],
             allow_secrets: false,
+            allow_static_only: false,
+            hosting_only: false,
             delete: false,
             dry_run: true,
             status: false,
@@ -1618,7 +1984,7 @@ mod tests {
     fn asset_warnings_are_non_blocking_and_check_banner_dimensions() {
         let dir = tempfile::tempdir().expect("publish test");
         let files = vec![String::from("index.html")];
-        let warnings = publish_asset_warnings(dir.path(), &files);
+        let warnings = publish_asset_warnings(dir.path(), &files, true);
         assert!(
             warnings
                 .iter()
@@ -1637,7 +2003,7 @@ mod tests {
             String::from("favicon.svg"),
             String::from("banner.jpg"),
         ];
-        let warnings = publish_asset_warnings(dir.path(), &files);
+        let warnings = publish_asset_warnings(dir.path(), &files, true);
         assert_eq!(
             read_jpeg_dimensions(&dir.path().join("banner.jpg")),
             Some((1024, 512))
@@ -1645,6 +2011,60 @@ mod tests {
         assert!(warnings.iter().any(|warning| warning.contains("1024x512")));
 
         fs::write(dir.path().join("banner.jpg"), minimal_jpeg(800, 400)).expect("publish test");
-        assert!(publish_asset_warnings(dir.path(), &files).is_empty());
+        assert!(publish_asset_warnings(dir.path(), &files, true).is_empty());
+    }
+
+    #[test]
+    fn hosting_only_accepts_custom_handle_and_runtime_acknowledgement() {
+        let options = PublishOptions::from_input(&serde_json::json!({
+            "hosting_only": true,
+            "handle": "paeaninsight",
+            "allow_static_only": true
+        }))
+        .expect("publish options");
+        assert!(options.hosting_only);
+        assert!(options.allow_static_only);
+        assert_eq!(options.handle.as_deref(), Some("paeaninsight"));
+    }
+
+    #[test]
+    fn wrangler_worker_bindings_block_static_publish_until_acknowledged() {
+        let dir = tempfile::tempdir().expect("publish test");
+        fs::write(
+            dir.path().join("wrangler.jsonc"),
+            r#"{"main":"worker/index.ts","d1_databases":[{"binding":"DB"}]}"#,
+        )
+        .expect("publish test");
+        let blocked = detect_server_runtime(dir.path(), false);
+        assert_eq!(blocked.status, "blocked");
+        assert_eq!(blocked.config_file.as_deref(), Some("wrangler.jsonc"));
+        assert_eq!(blocked.features, vec!["Worker entrypoint", "D1 binding"]);
+        let acknowledged = detect_server_runtime(dir.path(), true);
+        assert_eq!(acknowledged.status, "static-only-acknowledged");
+    }
+
+    #[test]
+    fn hosting_only_does_not_require_square_banner() {
+        let dir = tempfile::tempdir().expect("publish test");
+        let files = vec![String::from("index.html")];
+        let warnings = publish_asset_warnings(dir.path(), &files, false);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("favicon.svg"))
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains("banner.jpg"))
+        );
+    }
+
+    #[test]
+    fn generic_model_gateway_is_not_treated_as_paean_api() {
+        assert!(publish_base_is_paean("https://api.paean.ai"));
+        assert!(publish_base_is_paean("https://staging.api.paean.ai/zero"));
+        assert!(!publish_base_is_paean("https://api.anthropic.com"));
+        assert!(!publish_base_is_paean("not-a-url"));
     }
 }
