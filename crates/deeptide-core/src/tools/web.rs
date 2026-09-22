@@ -103,7 +103,12 @@ fn web_search_with_environment(
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
     {
-        match search_serper(query, api_key, &allowed_domains, &blocked_domains) {
+        let base_url = env
+            .get("SERPER_BASE_URL")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("https://google.serper.dev");
+        match search_serper(query, api_key, base_url, &allowed_domains, &blocked_domains) {
             Ok(results) => return ToolResult::text(results),
             Err(error) => provider_errors.push(format!("Serper: {error}")),
         }
@@ -229,12 +234,13 @@ struct SerperOrganic {
 fn search_serper(
     query: &str,
     api_key: &str,
+    base_url: &str,
     allowed_domains: &[String],
     blocked_domains: &[String],
 ) -> Result<String, String> {
     let client = web_search_client()?;
     let response = client
-        .post("https://google.serper.dev/search")
+        .post(format!("{}/search", base_url.trim_end_matches('/')))
         .header("X-API-KEY", api_key)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .json(&serde_json::json!({"q": query, "num": 10}))

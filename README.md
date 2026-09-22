@@ -229,6 +229,22 @@ aliases are kept aligned with the macOS native DeepTide app via the
 shared interface contract — your hooks and muscle memory port between
 the two.
 
+### Serper-compatible search (Rust CLI and GUI)
+
+Support any Serper.dev-compatible endpoint (like litescrape.com, serpbase.dev,
+and others) by setting `SERPER_BASE_URL` and the provider's key in
+`SERPER_API_KEY`:
+
+```bash
+export SERPER_BASE_URL="https://api.litescrape.com"
+export SERPER_API_KEY="your-provider-api-key"
+```
+
+Use a base URL without `/search`; DeepTide appends it automatically.
+When `SERPER_BASE_URL` is unset or blank, it defaults to
+`https://google.serper.dev`. Trailing slashes are accepted.
+Brave Search is tried first when `BRAVE_SEARCH_API_KEY` is configured.
+
 ---
 
 ## Documentation
