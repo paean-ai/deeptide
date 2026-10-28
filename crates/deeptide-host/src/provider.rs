@@ -129,6 +129,14 @@ pub fn resolve_provider(name: &str) -> ProviderPreset {
             true,
             "OpenRouter",
         ),
+        "minimax" => ProviderPreset::new(
+            "minimax",
+            Protocol::OpenAi,
+            "https://api.minimax.io/v1",
+            "MiniMax-M3.1-Flash",
+            true,
+            "MiniMax (official)",
+        ),
         "groq" => ProviderPreset::new(
             "groq",
             Protocol::OpenAi,
@@ -265,6 +273,7 @@ pub fn known_provider_ids() -> &'static [&'static str] {
         "moonshot",
         "zhipu",
         "openrouter",
+        "minimax",
         "groq",
         "gemini",
         "ollama",
@@ -302,6 +311,18 @@ mod tests {
         assert_eq!(p.base_url, "https://api.deepseek.com/v1");
         assert_eq!(p.model, "deepseek-chat");
         assert!(p.requires_key);
+    }
+
+    #[test]
+    fn minimax_resolves_to_official_openai_endpoint() {
+        for name in ["minimax", "  MiniMax  "] {
+            let p = resolve_provider(name);
+            assert_eq!(p.id, "minimax", "name={name:?}");
+            assert_eq!(p.protocol, Protocol::OpenAi);
+            assert_eq!(p.base_url, "https://api.minimax.io/v1");
+            assert_eq!(p.model, "MiniMax-M3.1-Flash");
+            assert!(p.requires_key);
+        }
     }
 
     #[test]
