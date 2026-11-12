@@ -96,6 +96,22 @@ Run `deeptide-rs --doctor` to print the full resolution chain — it
 never reveals credential values, only their presence and length, so
 the output is safe to paste into a bug report.
 
+### Rapid-MLX (Apple Silicon)
+
+[Rapid-MLX](https://github.com/raullenchai/Rapid-MLX) is an open-source local
+LLM inference server for Apple Silicon, built on MLX.
+
+```sh
+brew install rapid-mlx
+rapid-mlx serve qwen3.5-4b-4bit --port 8000
+# In another terminal:
+deeptide-rs --provider rapid-mlx --model mlx-community/Qwen3.5-4B-MLX-4bit
+```
+
+The preset uses the OpenAI-compatible API at `http://localhost:8000/v1`
+without requiring an API key. Set `--model` to a served model ID from
+`/v1/models`; use `--base-url` to override the endpoint.
+
 ## Distribution model
 
 `npm install -g deeptide-rs` runs a postinstall step that downloads
