@@ -187,6 +187,15 @@ pub fn resolve_provider(name: &str) -> ProviderPreset {
             false,
             "MLX (local, Apple Silicon)",
         ),
+        // Rapid-MLX's OpenAI-compatible server (Apple Silicon), default :8000.
+        "rapid-mlx" => ProviderPreset::new(
+            "rapid-mlx",
+            Protocol::OpenAi,
+            "http://localhost:8000/v1",
+            "local-model",
+            false,
+            "Rapid-MLX (local, Apple Silicon)",
+        ),
         // llamafile — single-file llama.cpp build, OpenAI server on :8080.
         "llamafile" => ProviderPreset::new(
             "llamafile",
@@ -271,6 +280,7 @@ pub fn known_provider_ids() -> &'static [&'static str] {
         "lmstudio",
         "vllm",
         "mlx",
+        "rapid-mlx",
         "llamafile",
         "koboldcpp",
         "localai",
@@ -316,6 +326,7 @@ mod tests {
             "llama-server",
             "mlx",
             "omlx",
+            "rapid-mlx",
             "llamafile",
             "koboldcpp",
             "kobold",
@@ -350,6 +361,7 @@ mod tests {
         // Each common local server listens on its own well-known port; a wrong
         // default would silently send requests into the void. Pin them.
         let cases = [
+            ("rapid-mlx", "http://localhost:8000/v1"),
             ("llamafile", "http://localhost:8080/v1"),
             ("koboldcpp", "http://localhost:5001/v1"),
             ("localai", "http://localhost:8080/v1"),
@@ -371,6 +383,10 @@ mod tests {
     fn case_and_whitespace_are_normalized() {
         assert_eq!(resolve_provider("  DeepSeek ").id, "deepseek");
         assert_eq!(resolve_provider("OLLAMA").id, "ollama");
+        assert_eq!(
+            resolve_provider("  RAPID-MLX  ").label,
+            "Rapid-MLX (local, Apple Silicon)"
+        );
     }
 
     #[test]
@@ -397,6 +413,12 @@ mod tests {
         assert_eq!(p.base_url, "https://generativelanguage.googleapis.com");
         assert!(p.model.starts_with("gemini-"));
         assert!(p.requires_key);
+    }
+
+    #[test]
+    fn rapid_mlx_is_listed_as_a_named_preset() {
+        assert!(known_provider_ids().contains(&"rapid-mlx"));
+        assert_eq!(resolve_provider("rapid-mlx").id, "rapid-mlx");
     }
 
     #[test]
