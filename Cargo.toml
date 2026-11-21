@@ -21,6 +21,9 @@ image = { version = "0.25.8", default-features = false, features = ["jpeg", "png
 # `/queue` mid-turn type-ahead feature on Unix). Kept at the workspace
 # level so other crates can opt in without duplicating the version pin.
 libc = "0.2"
+# Hard USD spend cap for the agent loop (`--max-budget-usd`). Default
+# features off: only the lock-free counter and the price catalog are used.
+llm-budget = { version = "0.10.0", default-features = false }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 regex = "1.12.2"
 serde = { version = "1.0.219", features = ["derive"] }

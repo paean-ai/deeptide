@@ -357,6 +357,7 @@ fn map_event(event: &AgentLoopEvent) -> Option<UiEvent> {
             AgentTerminalEvent::ModelError(error) => TerminalKind::ModelError(error.clone()),
             AgentTerminalEvent::Blocked => TerminalKind::Blocked,
             AgentTerminalEvent::Interrupted => TerminalKind::Interrupted,
+            AgentTerminalEvent::BudgetExceeded(reason) => TerminalKind::ModelError(reason.clone()),
         })),
         AgentLoopEvent::User(_) | AgentLoopEvent::Compaction(_) => None,
     }

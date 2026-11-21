@@ -222,6 +222,12 @@ pub enum AgentTerminalEvent {
     /// synthetic "cancelled" results so every `tool_use` keeps a matching
     /// `tool_result` and the session stays resumable).
     Interrupted,
+    /// The session's USD spend reached the hard cap set with
+    /// [`AgentLoop::with_max_budget_usd`] (or a turn could not be priced while
+    /// a cap is set). The string says which, with the amounts. The loop stops
+    /// at the next step boundary, after the current tool batch, so every
+    /// `tool_use` keeps its `tool_result`.
+    BudgetExceeded(String),
 }
 
 pub trait AgentBackend: Send {
@@ -378,6 +384,11 @@ pub struct AgentLoop {
     /// up (the default for library embeds and `--print` mode). Checked between
     /// steps, after a cancelled model stream, and around each tool call.
     interrupt: Option<Arc<AtomicBool>>,
+    /// Hard USD cap across the session (`--max-budget-usd`). `None` = no cap.
+    spend_cap: Option<llm_budget::budget::AtomicBudget>,
+    /// Set when a turn's usage could not be priced while a cap is set. A cap
+    /// that cannot count a turn cannot hold, so the loop stops (fail closed).
+    unpriced_turn: Option<String>,
 }
 
 impl AgentLoop {
@@ -411,6 +422,8 @@ impl AgentLoop {
             thinking_override: None,
             tool_usage: crate::tool_usage::ToolUsageTracker::new(),
             interrupt: None,
+            spend_cap: None,
+            unpriced_turn: None,
         }
     }
 
@@ -636,6 +649,84 @@ impl AgentLoop {
         self.context_window.config().max_tokens
     }
 
+    /// Stop the loop once the session has spent `max_usd` dollars, priced with
+    /// the same per-model rates the cost tracker uses. Models the built-in
+    /// table does not know are priced from llm-budget's catalog instead of the
+    /// tracker's all-zero fallback; a turn neither can price stops the loop
+    /// with [`AgentTerminalEvent::BudgetExceeded`]. A value that is not a
+    /// positive number clears the cap.
+    pub fn with_max_budget_usd(mut self, max_usd: f64) -> Self {
+        self.spend_cap = llm_budget::budget::AtomicBudget::new(max_usd).ok();
+        self.unpriced_turn = None;
+        self
+    }
+
+    /// USD booked against the cap so far, or `None` when no cap is set.
+    pub fn budget_spent_usd(&self) -> Option<f64> {
+        self.spend_cap
+            .as_ref()
+            .map(llm_budget::budget::AtomicBudget::spent_usd)
+    }
+
+    /// Book one turn against the spend cap (no-op without a cap).
+    fn charge_spend_cap(&mut self, tracked_cost_usd: f64, usage: &AgentUsage) {
+        let Some(cap) = self.spend_cap.as_ref() else {
+            return;
+        };
+        let cost = if self.cost_tracker.has_pricing(&self.model) {
+            Some(tracked_cost_usd)
+        } else {
+            // deeptide's table does not know this model and recorded $0.
+            // Price it from llm-budget's catalog. Deeptide reports input
+            // tokens without cache tokens; llm-budget counts cache reads and
+            // writes as part of input.
+            let catalog_usage = llm_budget::Usage {
+                input_tokens: (usage.input_tokens + usage.cache_create + usage.cache_read) as u64,
+                cached_input_tokens: usage.cache_read as u64,
+                cache_write_tokens: usage.cache_create as u64,
+                output_tokens: usage.output_tokens as u64,
+            };
+            llm_budget::PriceTable::builtin()
+                .cost_usage(&self.model, &catalog_usage)
+                .ok()
+        };
+        match cost {
+            Some(usd) => {
+                cap.charge_force(usd);
+            }
+            None => {
+                self.unpriced_turn = Some(format!(
+                    "model `{}` has no known price, so the ${:.2} spend cap cannot be enforced. Add a pricing override for it in settings.json.",
+                    self.model,
+                    cap.limit_usd()
+                ));
+            }
+        }
+    }
+
+    /// Why the spend cap stops the loop, if it does.
+    fn spend_cap_stop(&self) -> Option<String> {
+        let cap = self.spend_cap.as_ref()?;
+        if let Some(reason) = &self.unpriced_turn {
+            return Some(reason.clone());
+        }
+        cap.is_exhausted().then(|| {
+            format!(
+                "spend cap reached: ${:.4} spent of ${:.2}. Raise it with --max-budget-usd.",
+                cap.spent_usd(),
+                cap.limit_usd()
+            )
+        })
+    }
+
+    /// Clear spend booked against the cap, keeping the cap itself.
+    fn reset_spend_cap(&mut self) {
+        if let Some(cap) = self.spend_cap.as_ref() {
+            self.spend_cap = llm_budget::budget::AtomicBudget::new(cap.limit_usd()).ok();
+        }
+        self.unpriced_turn = None;
+    }
+
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns.max(1);
         self
@@ -769,6 +860,14 @@ impl AgentLoop {
                 return events;
             }
 
+            if let Some(reason) = self.spend_cap_stop() {
+                self.emit(
+                    &mut events,
+                    AgentLoopEvent::Terminal(AgentTerminalEvent::BudgetExceeded(reason)),
+                );
+                return events;
+            }
+
             if self.current_run_step >= self.max_turns {
                 self.emit(
                     &mut events,
@@ -803,7 +902,7 @@ impl AgentLoop {
             match self.backend.respond(request) {
                 Ok(response) => {
                     if let Some(usage) = response.usage {
-                        self.cost_tracker.record(TurnUsage::new(
+                        let turn_cost = self.cost_tracker.record(TurnUsage::new(
                             self.current_run_step,
                             self.model.clone(),
                             usage.input_tokens,
@@ -812,6 +911,7 @@ impl AgentLoop {
                             usage.cache_read,
                             usage.duration_ms,
                         ));
+                        self.charge_spend_cap(turn_cost, &usage);
                     }
 
                     let tool_calls_for_message = response.tool_calls.clone();
@@ -984,6 +1084,7 @@ impl AgentLoop {
     pub fn reset(&mut self) {
         self.messages.clear();
         self.cost_tracker.reset();
+        self.reset_spend_cap();
         self.current_run_step = 0;
     }
 
@@ -995,6 +1096,7 @@ impl AgentLoop {
     pub fn restore_messages(&mut self, messages: Vec<ConversationMessage>) {
         self.messages = messages;
         self.cost_tracker.reset();
+        self.reset_spend_cap();
         self.current_run_step = 0;
     }
 

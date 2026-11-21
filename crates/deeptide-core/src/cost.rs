@@ -146,7 +146,8 @@ impl CostTracker {
         }
     }
 
-    pub fn record(&self, usage: TurnUsage) {
+    /// Record one turn and return its cost in USD.
+    pub fn record(&self, usage: TurnUsage) -> f64 {
         let pricing = self.pricing_for(&usage.model);
         let cost_usd = (usage.input_tokens as f64 * pricing.input)
             + (usage.output_tokens as f64 * pricing.output)
@@ -174,6 +175,7 @@ impl CostTracker {
         state.total_cache_read += record.cache_read;
         state.total_cost_usd += record.cost_usd;
         state.turns.push(record);
+        cost_usd
     }
 
     pub fn summary(&self) -> CostSummary {
@@ -197,6 +199,17 @@ impl CostTracker {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         *state = CostState::default();
+    }
+
+    /// Whether `model` has a real price here (an override, an exact match or a
+    /// known family prefix). `false` means [`pricing_for`](Self::pricing_for)
+    /// fell back to all-zero rates, so the recorded cost is not a real cost.
+    pub fn has_pricing(&self, model: &str) -> bool {
+        self.pricing_overrides.contains_key(model)
+            || default_pricing(model).is_some()
+            || default_pricing_table()
+                .iter()
+                .any(|(prefix, _)| model.starts_with(prefix))
     }
 
     pub fn pricing_for(&self, model: &str) -> ModelPricing {
