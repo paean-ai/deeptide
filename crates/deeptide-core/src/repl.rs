@@ -393,6 +393,14 @@ impl ReplSession {
         self
     }
 
+    /// Hard USD spend cap for the session (`--max-budget-usd`).
+    pub fn with_max_budget_usd(mut self, max_usd: Option<f64>) -> Self {
+        if let Some(max_usd) = max_usd {
+            self.agent_loop = self.agent_loop.with_max_budget_usd(max_usd);
+        }
+        self
+    }
+
     /// Restrict which tools the agent may call (from `--allowed-tools` /
     /// `--disallowed-tools`). A `None` allowlist with an empty denylist leaves
     /// every tool available.
@@ -4747,6 +4755,9 @@ fn agent_event_to_repl_event(event: AgentLoopEvent) -> Option<ReplEvent> {
             compressed_messages: report.compressed_messages,
             tokens_after: report.tokens_after,
         })),
+        AgentLoopEvent::Terminal(AgentTerminalEvent::BudgetExceeded(reason)) => Some(
+            ReplEvent::System(SystemMessage::Notice(format!("Stopped: {reason}"))),
+        ),
         AgentLoopEvent::Terminal(AgentTerminalEvent::Interrupted) => Some(ReplEvent::System(
             SystemMessage::Notice(String::from("⎿ Interrupted by user")),
         )),

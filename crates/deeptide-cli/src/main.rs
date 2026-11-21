@@ -315,6 +315,16 @@ struct Cli {
     max_turns: usize,
 
     #[arg(
+        long = "max-budget-usd",
+        env = "DEEPTIDE_MAX_BUDGET_USD",
+        value_name = "USD",
+        help = "Hard cap on model spend in US dollars for the session. The agent \
+                stops at the next step once the cap is reached, priced with the \
+                same per-model rates as /cost. Unset = no dollar cap."
+    )]
+    max_budget_usd: Option<f64>,
+
+    #[arg(
         long = "system-prompt",
         env = "DEEPTIDE_SYSTEM_PROMPT",
         value_name = "TEXT",
@@ -2252,6 +2262,7 @@ fn run_interactive(
         .with_version(format!("deeptide-rs {VERSION_LONG}"))
         .with_permission_mode(permission_mode)
         .with_max_turns(cli.max_turns)
+        .with_max_budget_usd(cli.max_budget_usd)
         .with_pricing_overrides(pricing_overrides)
         .with_debug(cli.debug)
         .with_fast_mode(cli.fast)
@@ -3302,6 +3313,9 @@ fn run_prompt_with_events(
         .with_hooks(hooks)
         .with_tool_restrictions(allowed_tools, disallowed_tools)
         .with_subagent_backend_factory(subagent_backend_factory(configured.subagent_config));
+    if let Some(max_usd) = cli.max_budget_usd {
+        loop_ = loop_.with_max_budget_usd(max_usd);
+    }
 
     // Headless permission handling: with a callback installed, gated tools emit
     // a `permission_request` and are resolved from host-supplied responses
@@ -3369,6 +3383,9 @@ fn run_prompt_with_events(
                 return Err(format!(
                     "maximum turns reached ({cap}). Raise the cap with --max-turns N or set `max_turns` in settings.json."
                 ));
+            }
+            AgentLoopEvent::Terminal(AgentTerminalEvent::BudgetExceeded(reason)) => {
+                return Err(reason);
             }
             AgentLoopEvent::Terminal(AgentTerminalEvent::Blocked) => {
                 return Err(String::from(
@@ -5008,6 +5025,7 @@ mod tests {
             effort: None,
             max_output_tokens: 65_536,
             max_turns: 200,
+            max_budget_usd: None,
             system_prompt: None,
             system_prompt_file: None,
             append_system_prompt: None,
@@ -5483,6 +5501,16 @@ mod tests {
             .expect("max turns option should parse");
 
         assert_eq!(cli.max_turns, 7);
+    }
+
+    #[test]
+    fn parses_max_budget_usd_option() {
+        let cli = Cli::try_parse_from(["deeptide", "--max-budget-usd", "2.5", "-p", "hello"])
+            .expect("max budget option should parse");
+        assert_eq!(cli.max_budget_usd, Some(2.5));
+
+        let cli = Cli::try_parse_from(["deeptide", "-p", "hello"]).expect("parses");
+        assert_eq!(cli.max_budget_usd, None);
     }
 
     #[test]
